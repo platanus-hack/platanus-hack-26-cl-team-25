@@ -1,0 +1,26 @@
+# Rebuild httpd from source WITH our proposed diff applied, so the demo proves the patch on a
+# real binary (PoC blocked, legit traffic intact). Single stage: the build image already has
+# the apr/apr-util/pcre runtime libraries, so no second apt pass (bullseye-security is flaky).
+# Build context is cve_replay/.
+FROM debian:bookworm
+ARG SRC=apache-2.4.49
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      build-essential libapr1-dev libaprutil1-dev libpcre3-dev ca-certificates patch curl; \
+    rm -rf /var/lib/apt/lists/*
+COPY releases/${SRC}/ /build/src/
+COPY apache2449/patch.diff /build/patch.diff
+WORKDIR /build/src
+RUN set -eux; \
+    if [ -s /build/patch.diff ]; then patch -p1 --fuzz=0 < /build/patch.diff; fi; \
+    ./configure --prefix=/usr/local/apache2 --enable-mods-shared=reallyall --enable-mpms-shared=all --enable-cgi \
+        >/tmp/conf.log 2>&1 || { tail -40 /tmp/conf.log; false; }; \
+    make -j"$(nproc)" >/tmp/make.log 2>&1 || { tail -80 /tmp/make.log; false; }; \
+    make install >/tmp/inst.log 2>&1 || { tail -40 /tmp/inst.log; false; }
+COPY apache2449/httpd.conf /usr/local/apache2/conf/httpd.conf
+RUN mkdir -p /usr/local/apache2/cgi-bin && \
+    printf '#!/bin/sh\necho "Content-Type: text/plain"\necho ""\necho "cgi ok"\n' \
+      > /usr/local/apache2/cgi-bin/hello && chmod +x /usr/local/apache2/cgi-bin/hello
+EXPOSE 80
+CMD ["/usr/local/apache2/bin/httpd", "-X", "-D", "FOREGROUND"]

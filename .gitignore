@@ -5,3 +5,8 @@ runtime/
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# cve_replay: large upstream source tree (fetched by `run.py prepare`) and run artifacts
+cve_replay/releases/
+cve_replay/runs/
+cve_replay/apache2449/patch.diff
