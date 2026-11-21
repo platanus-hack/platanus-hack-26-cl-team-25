@@ -86,6 +86,40 @@ Cada punto es un sí/no; si falla, `init` vuelve a pedirle al LLM con el error, 
 
 **Fuera de alcance de la v1:** Redis, colas, almacenamiento de objetos, llamadas a terceros y apps de varios servicios. `init` los detecta y los lista en `report.md` como no cubiertos.
 
+## 6b. Oráculos fuera del proceso (cualquier lenguaje)
+
+Para no escribir hooks por lenguaje (.NET, Go, Rust, Java, PHP…), los oráculos salen del proceso de la app y pasan a un **sidecar del clon**. La app corre sin modificar, en su propia imagen.
+
+| Oráculo | Dónde se observa | Depende del lenguaje |
+|---|---|---|
+| SQL | **Proxy del protocolo de la base** entre la app y su base sombra (Postgres, MySQL). Ve la consulta final y aplica el mismo chequeo de valor de entrada que cruza tokens | No |
+| Archivo, proceso, red | Syscalls del contenedor del clon (eBPF o seccomp-notify): `openat`, `execve`, `connect` | No |
+| Dueño | Cuerpo de la respuesta, en el sidecar (marcadores) | No |
+| Atribución al request | Un request a la vez por clon | No |
+| Restauración | Driver de base (plantilla Postgres, etc.) | No |
+
+Lo que se pierde: el **stack con archivo y línea**, que hoy guía al agente de parches. Reemplazos, en orden de preferencia:
+
+1. Agente opcional por runtime que solo aporta el stack (Python y Node primero; OpenTelemetry donde exista).
+2. Sin agente: el LLM localiza el punto a partir de la ruta, el parámetro y la consulta o ruta de archivo observada. La validación sigue siendo mecánica, así que un error de localización se traduce en un parche rechazado, no en uno malo.
+
+Límites: bases embebidas en el proceso (SQLite) no pasan por el proxy y necesitan hook de runtime; consultas preparadas del lado del servidor se evalúan sobre el texto de la sentencia y sus parámetros; binarios estáticos (Go, Rust) funcionan igual porque se observa el kernel, no la librería.
+
+Requisitos del host: Linux con eBPF habilitado o seccomp-notify, y permiso para lanzar contenedores con esos privilegios **solo en el sidecar**.
+
+Los tests y el build por lenguaje (`dotnet test`, `go test`, `cargo test`) los declara `.immune/config.yaml`; `init` los detecta.
+
+## 6c. Camino a producción
+
+Los hooks y oráculos corren **solo en los clones**, nunca en el proceso de prod. En prod se instala el gateway delante de la app y nada más.
+
+1. `immune init` + `immune doctor` en staging.
+2. `observe` en prod: el gateway reenvía todo a prod y detona una copia en paralelo. Riesgo: latencia cero para el cliente, solo cómputo.
+3. `enforce` por rutas, empezando por las de menor riesgo.
+4. `autopatch pr`; `merge` solo con tests y decisión explícita.
+
+Fail-open del gateway y `immune down` como salida en cada etapa.
+
 ## 7. Modos y seguridad por defecto
 
 | Modo | Qué hace |
