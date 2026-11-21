@@ -41,14 +41,26 @@ def segments(template: str) -> list:
     return [s for s in template.split("/") if s != ""]
 
 
+def is_catchall(seg: str) -> bool:
+    return bool(re.fullmatch(r"\{[^}*]+\*\}", seg))
+
+
+def catchall_params(template: str) -> list:
+    return re.findall(r"\{([^}*]+)\*\}", template)
+
+
 def match(template: str, path: str) -> dict | None:
     """{param: value} if the concrete `path` matches `template`, else None."""
     ts, ps = segments(template), [unquote(s) for s in path.split("?")[0].split("/") if s != ""]
+    if ts and is_catchall(ts[-1]):              # {name*}: one or more trailing segments
+        if len(ps) < len(ts):
+            return None
+        ps = ps[:len(ts) - 1] + ["/".join(ps[len(ts) - 1:])]
     if len(ts) != len(ps):
         return None
     out = {}
     for t, p in zip(ts, ps):
-        m = re.fullmatch(r"\{([^}]+)\}", t)
+        m = re.fullmatch(r"\{([^}*]+)\*?\}", t)
         if m:
             out[m.group(1)] = p
         elif t != p:
@@ -88,11 +100,11 @@ def find(spec: dict, method: str, path: str):
 
 
 def path_params(template: str) -> list:
-    return re.findall(r"\{([^}]+)\}", template)
+    return re.findall(r"\{([^}*]+)\*?\}", template)
 
 
 def fill(template: str, values: dict) -> str:
-    return re.sub(r"\{([^}]+)\}", lambda m: str(values.get(m.group(1), m.group(0))), template)
+    return re.sub(r"\{([^}*]+)\*?\}", lambda m: str(values.get(m.group(1), m.group(0))), template)
 
 
 def route_matches(template: str, method: str, step_method: str, step_path: str) -> bool:
