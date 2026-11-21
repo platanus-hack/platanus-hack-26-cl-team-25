@@ -27,7 +27,9 @@ def default_rule(inc: dict, spec: dict, ttl_s: int = 3600) -> dict:
         return rule
     sch = _param_schema(spec, inc["method"], inc["route"], param)
     g = grammar.SAFE_DEFAULT
-    if sch.get("type") == "integer":
+    if param["in"] == "path" and param["name"] in openapi.catchall_params(inc["route"]):
+        g = grammar.PATH_SAFE
+    elif sch.get("type") == "integer":
         g = r"[0-9]{1,9}"
     rule.update(scope="param", param={"in": param["in"], "name": param["name"]}, grammar=g)
     return rule

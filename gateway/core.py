@@ -361,9 +361,11 @@ class Gateway:
             self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
             ctx.route = "shadow_l1"
             return up
+        if builtin:   # a '..' path segment never reaches prod: no oracle sees every file, and browsers never send one
+            return self.deny(ctx)
         if up.verdict == wire.VERDICT_CLEAN:
             return await self.to_prod(ctx)
-        return self.deny(ctx) if (ctx.res.rule_hit or builtin) else await self.to_prod(ctx)   # inconclusive / unknown
+        return self.deny(ctx) if ctx.res.rule_hit else await self.to_prod(ctx)   # inconclusive / unknown
 
     # -- step 8, evidence without detonation: mark captive, bind now, replay in L2
     async def evidence(self, ctx: Ctx) -> Upstream:

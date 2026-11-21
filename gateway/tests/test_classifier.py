@@ -178,3 +178,16 @@ def test_traversal_query_value():
         assert not traversal_in_value(v), v
     r = c("GET", "/anything", "file=..%2F..%2Fetc%2Fpasswd", who=ANON, spec=OFF_SPEC)
     assert "traversal:query.file" in r.reasons
+
+
+def test_catchall_template():
+    from gateway.spec import match_template, split_template
+    segs = split_template("/public/plugins/{pluginId}/{path*}")
+    assert match_template(segs, "/public/plugins/alertlist/img/a.svg") == {"pluginId": "alertlist", "path": "img/a.svg"}
+    assert match_template(segs, "/public/plugins/alertlist") is None
+    spec = Spec({"paths": {"/public/plugins/{pluginId}/{path*}": {"get": {"parameters": [
+        {"name": "pluginId", "in": "path", "schema": {"type": "string"}},
+        {"name": "path", "in": "path", "schema": {"type": "string"}}]}}}})
+    assert c("GET", "/public/plugins/alertlist/img/a.svg", who=ANON, spec=spec).cls == CLEAN   # '/' allowed
+    r = c("GET", "/public/plugins/alertlist/../../etc/passwd", who=ANON, spec=spec)
+    assert r.cls == SUSPECT and "traversal:path" in r.reasons

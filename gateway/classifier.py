@@ -10,7 +10,8 @@ from urllib.parse import parse_qsl, unquote, unquote_plus
 
 from immune_contracts import grammar
 
-from .spec import Operation, Spec, check_json_value, check_string_value, match_template, split_template
+from .spec import (Operation, Spec, check_json_value, check_string_value, is_catchall, match_template,
+                   split_template)
 
 CLEAN, SUSPECT, EVIDENCE, CAPTIVE = "clean", "suspect", "evidence", "captive"
 SAFE_KEY = re.compile(r"[A-Za-z0-9_\-]{1,64}")
@@ -187,14 +188,15 @@ def is_builtin_rule(reasons) -> bool:
 
 # ---------------------------------------------------------------- helpers
 
-def _check_text(res: Result, where: str, name: str, value: str, schema: dict | None, sensitive: bool):
+def _check_text(res: Result, where: str, name: str, value: str, schema: dict | None, sensitive: bool,
+                gram: str = grammar.SAFE_DEFAULT):
     if sensitive:
         return
     if schema is not None:
         bad = check_string_value(value, schema)
         if bad:
             res.add(f"schema:{where}.{name}:{bad}")
-    if not grammar.is_safe_default(value):
+    if not grammar.matches(gram, value):
         res.add(f"grammar:{where}.{name}")
 
 
@@ -303,11 +305,13 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
                 res.add("grammar:query.key")
             _check_text(res, "query", k, v, (p or {}).get("schema") if p else None, sensitive)
 
+        catchall = {s[0] for s in op.segments if is_catchall(s)}
         for name, v in path_params.items():
             p = op.params.get(("path", name)) or {}
             values.setdefault(("path", name), []).append(v)
             sensitive = bool(p.get("x-sensitive") or (p.get("schema") or {}).get("x-sensitive"))
-            _check_text(res, "path", name, v, p.get("schema") or {}, sensitive)
+            _check_text(res, "path", name, v, p.get("schema") or {}, sensitive,
+                        grammar.PATH_SAFE if name in catchall else grammar.SAFE_DEFAULT)
 
         for (where, name), p in op.params.items():
             if where == "header" and name.lower() in view.headers:
