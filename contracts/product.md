@@ -163,3 +163,17 @@ database: {kind: postgres, url_env: DATABASE_URL}
 ## 7. Rules for work packages
 
 Same as `contracts/README.md` §10, plus: the existing acceptance and unit suites must keep passing; the built-in demo (`immune up` in this repo) must behave exactly as `deploy/demo.sh` does today, including the three live remediation flows.
+
+## 8. Self-audit and corpus ("memory")
+
+Config block `audit: {enabled: true, max_jobs: 40, max_seconds: 120}` (default on for `python-asgi`, off for `generic`).
+When an incident of class C closes, the pipeline runs the regression battery of class C (the inputs of the `properties` gate plus the corpus) against every other compatible operation × parameter of the OpenAPI document, on the current release, in the isolated judge only. Each oracle hit opens an incident with `origin: audit` and `parent`, which follows the normal flow. One audit per class per release. Events: `audit.started`, `audit.finding`, `audit.done`.
+Corpus: `<runtime>/corpus/<class>.jsonl`, confirmed parameter values only, deduplicated, 500 per class; kept across `reset`.
+
+## 9. Group-shared access
+
+`columns.yaml`: `tables.<t>.shared_via: {table, member, group}` and `routes.<param>.access: owner|members`. The manifest carries `groups` and `group_routes`; `shadow/sharing.json` sits next to the seed. The owner oracle does not fire for markers of members of the addressed group when the requester belongs to it. `immune init` also generates `.immune/scenarios.py` (legitimate GET journeys) and `doctor` check 8 verifies it is deterministic.
+
+## 10. Generic runtime as built
+
+Per clone: app container (project image, `--cap-drop ALL`), private Postgres, and the observer (`immune-sidecar:1`) sharing the app's network and PID namespaces with `SYS_PTRACE` as its only capability. Extra config keys: `app.build`, `app.workdir`, `app.bind_env`, `app.warmup_paths`, `data.prod_url_env`, `data.demo_postgres`. `pre_state_b64` is null for Postgres.

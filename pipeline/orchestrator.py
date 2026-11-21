@@ -18,7 +18,8 @@ import traceback
 
 from immune_contracts import events as E
 
-from . import incident as incmod, openapi, poc as pocmod, rules, verify
+from . import audit as auditmod, bus as busmod, incident as incmod, openapi, poc as pocmod, reqs, rules, verify
+from .corpus import Corpus
 from .gates import GATES, Validator
 from .repo import RepoError
 
@@ -71,6 +72,7 @@ class Pipeline:
         self._patcher = patcher
         self._patcher_err = None
         self.timings = {}
+        self.corpus = Corpus(os.path.join(cfg.runtime_dir, "corpus"))
 
     # ------------------------------------------------------------ dependencies
     @property
@@ -161,6 +163,19 @@ class Pipeline:
         if self.paused():
             return None
         with self.state.lock:
+            pending = self.state.data.setdefault("audit_pending", [])
+            aid = pending[0] if pending else None
+        if aid is not None:
+            try:
+                self.run_audit(aid)
+            except Exception as e:  # noqa: BLE001
+                log.error("[%s] audit failed: %s\n%s", aid, e, traceback.format_exc())
+            with self.state.lock:
+                if aid in self.state.data["audit_pending"]:
+                    self.state.data["audit_pending"].remove(aid)
+                self.state.save()
+            return aid
+        with self.state.lock:
             q = self.state.data["queue"]
             if not q:
                 return None
@@ -192,6 +207,7 @@ class Pipeline:
         finally:
             for d in inc.pop("_tmp", []):
                 shutil.rmtree(d, ignore_errors=True)
+        self._schedule_audit(inc)
         return inc
 
     def close(self, inc, outcome: str, reason: str, detail: str | None = None):
@@ -210,8 +226,7 @@ class Pipeline:
     def _flow(self, inc):
         cfg = self.cfg
         iid = inc["incident"]
-        self.publish(E.INCIDENT_OPENED, {k: inc[k] for k in ("incident", "vuln_class", "method", "route", "param",
-                                                            "sink", "evidence_rid", "request")}, inc)
+        self.publish(E.INCIDENT_OPENED, self.opened_data(inc), inc)
         app = cfg.reload_project() if hasattr(cfg, "reload_project") else None
         release = self.current_release()
         base_dir = cfg.release_dir(release)
@@ -231,7 +246,8 @@ class Pipeline:
             except Exception as e:  # noqa: BLE001
                 self.note(inc, "patcher.variants failed: %s" % e)
         t = time.time()
-        rep = self.v.reproduce(inc, p, base_dir, extra)
+        cv = self._corpus_variants(inc, p)
+        rep = self.v.reproduce(inc, p, base_dir, extra, corpus=cv) if cv else self.v.reproduce(inc, p, base_dir, extra)
         inc["repro"] = rep
         inc["t"]["poc_s"] = round(time.time() - t, 2)
         self.publish(E.POC_READY, {"incident": iid, "reproducible": rep["reproducible"], "runs": rep["runs"], "poc": p}, inc)
@@ -240,6 +256,7 @@ class Pipeline:
             raise Closed("not_reproducible", "the PoC triggered the %s oracle in %d/3 runs on release %s"
                          % (p["expect"]["oracle"], rep["runs"], release))
         self.note(inc, "PoC reproduces 3/3; %d variants counted" % len(rep["counted"]))
+        self._corpus_add(inc, p, rep)
 
         # 2. containment rule
         raw = None
@@ -389,6 +406,172 @@ class Pipeline:
             raise Closed("rule_only", "deployed, but verification failed (%s; %s); rule re-activated" % (r_detail, g_detail))
         self._safe(self.repo.comment, change, self._timings_comment(inc))
         raise Closed("patched", "release %s deployed and verified" % new_rel)
+
+    # ------------------------------------------------------------ corpus (docs/plan-construccion.md §9d)
+    def _corpus_variants(self, inc, p) -> list:
+        """Corpus values of the incident's class, set into its parameter: extra variants for the reproduction
+        (counted only if they fire on the unpatched release, then judged by the poc gate and verification)."""
+        param = inc.get("param")
+        if not param or inc.get("vuln_class") not in auditmod.ORACLE_OF:
+            return []
+        base = p["requests"][-1]
+        own = reqs.get_value(base, param, inc.get("route"))
+        out = []
+        for val in self.corpus.values(inc["vuln_class"], limit=auditmod.MAX_CORPUS_PER_PROBE):
+            if val == str(own) or (inc["vuln_class"] == "idor" and not val.isdigit()):
+                continue
+            try:
+                out.append((val, reqs.set_value(base, param, val, inc.get("route"))))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _corpus_add(self, inc, p, rep) -> None:
+        param = inc.get("param")
+        if not param or inc.get("vuln_class") not in auditmod.ORACLE_OF:
+            return
+        vals = [reqs.get_value(p["requests"][-1], param, inc.get("route"))]
+        vals += [reqs.get_value(v["request"], param, inc.get("route")) for v in rep.get("counted") or []]
+        try:
+            n = self.corpus.add(inc["vuln_class"], vals, inc["incident"], "%s %s" % (inc["method"], inc["route"]),
+                                "%s:%s" % (param.get("in"), param.get("name")))
+            if n:
+                self.note(inc, "corpus %s: +%d confirmed value(s)" % (inc["vuln_class"], n))
+        except Exception as e:  # noqa: BLE001
+            self.note(inc, "corpus append failed: %s" % e)
+
+    # ------------------------------------------------------------ class self-audit (pipeline/audit.py)
+    def opened_data(self, inc) -> dict:
+        data = {k: inc[k] for k in ("incident", "vuln_class", "method", "route", "param", "sink", "evidence_rid", "request")}
+        data["origin"] = inc.get("origin") or "live"
+        if inc.get("parent"):
+            data["parent"] = inc["parent"]
+        return data
+
+    def audit_settings(self):
+        proj = self.cfg.project
+        a = getattr(proj, "audit", None)
+        if a is None:
+            return False, 40, 120
+        return bool(a.enabled), int(a.max_jobs), float(a.max_seconds)
+
+    def _schedule_audit(self, inc) -> None:
+        if inc.get("outcome") not in ("patched", "rule_only") or inc.get("vuln_class") not in auditmod.ORACLE_OF:
+            return
+        if not self.audit_settings()[0]:
+            return
+        with self.state.lock:
+            pend = self.state.data.setdefault("audit_pending", [])
+            if inc["incident"] not in pend:
+                pend.append(inc["incident"])
+            self.state.save()
+
+    def audit_candidates(self, inc, release: str, manifest: dict) -> tuple:
+        """-> (candidates to judge, why-not text or ""). One audit per class per release; an audit incident's
+        closure only re-audits the candidates no earlier audit of the class has judged; open and closed
+        incidents (any origin) are never probed again."""
+        cls = inc["vuln_class"]
+        with self.state.lock:
+            a = self.state.data.setdefault("audits", {}).setdefault(cls, {"releases": {}, "audited": []})
+            if release in a["releases"]:
+                return [], "class %s was already audited on release %s (by %s)" % (
+                    cls, release, a["releases"][release].get("by"))
+            audited = set(a["audited"])
+            known = set(self.state.data["keys"])
+        out = []
+        for c in auditmod.candidates(self.spec, cls, manifest):
+            k = c.key(cls)
+            if k in known or k == inc.get("key"):
+                continue
+            if inc.get("origin") == "audit" and k in audited:
+                continue
+            out.append(c)
+        return out, ""
+
+    def run_audit(self, iid: str):
+        inc = self.state.incident(iid)
+        cls = inc.get("vuln_class")
+        enabled, max_jobs, max_s = self.audit_settings()
+        if not enabled or cls not in auditmod.ORACLE_OF:
+            return None
+        release = self.current_release()
+        base_dir = self.cfg.release_dir(release)
+        if not self.cfg.project.release_complete(base_dir):
+            self.note(inc, "audit skipped: release dir %s incomplete" % base_dir)
+            return None
+        manifest = {}
+        try:
+            manifest = self.v.manifest(base_dir)
+        except Exception as e:  # noqa: BLE001
+            self.note(inc, "audit: manifest from the judge unavailable (%s); using the host copy" % e)
+            manifest = self.manifest()
+        cands, why = self.audit_candidates(inc, release, manifest)
+        if why:
+            self.note(inc, "audit skipped: " + why)
+            return None
+        if not cands:
+            self.note(inc, "audit: no %s candidate left to judge on release %s" % (cls, release))
+            with self.state.lock:
+                self.state.data["audits"][cls]["releases"][release] = {"by": iid, "checked": [], "ts": time.time()}
+                self.state.save()
+            return None
+        self.bus.publish(busmod.AUDIT_STARTED, {"incident": iid, "vuln_class": cls, "candidates": len(cands)},
+                         incident=iid)
+        self.note(inc, "audit %s on release %s: %d candidate(s)" % (cls, release, len(cands)))
+        found = []
+
+        def on_finding(f):
+            new = self.enqueue_finding(f, inc, release, manifest)
+            if new:
+                found.append(new)
+                self.bus.publish(busmod.AUDIT_FINDING, {"incident": new["incident"], "parent": iid,
+                                                        "route": new["route"], "param": new["param"]},
+                                 incident=new["incident"])
+        res = auditmod.run(self.v, base_dir, cls, cands, manifest, self.corpus.values(cls, auditmod.MAX_CORPUS_PER_PROBE),
+                           max_jobs=max_jobs, max_seconds=max_s, parallel=getattr(self.v, "audit_parallel", 3),
+                           stop=self.paused, release=release, on_finding=on_finding)
+        keys = [c.key(cls) for c in res.checked]
+        with self.state.lock:
+            a = self.state.data["audits"][cls]
+            a["releases"][release] = {"by": iid, "checked": keys, "ts": time.time()}
+            a["audited"] = sorted(set(a["audited"]) | set(keys))
+            inc["audit"] = {"release": release, "candidates": len(cands), "checked": len(res.checked),
+                            "skipped": [[c.label, w] for c, w in res.skipped], "findings": [x["incident"] for x in found],
+                            "jobs": res.jobs, "seconds": res.seconds}
+            self.state.save()
+        self.bus.publish(busmod.AUDIT_DONE, {"incident": iid, "checked": len(res.checked), "findings": len(found),
+                                             "seconds": res.seconds}, incident=iid)
+        self.note(inc, "audit %s done: %d checked, %d skipped, %d finding(s) %s in %.1fs" % (
+            cls, len(res.checked), len(res.skipped), len(found), [x["incident"] for x in found], res.seconds))
+        return res
+
+    def enqueue_finding(self, f, parent: dict, release: str, manifest: dict) -> dict | None:
+        """A probe that fired: incident with origin audit, queued, unless its dedupe key is known."""
+        ts = time.time()
+        ev = dict(f.evidence)
+        with self.state.lock:
+            n = self.state.data.setdefault("audit_seq", 0) + 1
+            self.state.data["audit_seq"] = n
+        ev["rid"] = "audit-%s-%d" % (parent["incident"], n)
+        ev.setdefault("release", release)
+        sk = incmod.build({"type": E.ORACLE_FIRED, "ts": ts, "rid": ev["rid"], "data": ev}, self.spec, manifest)
+        if sk["vuln_class"] != parent["vuln_class"]:
+            log.info("audit probe %s fired %s, not %s: ignored", f.candidate.label, sk["vuln_class"], parent["vuln_class"])
+            return None
+        with self.state.lock:
+            d = self.state.data
+            if sk["key"] in d["keys"]:
+                return None
+            iid = self.state.new_id()
+            sk.update(incident=iid, status="queued", hits=1, queued_at=ts, attempts=[], log=[], origin="audit",
+                      parent=parent["incident"], audit_value=f.value[:200])
+            d["incidents"][iid] = sk
+            d["keys"][sk["key"]] = iid
+            d["queue"].append(iid)
+            self.state.save()
+        log.info("audit finding %s (from %s): %s %s %s param=%s", iid, parent["incident"], sk["vuln_class"],
+                 sk["method"], sk["route"], sk["param"])
+        return sk
 
     # ------------------------------------------------------------ repo helpers
     def _safe(self, fn, *a):

@@ -64,8 +64,10 @@ class Validator:
         return res
 
     # ------------------------------------------------------------ reproduction (before any patch)
-    def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None) -> dict:
-        """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}"""
+    def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None,
+                  corpus: list | None = None) -> dict:
+        """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}
+        `corpus`: [(value, request)] from the class corpus (pipeline/corpus.py), counted like variants."""
         manifest = None
         try:
             manifest = self.manifest(base_dir)
@@ -77,6 +79,12 @@ class Validator:
             nv = pocmod.normalise_variant(v, base)
             if nv:
                 variants.append(("p%d:%s" % (i, (nv.get("query") or nv["path"])[:40]), nv))
+        have = {json.dumps(r, sort_keys=True) for _n, r in variants} | {json.dumps(base, sort_keys=True)}
+        for val, r in corpus or []:
+            k = json.dumps(r, sort_keys=True)
+            if k not in have:
+                have.add(k)
+                variants.append(("c:%s" % str(val)[:40], r))
         seqs = [{"name": "poc", "requests": poc["requests"], "repeat": 3}]
         seqs += [{"name": "v:" + n, "requests": poc["requests"][:-1] + [r]} for n, r in variants]
         res = self.run(base_dir, {"kind": "harness", "state_b64": poc.get("state_b64"), "sequences": seqs})

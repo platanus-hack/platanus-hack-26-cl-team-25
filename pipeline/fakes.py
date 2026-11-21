@@ -21,6 +21,8 @@ from starlette.routing import Route
 
 from immune_contracts import events as E
 
+from .bus import TYPES as BUS_TYPES
+
 
 def free_port() -> int:
     s = socket.socket()
@@ -69,7 +71,7 @@ class FakeBus:
         body = json.loads(await request.body())
         items = body if isinstance(body, list) else [body]
         for it in items:
-            if it.get("type") not in E.TYPES:
+            if it.get("type") not in BUS_TYPES:
                 return JSONResponse({"error": "unknown type"}, 400)
         return JSONResponse({"ok": True, "seqs": [self.add(it) for it in items]})
 

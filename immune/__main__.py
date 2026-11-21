@@ -430,14 +430,24 @@ def report(cfg: icfg.Config) -> dict:
         inc = incidents.setdefault(iid, {"incident": iid})
         if e.get("type") == "incident.opened":
             inc.update({k: d.get(k) for k in ("vuln_class", "method", "route")})
+            inc["origin"] = d.get("origin") or "live"
+            if d.get("parent"):
+                inc["parent"] = d["parent"]
         elif e.get("type") == "incident.closed":
             inc.update({k: d.get(k) for k in ("outcome", "outcome_detail", "seconds_to_rule", "seconds_to_patch")})
         elif e.get("type") == "verify.result":
             inc["exploit_blocked_on_prod"] = d.get("exploit_blocked_on_prod")
-    return {"project": cfg.name, "mode": cfg.mode, "events": len(evs), "requests": len(routed),
+    from . import metrics
+    det = metrics.detection(evs, metrics.load_recording(cfg.record_path))
+    return {"project": cfg.name, "mode": cfg.mode, "events": len(evs), "requests": len(routed), "detection": det,
             "classes": dict(classes), "routes": dict(routes), "detonations": sum(verdicts.values()),
             "verdicts": dict(verdicts), "oracles": dict(oracles), "oracle_fired": types.get("oracle.fired", 0),
             "would_have": dict(would), "incidents": list(incidents.values())}
+
+
+def metrics_lines(det: dict) -> list:
+    from . import metrics
+    return metrics.detection_lines(det)
 
 
 def cmd_report(cfg: icfg.Config, as_json: bool) -> int:
@@ -455,10 +465,13 @@ def cmd_report(cfg: icfg.Config, as_json: bool) -> int:
             "%s=%d" % kv for kv in sorted(r["would_have"].items(), key=str)))
         n = sum(v for k, v in r["would_have"].items() if k not in ("prod", None))
         say("  -> %d request(s) would have been denied or diverted to a shadow clone" % n)
+    for line in metrics_lines(r["detection"]):
+        say("  " + line)
     say("  incidents: %d" % len(r["incidents"]))
     for i in r["incidents"]:
-        say("    %s %s %s %s -> %s%s (rule %ss, patch %ss)%s" % (
-            i["incident"], i.get("vuln_class"), i.get("method"), i.get("route"), i.get("outcome") or "open",
+        say("    %s %-5s %s %s %s -> %s%s (rule %ss, patch %ss)%s" % (
+            i["incident"], i.get("origin") or "live", i.get("vuln_class"), i.get("method"), i.get("route"),
+            i.get("outcome") or "open",
             "/" + i["outcome_detail"] if i.get("outcome_detail") else "", i.get("seconds_to_rule"),
             i.get("seconds_to_patch"),
             "" if i.get("exploit_blocked_on_prod") is None else " blocked_on_prod=%s" % i["exploit_blocked_on_prod"]))

@@ -23,6 +23,9 @@ STATIC = Path(__file__).resolve().parent / "static"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 HEARTBEAT_S = 15.0
+# pipeline audit.* events (pipeline/bus.py), accepted until immune_contracts/events.py lists them
+EXTRA_TYPES = ("audit.started", "audit.finding", "audit.done")
+TYPES = frozenset(ev_contract.TYPES) | frozenset(EXTRA_TYPES)
 FILES = {"app.js": "text/javascript", "state.js": "text/javascript", "style.css": "text/css"}
 
 
@@ -97,7 +100,7 @@ def _validate(item) -> str | None:
     if not isinstance(item, dict):
         return "event must be an object"
     t = item.get("type")
-    if t not in ev_contract.TYPES:
+    if t not in TYPES:
         return f"unknown type: {t!r}"
     if "data" in item and not isinstance(item["data"], dict):
         return "data must be an object"

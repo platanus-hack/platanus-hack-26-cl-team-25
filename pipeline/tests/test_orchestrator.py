@@ -25,7 +25,7 @@ class ScriptedValidator:
         self.reproducible, self.plan, self.calls, self.cache = reproducible, list(plan or []), [], {}
         self.diffs = []
 
-    def reproduce(self, inc, p, base_dir, extra=None):
+    def reproduce(self, inc, p, base_dir, extra=None, corpus=None):
         return {"runs": 3 if self.reproducible else 1, "of": 3, "reproducible": self.reproducible, "counted": [],
                 "ignored": [], "sink_match": True, "statuses": [200] * 3}
 
@@ -74,12 +74,15 @@ def env(tmp_path, monkeypatch):
     fl.stop()
 
 
-def make(env, validator=None, patcher=stub_patcher):
+def make(env, validator=None, patcher=stub_patcher, audit=False):
     cfg = env["cfg"]
     st = State(os.path.join(cfg.state_dir, "state.json"))
-    return Pipeline(cfg, st, Publisher(cfg.bus_url, cfg.bus_token, cfg.run_id), GatewayAdmin(cfg.gateway_admin_url, "at"),
-                    Fleet(cfg.fleet_url, "at"), LocalRepo(os.path.join(env["rt"], "repo"), "t", cfg.release_dir("t0")),
-                    validator=validator or ScriptedValidator(), patcher=patcher)
+    p = Pipeline(cfg, st, Publisher(cfg.bus_url, cfg.bus_token, cfg.run_id), GatewayAdmin(cfg.gateway_admin_url, "at"),
+                 Fleet(cfg.fleet_url, "at"), LocalRepo(os.path.join(env["rt"], "repo"), "t", cfg.release_dir("t0")),
+                 validator=validator or ScriptedValidator(), patcher=patcher)
+    if not audit:   # the class self-audit has its own tests (test_audit.py)
+        p.audit_settings = lambda: (False, 40, 120)
+    return p
 
 
 def seq(env, iid):

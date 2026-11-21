@@ -525,6 +525,7 @@ def check_generic(diff: str, base_dir: str, patched_dir: str, max_lines: int = 1
 
 class JudgeValidator(Validator):
     """The five gates for app.runtime generic: same gate logic, judged on clone triples; language-neutral policy."""
+    audit_parallel = 1      # JudgeRunner runs one triple at a time
 
     def __init__(self, cfg, runner=None):
         super().__init__(cfg, runner or JudgeRunner(cfg))
