@@ -6,8 +6,8 @@ Speaks the same clone protocol as `shadow/` (contracts/README.md §5), so the ga
 2. buffer the whole response (decoded);
 3. `file` oracle: the body contains a marker planted in a protected file of the shadow (grafana.ini, the
    app database, /etc/passwd ...). The marker map says which file each marker lives in. With
-   SYSCALL_CONTAINER set, also: the app process opened a protected path while serving this request
-   (sidecar/syscalls.py), whether or not the content reached the response;
+   SYSCALL_CONTAINER set, also what the app process did while serving this request (sidecar/syscalls.py):
+   `file` it opened a protected path, `proc` it executed a program, `net` it connected to an address;
 4. verdict: oracle if any event; else inconclusive on 401/404/>=500; else clean;
 5. on oracle, POST the signed evidence to {COLLECTOR_URL}/_clone/evidence before releasing the response;
 6. release the response with x-imm-verdict / x-imm-events.
@@ -29,7 +29,7 @@ import time
 import httpx
 
 from immune_contracts import wire
-from .syscalls import Tracer, tracer_cmd
+from .syscalls import Policy, Tracer, tracer_cmd
 
 log = logging.getLogger("sidecar")
 
@@ -49,7 +49,7 @@ class Config:
     timeout_s: float = 15.0
     syscall_container: str = ""               # app container to trace; empty = marker oracle only
     syscall_image: str = "immune-strace:1"
-    syscall_protected: list = field(default_factory=list)   # globs; the marker paths are always included
+    syscall_policy: str = ""                  # JSON {protected, exec_allow, net_allow}; marker paths are always protected
     syscall_label: str = ""
     syscall_settle_s: float = 0.1
 
@@ -67,7 +67,7 @@ class Config:
                    timeout_s=float(env.get("SIDECAR_TIMEOUT_S", "15")),
                    syscall_container=env.get("SYSCALL_CONTAINER", ""),
                    syscall_image=env.get("SYSCALL_IMAGE", "immune-strace:1"),
-                   syscall_protected=[p for p in env.get("SYSCALL_PROTECTED", "").split(",") if p],
+                   syscall_policy=env.get("SYSCALL_POLICY", ""),
                    syscall_label=env.get("SYSCALL_LABEL", ""),
                    syscall_settle_s=float(env.get("SYSCALL_SETTLE_S", "0.1")))
 
@@ -81,8 +81,11 @@ def find_markers(body: bytes, markers: dict) -> list:
     return found
 
 
-def file_events(leaked: list, opened: list) -> list:
-    """One `file` event per protected file: seen in the response (marker), opened by the process (syscall), or both."""
+def oracle_events(leaked: list, observed: list) -> list:
+    """Events of one request: markers seen in the response plus what the tracer saw the process do.
+
+    One `file` event per protected file (marker, syscall, or both), one `proc` per program, one `net` per address.
+    """
     events, by_path = [], {}
     for m, info in leaked:
         p = info.get("path", "")
@@ -90,15 +93,20 @@ def file_events(leaked: list, opened: list) -> list:
               "stack": []}
         events.append(ev)
         by_path.setdefault(p, []).append(ev)
-    for o in opened:
-        same = by_path.get(o["realpath"])
-        if same:
-            for ev in same:
-                ev["detail"]["observed"] = "response+syscall"
-            continue
-        events.append({"oracle": wire.ORACLE_FILE,
-                       "detail": {"path": o["path"], "realpath": o["realpath"], "observed": "syscall",
-                                  "result": o["result"]}, "stack": []})
+    for o in observed:
+        if o["kind"] == "proc":
+            detail = {"event": "execve", "args": o["args"]}
+        elif o["kind"] == "net":
+            detail = {"event": "connect", "address": o["address"]}
+        else:
+            same = by_path.get(o["realpath"])
+            if same:
+                for ev in same:
+                    ev["detail"]["observed"] = "response+syscall"
+                continue
+            detail = {"path": o["path"], "realpath": o["realpath"]}
+        events.append({"oracle": {"proc": wire.ORACLE_PROC, "net": wire.ORACLE_NET}.get(o["kind"], wire.ORACLE_FILE),
+                       "detail": dict(detail, observed="syscall", result=o["result"]), "stack": []})
     return events
 
 
@@ -116,9 +124,9 @@ class Sidecar:
         self.tracer = tracer
         if tracer is None and cfg.syscall_container:
             name = "%s-strace" % cfg.syscall_container
-            patterns = sorted({i.get("path", "") for i in cfg.markers.values()} | set(cfg.syscall_protected))
+            policy = Policy.load(cfg.syscall_policy, [i.get("path", "") for i in cfg.markers.values()])
             self.tracer = Tracer(tracer_cmd(cfg.syscall_container, cfg.syscall_image, name, cfg.syscall_label),
-                                 [p for p in patterns if p], cfg.syscall_settle_s, name)
+                                 policy, cfg.syscall_settle_s, name)
         self.lock = asyncio.Lock()
         self.client = httpx.AsyncClient(timeout=cfg.timeout_s, follow_redirects=False)
         self.push_client = httpx.AsyncClient(timeout=3.0)
@@ -183,7 +191,7 @@ class Sidecar:
                 return 502, [("content-type", "application/json"), (wire.H_VERDICT, wire.VERDICT_INCONCLUSIVE),
                              (wire.H_EVENTS, "0")], b'{"detail":"Bad Gateway"}'
             opened = await self.tracer.window(t0, time.time()) if self.tracer else []
-            events = file_events(find_markers(rbody, self.cfg.markers), opened)
+            events = oracle_events(find_markers(rbody, self.cfg.markers), opened)
             verdict = verdict_of(status, events)
             if verdict == wire.VERDICT_ORACLE:
                 await self._push({

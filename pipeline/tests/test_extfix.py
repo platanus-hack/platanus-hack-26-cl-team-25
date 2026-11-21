@@ -65,3 +65,18 @@ def test_published_events_match_the_bus_contract(fx):
         if type_ in FIELDS and "**" not in keys:
             got = set(re.findall(r'"([a-z_]+)":', keys))
             assert got == FIELDS[type_], (type_, got)
+
+
+def test_prompt_and_describe_cover_proc_and_net_events(fx):
+    from pipeline.extfix import describe
+    proc = {"oracle": "proc", "detail": {"event": "execve", "args": ["/bin/sh", "sh", "-c", "id"],
+                                         "observed": "syscall", "result": "ok"}, "stack": []}
+    net = {"oracle": "net", "detail": {"event": "connect", "address": "169.254.169.254:80", "observed": "syscall",
+                                       "result": "EINPROGRESS"}, "stack": []}
+    blind = {"oracle": "file", "detail": {"path": "/etc/shadow", "observed": "syscall", "result": "EACCES"}}
+    assert "executed the program `/bin/sh sh -c id`" in describe(proc)
+    assert "connection to `169.254.169.254:80`" in describe(net) and "failed" not in describe(net)
+    assert "opened `/etc/shadow`" in describe(blind) and "EACCES" in describe(blind)
+    inc = dict(INC, oracle="proc", evidence={"events": [blind, proc]})
+    p = fx.prompt(inc, [], 1)
+    assert "executed the program" in p and "choose the program that runs" in p

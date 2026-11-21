@@ -33,7 +33,8 @@ import httpx
 import yaml
 
 from patcher import claude_cli
-from sidecar.core import find_markers
+from sidecar.core import find_markers, oracle_events
+from sidecar.syscalls import Policy, SyncTracer, tracer_cmd
 
 from . import poc as pocmod
 from .config import REPO_ROOT
@@ -105,6 +106,32 @@ def wait_health(base: str, path: str, timeout: float = 90.0) -> bool:
             pass
         time.sleep(1)
     return False
+
+
+def describe(event: dict) -> str:
+    """One oracle event in words, for the prompt and the gate output."""
+    d, how = event.get("detail") or {}, ""
+    if "syscall" in str(d.get("observed", "")):
+        how = " (seen as a system call of the app process%s)" % (
+            "; the call failed with %s, the attempt is the bug" % d["result"]
+            if d.get("result") not in (None, "ok", "?", "EINPROGRESS") else "")
+    if event.get("oracle") == "proc":
+        return "the app executed the program `%s`%s" % (" ".join(d.get("args") or [])[:200], how)
+    if event.get("oracle") == "net":
+        return "the app opened a connection to `%s`%s" % (d.get("address", "?"), how)
+    verb = "returned the contents of" if "response" in str(d.get("observed", "response")) else "opened"
+    return "the app %s `%s`, a file outside what this route serves%s" % (verb, d.get("path", "?"), how)
+
+
+TASK = {
+    "file": "guarantees the resolved file stays inside the directory the route serves, for any encoding of the\n"
+            "   input; requests outside it must get the route's normal not-found response, without opening the file.\n"
+            "   Legitimate files (including names with dots and nested folders) must keep working.",
+    "proc": "guarantees request input can never choose the program that runs or add arguments or shell syntax to\n"
+            "   it; invalid input must get the route's normal error response. Legitimate requests must keep working.",
+    "net": "guarantees request input can never make the server connect to a destination the route is not meant\n"
+           "   to reach; such requests must get the route's normal error response. Legitimate requests must keep working.",
+}
 
 
 @dataclass
@@ -186,7 +213,8 @@ class ExtFix:
 
     def prompt(self, inc: dict, feedback: list, attempt: int) -> str:
         ev = inc["evidence"]
-        prim = next((e for e in ev.get("events") or [] if e.get("oracle") == "file"), {})
+        prim = next((e for e in ev.get("events") or [] if e.get("oracle") == inc.get("oracle")),
+                    (ev.get("events") or [{}])[0])
         rq = inc["request"]
         lines = [
             "You are fixing a confirmed security bug in %s (%s). The repository is your working directory."
@@ -195,16 +223,13 @@ class ExtFix:
             "Confirmed by execution in an isolated copy of the app (not a guess):",
             "- vulnerability class: %s" % inc["vuln_class"],
             "- route: %s %s (parameter `%s`)" % (inc["method"], inc["route"], (inc.get("param") or {}).get("name")),
-            "- the request below returned the contents of `%s`, a file outside the directory this route serves:"
-            % (prim.get("detail") or {}).get("path", "?"),
+            "- while serving the request below, %s:" % describe(prim),
             "",
             "````", "%s %s%s" % (rq["method"], rq["path"], ("?" + rq["query"]) if rq.get("query") else ""), "````",
             "",
             "Task:",
             "1. Find the handler that serves this route (start from the route registration).",
-            "2. Make the smallest change that guarantees the resolved file stays inside the directory the route",
-            "   serves, for any encoding of the input; requests outside it must get the route's normal not-found",
-            "   response. Legitimate files (including names with dots and nested folders) must keep working.",
+            "2. Make the smallest change that " + TASK.get(prim.get("oracle"), TASK["file"]),
             "3. Edit only non-test files under: %s. Do not touch tests, build files or dependencies." %
             ", ".join(self.t["source_dirs"]),
             "4. Standard library only. Keep the code style of the file.",
@@ -270,18 +295,39 @@ class ExtFix:
         return "http://127.0.0.1:%d" % c["port"]
 
     def g_poc(self, inc, a: Attempt, base: str) -> str:
+        """No oracle may fire on the candidate: no marker in a response and, with `oracles` configured, no
+        protected file opened, program executed or address connected while serving the request."""
         with open(os.path.join(self.rt, "shadow", "markers.json")) as f:
             markers = json.load(f)
         p = inc["poc"]
         reqs = [("regression", p["requests"][-1])] + pocmod.mutate(inc, p)
-        for name, rq in reqs:
-            target = rq["path"] + ("?" + rq["query"] if rq.get("query") else "")
-            r = raw_get(base, target)
-            leaked = find_markers(r.content, markers)
-            if leaked:
-                raise GateFail("poc", "%s still leaks %s (status %d): %s" % (
-                    name, leaked[0][1].get("path"), r.status_code, target))
-        return "regression + %d variants: no protected file leaks" % (len(reqs) - 1)
+        orc = self.t.get("oracles")
+        tracer = None
+        if orc:
+            name = "%s-candidate" % self.prefix
+            policy = Policy.load(orc.get("policy", ""), [m.get("path", "") for m in markers.values()])
+            tracer = SyncTracer(tracer_cmd(name, orc.get("image", "immune-strace:1"), name + "-strace",
+                                           "immune.lab=grafana"), policy, name=name + "-strace")
+        try:
+            if tracer:
+                tracer.__enter__()
+                if not tracer.wait_attached(lambda: raw_get(base, self.t["app"]["health"])):
+                    raise RuntimeError("syscall tracer did not attach to the candidate: %s"
+                                       % " | ".join(tracer.output[-3:]))
+            for name, rq in reqs:
+                target = rq["path"] + ("?" + rq["query"] if rq.get("query") else "")
+                t0 = time.time()
+                r = raw_get(base, target)
+                seen = tracer.window(t0, time.time()) if tracer else []
+                events = oracle_events(find_markers(r.content, markers), seen)
+                if events:
+                    raise GateFail("poc", "%s still fires the %s oracle (status %d): %s; request: %s" % (
+                        name, events[0]["oracle"], r.status_code, describe(events[0]), target))
+        finally:
+            if tracer:
+                tracer.__exit__(None, None, None)
+        return "regression + %d variants: no oracle fires (%s)" % (
+            len(reqs) - 1, "response markers + syscalls" if tracer else "response markers")
 
     def g_legit(self, inc, a: Attempt, base: str) -> str:
         ref = "http://127.0.0.1:%d" % self.t["deploy"]["shadow"]["port"]
