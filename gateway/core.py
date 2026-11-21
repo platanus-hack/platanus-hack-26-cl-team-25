@@ -25,7 +25,7 @@ from starlette.routing import Route
 from immune_contracts import authtoken, events, wire
 
 from . import l0
-from .classifier import (CAPTIVE, CLEAN, EVIDENCE, SUSPECT, EnumTracker, Manifest, Result, Rule, View, Who,
+from .classifier import (CAPTIVE, CLEAN, EVIDENCE, SUSPECT, EnumTracker, Manifest, Result, Rule, View, Who, is_builtin_rule,
                          classify, redact_form, redact_json, redact_query, REDACTED)
 from .pool import Clone, Pool
 from .bus import Bus
@@ -337,7 +337,8 @@ class Gateway:
 
     # -- step 7
     async def detonate(self, ctx: Ctx) -> Upstream:
-        fail_closed = bool(ctx.res.rule_hit) or _high_signal(ctx.res.reasons)
+        builtin = is_builtin_rule(ctx.res.reasons)
+        fail_closed = bool(ctx.res.rule_hit) or builtin or _high_signal(ctx.res.reasons)
         clone = await self.pool.acquire(CLONE_WAIT_S)
         if clone is None:
             await self._evict_oldest(ctx)
@@ -360,6 +361,8 @@ class Gateway:
             self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
             ctx.route = "shadow_l1"
             return up
+        if builtin:   # a '..' path segment never reaches prod: no oracle sees every file, and browsers never send one
+            return self.deny(ctx)
         if up.verdict == wire.VERDICT_CLEAN:
             return await self.to_prod(ctx)
         return self.deny(ctx) if ctx.res.rule_hit else await self.to_prod(ctx)   # inconclusive / unknown
@@ -427,6 +430,11 @@ class Gateway:
         raw = ctx.raw_path + ("?" + ctx.query if ctx.query else "")
         return httpx.URL(scheme="http", host=host, port=int(port), raw_path=raw.encode("latin-1"))
 
+    def _target(self, ctx: Ctx) -> dict:
+        """Forward the client's request target byte for byte: httpx would otherwise resolve dot segments
+        ('/a/../b' -> '/b'), so clones would never see the request that prod would have received."""
+        return {"target": (ctx.raw_path + ("?" + ctx.query if ctx.query else "")).encode("latin-1")}
+
     def _out_headers(self, ctx: Ctx) -> list:
         return [(k, v) for k, v in ctx.headers if k not in HOP]
 
@@ -439,7 +447,8 @@ class Gateway:
         try:
             try:
                 req = self.prod_client.build_request(ctx.method, self._url(addr, ctx), headers=self._out_headers(ctx),
-                                                     content=ctx.body if ctx.body else None)
+                                                     content=ctx.body if ctx.body else None,
+                                                     extensions=self._target(ctx))
                 r = await self.prod_client.send(req)
                 up = Upstream(r.status_code, _clean_resp_headers(r.headers.multi_items()), r.content)
             except httpx.TimeoutException:
@@ -466,7 +475,7 @@ class Gateway:
         while len(self.rid_ctx) > 20000:
             self.rid_ctx.popitem(last=False)
         req = self.clone_client.build_request(ctx.method, self._url(clone.addr, ctx), headers=headers,
-                                              content=ctx.body if ctx.body else None)
+                                              content=ctx.body if ctx.body else None, extensions=self._target(ctx))
         r = await self.clone_client.send(req)
         verdict = (r.headers.get(wire.H_VERDICT) or "").strip().lower()
         if verdict not in wire.VERDICTS:
@@ -700,8 +709,8 @@ class Gateway:
 
 
 def _high_signal(reasons) -> bool:
-    """Schema/grammar violation or duplicated parameter (contract §6 step 7)."""
-    return any(r.startswith(("schema:", "grammar:", "dup_query:")) for r in reasons)
+    """Schema/grammar violation, duplicated parameter or traversal (contract §6 step 7)."""
+    return any(r.startswith(("schema:", "grammar:", "dup_query:", "traversal:")) for r in reasons)
 
 
 def _cookie(header: str, name: str) -> str | None:

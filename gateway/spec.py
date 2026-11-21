@@ -41,14 +41,26 @@ def split_template(template: str) -> list:
     """'/a/{x}/b' -> ['a', ('x',), 'b'] (tuples are parameters)."""
     out = []
     for seg in template.strip("/").split("/") if template.strip("/") else []:
-        m = re.fullmatch(r"\{([^}]+)\}", seg)
-        out.append((m.group(1),) if m else seg)
+        m = re.fullmatch(r"\{([^}*]+)(\*?)\}", seg)
+        out.append(((m.group(1), "*") if m.group(2) else (m.group(1),)) if m else seg)
     return out
+
+
+def is_catchall(seg) -> bool:
+    return isinstance(seg, tuple) and len(seg) > 1
 
 
 def match_template(segments: list, raw_path: str) -> dict | None:
     """Match a raw (percent-encoded) path against template segments. Returns decoded path params."""
     parts = raw_path.strip("/").split("/") if raw_path.strip("/") else []
+    if segments and is_catchall(segments[-1]):          # {name*}: one or more trailing segments
+        n = len(segments) - 1
+        if len(parts) <= n:
+            return None
+        rest = parts[n:]
+        if any(p == "" for p in rest):
+            return None
+        parts = parts[:n] + ["/".join(rest)]
     if len(parts) != len(segments):
         return None
     params = {}

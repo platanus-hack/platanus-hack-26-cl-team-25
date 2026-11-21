@@ -212,3 +212,17 @@ def test_git_style_diff_inside_enclosing_repo(tmp_path, t0):
     diffs.apply(d, work)
     assert "commonpath" in open(os.path.join(work, "victim/app/files.py")).read()
     assert not (outer / "victim").exists()
+
+
+def test_catchall_route_and_rule():
+    from immune_contracts import grammar
+    from pipeline import openapi, rules
+    tpl = "/public/plugins/{pluginId}/{path*}"
+    assert openapi.match(tpl, "/public/plugins/a/../../etc/passwd") == {"pluginId": "a", "path": "../../etc/passwd"}
+    assert openapi.path_params(tpl) == ["pluginId", "path"]
+    assert openapi.fill(tpl, {"pluginId": "a", "path": "img/x.svg"}) == "/public/plugins/a/img/x.svg"
+    inc = {"incident": "inc-1", "method": "GET", "route": tpl, "vuln_class": "traversal",
+           "param": {"in": "path", "name": "path"}}
+    r = rules.default_rule(inc, {})
+    assert r["grammar"] == grammar.PATH_SAFE and grammar.matches(r["grammar"], "img/x.svg")
+    assert not grammar.matches(r["grammar"], "../../etc/passwd")
