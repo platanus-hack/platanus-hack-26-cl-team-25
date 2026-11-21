@@ -21,9 +21,9 @@ def _read(name: str) -> str:
         return f.read()
 
 
-def _class_rules(vuln_class: str) -> str:
+def _class_rules(vuln_class: str, fname: str = "classes.md") -> str:
     sections, cur = {}, None
-    for line in _read("classes.md").splitlines(keepends=True):
+    for line in _read(fname).splitlines(keepends=True):
         m = re.fullmatch(r"## (\w+)\s*", line)
         if m and m.group(1) in ("sqli", "traversal", "idor", "other"):
             cur = m.group(1)
@@ -70,6 +70,14 @@ def stack_frames(incident: dict) -> list[dict]:
     return out
 
 
+def _templates(lang: str | None) -> tuple[str, str]:
+    """(fix prompt, classes prompt) for a language. Python is the default, so an incident
+    without `lang` renders exactly the prompts it always did."""
+    if lang and lang != "py":
+        return f"fix_{lang}.md", f"classes_{lang}.md"
+    return "fix.md", "classes.md"
+
+
 def _source_dirs(dirs=None) -> list[str]:
     if dirs is None:
         from immune import config as icfg
@@ -81,6 +89,10 @@ def editable_files(incident: dict, workdir: str, source_dirs: list[str] | None =
     """Files the model may edit (relative to workdir): the app files of the stack under
     `app.source_dirs`, except a file that only appears as the innermost frame below app code
     (the generic DB helper the statement reached, not where it was built), plus the reported sink file."""
+    explicit = incident.get("editable_files")
+    if explicit:
+        return [f for f in (os.path.normpath(str(x)) for x in explicit)
+                if os.path.isfile(os.path.join(workdir, f))]
     dirs = _source_dirs(source_dirs)
     cands = []
     for e in (incident.get("evidence") or {}).get("events") or []:
@@ -100,6 +112,8 @@ def editable_files(incident: dict, workdir: str, source_dirs: list[str] | None =
 
 
 def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, editable: list[str]) -> str:
+    lang = incident.get("lang")
+    fix_tmpl, classes_tmpl = _templates(lang)
     nonce = secrets.token_hex(8)
     evidence_json = json.dumps(_evidence_record(incident), indent=1, ensure_ascii=True, sort_keys=True)
     fb_text = "\n\n".join(_clip(str(f)) for f in (feedback or []) if str(f).strip())
@@ -113,15 +127,17 @@ def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, edit
     if fb_text:
         feedback_section = Template(_read("feedback.md")).safe_substitute(
             attempt=max(1, attempt - 1), nonce=nonce, feedback=fb_text)
-    return Template(_read("fix.md")).safe_substitute(
+    return Template(_read(fix_tmpl)).safe_substitute(
         vuln_class=incident.get("vuln_class", "other"),
         method=incident.get("method", "?"),
         route=incident.get("route", "?"),
         param=(f"{param.get('name')} (in {param.get('in')})" if param.get("name") else "(none)"),
         sink=(f"{sink.get('file')}:{sink.get('line')}" if sink.get("file") else "(unknown)"),
         stack=stack,
-        editable_files=", ".join(f"`{e}`" for e in editable) or ", ".join(f"`{d}/*.py`" for d in _source_dirs()),
-        class_rules=_class_rules(incident.get("vuln_class", "other")),
+        editable_files=(", ".join(f"`{e}`" for e in editable)
+                        or (", ".join(f"`{d}/*.py`" for d in _source_dirs())
+                            if not lang or lang == "py" else "the files listed above")),
+        class_rules=_class_rules(incident.get("vuln_class", "other"), classes_tmpl),
         nonce=nonce,
         evidence_json=evidence_json,
         feedback_section=feedback_section,
@@ -131,7 +147,7 @@ def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, edit
 def propose(release_dir: str, incident: dict, feedback: list[str] | None = None, attempt: int = 1) -> dict:
     if os.environ.get("PATCHER_FORCE_FALLBACK") == "1":
         return apply_fallback(release_dir, incident, "PATCHER_FORCE_FALLBACK=1")
-    with Workspace(release_dir) as ws:
+    with Workspace(release_dir, paths=incident.get("app_subdirs")) as ws:
         editable = editable_files(incident, ws.work)
         prompt = render_prompt(incident, feedback, attempt, editable)
         res = claude_cli.run(prompt, ws.work, editable)
