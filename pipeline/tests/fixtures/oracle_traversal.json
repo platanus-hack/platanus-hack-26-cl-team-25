@@ -1,0 +1,50 @@
+{
+ "type": "oracle.fired",
+ "ts": 1795259658.6222064,
+ "run": "dev",
+ "src": "gateway",
+ "rid": "1fa30ebb78d54027bfbb006cd47060a6",
+ "incident": null,
+ "data": {
+  "clone": "clone-3",
+  "events": [
+   {
+    "detail": {
+     "path": "/srv/victim/static/manuals/../../../../../../../../etc/hostname",
+     "realpath": "/etc/hostname"
+    },
+    "oracle": "file",
+    "stack": [
+     {
+      "file": "victim/app/files.py",
+      "func": "download",
+      "line": 20
+     }
+    ]
+   }
+  ],
+  "mode": "L1",
+  "pre_state_b64": null,
+  "release": "t0",
+  "request": {
+   "body_b64": "",
+   "headers": {
+    "accept": "*/*",
+    "accept-encoding": "gzip, deflate",
+    "connection": "keep-alive",
+    "host": "immune-clone-3:8000",
+    "user-agent": "curl/8.5.0"
+   },
+   "method": "GET",
+   "path": "/api/files/download",
+   "query": "name=../../../../../../../../etc/hostname"
+  },
+  "rid": "1fa30ebb78d54027bfbb006cd47060a6",
+  "role": null,
+  "status": 200,
+  "uid": null,
+  "verdict": "oracle",
+  "session": "gwsid:MNZKtI17c7Fk3ZrD2cwRJOa7"
+ },
+ "seq": 14
+}

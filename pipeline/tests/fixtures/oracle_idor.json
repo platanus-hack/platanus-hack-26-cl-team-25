@@ -1,0 +1,66 @@
+{
+ "type": "oracle.fired",
+ "ts": 1795259658.7984133,
+ "run": "dev",
+ "src": "gateway",
+ "rid": "c77194005e9e42a390ea7b9d7014b3cd",
+ "incident": null,
+ "data": {
+  "clone": "clone-4",
+  "events": [
+   {
+    "detail": {
+     "marker_owner": 6,
+     "requester": 61
+    },
+    "oracle": "owner",
+    "stack": [
+     {
+      "file": "victim/app/orders.py",
+      "func": "get_order",
+      "line": 82
+     },
+     {
+      "file": "victim/app/orders.py",
+      "func": "full",
+      "line": 33
+     },
+     {
+      "file": "victim/app/orders.py",
+      "func": "lines",
+      "line": 25
+     },
+     {
+      "file": "victim/app/db.py",
+      "func": "fetch",
+      "line": 25
+     }
+    ]
+   }
+  ],
+  "mode": "L1",
+  "pre_state_b64": null,
+  "release": "t0",
+  "request": {
+   "body_b64": "",
+   "headers": {
+    "accept": "*/*",
+    "accept-encoding": "gzip, deflate",
+    "authorization": "Bearer eyJ1aWQiOjYxLCJyb2xlIjoidXNlciIsImV4cCI6MTc5NTM0NjA1OH0.c8b02c991b82219a8f7d65a5741fb186e307624800a113d0e66bed62bba9d7cd",
+    "connection": "keep-alive",
+    "host": "immune-clone-4:8000",
+    "user-agent": "curl/8.5.0"
+   },
+   "method": "GET",
+   "path": "/api/orders/5",
+   "query": ""
+  },
+  "rid": "c77194005e9e42a390ea7b9d7014b3cd",
+  "role": "user",
+  "status": 200,
+  "uid": 61,
+  "verdict": "oracle",
+  "session": "uid:61"
+ },
+ "seq": 18
+}

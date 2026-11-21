@@ -1,0 +1,85 @@
+{
+ "type": "oracle.fired",
+ "ts": 1795259658.4678504,
+ "run": "dev",
+ "src": "gateway",
+ "rid": "803986064b704ad893206de6ef14d043",
+ "incident": null,
+ "data": {
+  "clone": "clone-1",
+  "events": [
+   {
+    "detail": {
+     "input": "zzzzzz' OR '1'='1",
+     "location": "query",
+     "param": "q",
+     "reason": "structure",
+     "statement": "SELECT COUNT(*) AS n FROM products WHERE (name LIKE '%zzzzzz' OR '1'='1%' OR category LIKE 'zzzzzz' OR '1'='1')"
+    },
+    "oracle": "sql",
+    "stack": [
+     {
+      "file": "victim/app/products.py",
+      "func": "list_products",
+      "line": 28
+     },
+     {
+      "file": "victim/app/db.py",
+      "func": "fetch_one",
+      "line": 31
+     },
+     {
+      "file": "victim/app/db.py",
+      "func": "fetch",
+      "line": 25
+     }
+    ]
+   },
+   {
+    "detail": {
+     "input": "zzzzzz' OR '1'='1",
+     "location": "query",
+     "param": "q",
+     "reason": "structure",
+     "statement": "SELECT id, name, category, price, description FROM products WHERE (name LIKE '%zzzzzz' OR '1'='1%' OR category LIKE 'zzzzzz' OR '1'='1') ORDER BY name ASC, id ASC LIMIT ? OFFSET ?"
+    },
+    "oracle": "sql",
+    "stack": [
+     {
+      "file": "victim/app/products.py",
+      "func": "list_products",
+      "line": 29
+     },
+     {
+      "file": "victim/app/db.py",
+      "func": "fetch",
+      "line": 25
+     }
+    ]
+   }
+  ],
+  "mode": "L1",
+  "pre_state_b64": null,
+  "release": "t0",
+  "request": {
+   "body_b64": "",
+   "headers": {
+    "accept": "*/*",
+    "accept-encoding": "gzip, deflate",
+    "connection": "keep-alive",
+    "host": "immune-clone-1:8000",
+    "user-agent": "curl/8.5.0"
+   },
+   "method": "GET",
+   "path": "/api/products",
+   "query": "q=zzzzzz'%20OR%20'1'='1"
+  },
+  "rid": "803986064b704ad893206de6ef14d043",
+  "role": null,
+  "status": 200,
+  "uid": null,
+  "verdict": "oracle",
+  "session": "gwsid:YAnfQHJoLoD0RWFQEOEkjGyS"
+ },
+ "seq": 10
+}

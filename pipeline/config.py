@@ -1,0 +1,144 @@
+"""Pipeline configuration. Every path, URL and limit comes from the environment."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _f(env, k, d):
+    try:
+        return float(env.get(k, d))
+    except (TypeError, ValueError):
+        return float(d)
+
+
+def _i(env, k, d):
+    try:
+        return int(env.get(k, d))
+    except (TypeError, ValueError):
+        return int(d)
+
+
+def _demo_env(repo: str) -> dict:
+    """deploy/demo.env values, used only as fallbacks for unset secrets."""
+    out = {}
+    try:
+        with open(os.path.join(repo, "deploy", "demo.env")) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+@dataclass
+class Config:
+    repo_dir: str = REPO_ROOT
+    runtime_dir: str = os.path.join(REPO_ROOT, "runtime")
+    state_dir: str = ""                 # <runtime>/pipeline
+    run_id: str = "dev"
+    bus_url: str = "http://127.0.0.1:8090"
+    bus_token: str = ""
+    gateway_admin_url: str = "http://127.0.0.1:8081"
+    gateway_url: str = "http://127.0.0.1:8080"
+    fleet_url: str = "http://127.0.0.1:8070"
+    admin_token: str = ""
+    prod_app_secret: str = ""
+    openapi_path: str = ""
+    manifest_path: str = ""
+    record_path: str = ""
+    base_release: str = "t0"
+    patcher_module: str = "patcher"
+    scenarios_module: str = "sim.scenarios"
+    repo_target: str = "local"
+    github_repo: str = ""
+    # runner
+    runner_mode: str = "docker"        # docker | local (local = host subprocess, tests only)
+    runner_image: str = "immune-base:1"
+    runner_prefix: str = "immune-runner"
+    runner_timeout_s: float = 240.0
+    runner_memory: str = "1g"
+    runner_cpus: str = "2"
+    runner_pids: int = 256
+    seed: int = 1
+    app_now: str = "1767225600"        # 2026-01-01T00:00:00Z, frozen clock for every runner job
+    # loop
+    max_attempts: int = 3
+    http_timeout_s: float = 5.0
+    deploy_timeout_s: float = 300.0
+    patcher_timeout_s: float = 600.0
+    verify_wait_s: float = 8.0
+    reopen_cooldown_s: float = 300.0
+    policy_max_lines: int = 120
+    policy_max_files: int = 4
+    rule_ttl_s: int = 3600
+    extra: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls, env=None) -> "Config":
+        env = dict(os.environ if env is None else env)
+        repo = env.get("REPO_DIR") or REPO_ROOT
+        demo = _demo_env(repo)
+        rt = env.get("RUNTIME_DIR") or os.path.join(repo, "runtime")
+        run_id = env.get("RUN_ID") or ""
+        if not run_id:
+            try:
+                run_id = open(os.path.join(rt, "run_id")).read().strip()
+            except OSError:
+                run_id = "dev"
+        c = cls(
+            repo_dir=repo,
+            runtime_dir=rt,
+            state_dir=env.get("PIPELINE_STATE_DIR") or os.path.join(rt, "pipeline"),
+            run_id=run_id or "dev",
+            bus_url=(env.get("PIPELINE_BUS_URL") or env.get("FLEET_BUS_URL") or "http://127.0.0.1:8090").rstrip("/"),
+            bus_token=env.get("BUS_TOKEN") or demo.get("BUS_TOKEN", ""),
+            gateway_admin_url=(env.get("GATEWAY_ADMIN_URL") or "http://127.0.0.1:8081").rstrip("/"),
+            gateway_url=(env.get("GATEWAY_URL") or "http://127.0.0.1:8080").rstrip("/"),
+            fleet_url=(env.get("FLEET_URL") or "http://127.0.0.1:%s" % env.get("FLEET_PORT", "8070")).rstrip("/"),
+            admin_token=env.get("ADMIN_TOKEN") or demo.get("ADMIN_TOKEN", ""),
+            prod_app_secret=env.get("PROD_APP_SECRET") or demo.get("PROD_APP_SECRET", ""),
+            openapi_path=env.get("OPENAPI_PATH_HOST") or os.path.join(repo, "contracts", "openapi.yaml"),
+            manifest_path=env.get("MANIFEST_PATH_HOST") or os.path.join(rt, "data", "manifest.json"),
+            record_path=env.get("RECORD_PATH_HOST") or os.path.join(rt, "recordings", "requests.jsonl"),
+            base_release=env.get("PIPELINE_BASE_RELEASE", "t0"),
+            patcher_module=env.get("PATCHER_MODULE", "patcher"),
+            scenarios_module=env.get("SCENARIOS_MODULE", "sim.scenarios"),
+            repo_target=env.get("REPO_TARGET", "local"),
+            github_repo=env.get("GITHUB_REPO", ""),
+            runner_mode=env.get("RUNNER_MODE", "docker"),
+            runner_image=env.get("RUNNER_IMAGE", "immune-base:1"),
+            runner_prefix=env.get("RUNNER_PREFIX", "immune-runner"),
+            runner_timeout_s=_f(env, "RUNNER_TIMEOUT_S", 240),
+            runner_memory=env.get("RUNNER_MEMORY", "1g"),
+            runner_cpus=env.get("RUNNER_CPUS", "2"),
+            runner_pids=_i(env, "RUNNER_PIDS", 256),
+            seed=_i(env, "SEED", 1),
+            app_now=env.get("RUNNER_APP_NOW", "1767225600"),
+            max_attempts=_i(env, "PIPELINE_MAX_ATTEMPTS", 3),
+            http_timeout_s=_f(env, "PIPELINE_HTTP_TIMEOUT_S", 5),
+            deploy_timeout_s=_f(env, "PIPELINE_DEPLOY_TIMEOUT_S", 300),
+            patcher_timeout_s=_f(env, "PIPELINE_PATCHER_TIMEOUT_S", 600),
+            verify_wait_s=_f(env, "PIPELINE_VERIFY_WAIT_S", 8),
+            reopen_cooldown_s=_f(env, "PIPELINE_REOPEN_COOLDOWN_S", 300),
+            policy_max_lines=_i(env, "POLICY_MAX_LINES", 120),
+            policy_max_files=_i(env, "POLICY_MAX_FILES", 4),
+            rule_ttl_s=_i(env, "PIPELINE_RULE_TTL_S", 3600),
+        )
+        return c
+
+    @property
+    def releases_dir(self) -> str:
+        return os.path.join(self.runtime_dir, "releases")
+
+    def release_dir(self, release: str) -> str:
+        return os.path.join(self.releases_dir, release)
+
+    @property
+    def pause_file(self) -> str:
+        return os.path.join(self.state_dir, "PAUSE")
