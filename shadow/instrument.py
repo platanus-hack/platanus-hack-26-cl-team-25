@@ -6,9 +6,9 @@ unless a request is in flight (``STATE.current`` is set) or warm-up is learning
 every event observed while ``STATE.current`` is set belongs to that request,
 whichever thread (event loop or anyio worker) produced it.
 
-Stack frames: only frames whose file is inside the app's top-level package, with
-the path relative to the release root (the directory that contains the package,
-e.g. ``victim/app/products.py``). Order: **outermost first, innermost (the sink)
+Stack frames: only frames whose file is inside the release's app paths (``app.release_paths``
+of .immune/config.yaml; default: the app's top-level package), with the path relative to the
+release root (default: the directory that contains the package, e.g. ``victim/app/products.py``). Order: **outermost first, innermost (the sink)
 last**, like a Python traceback.
 """
 from __future__ import annotations
@@ -59,8 +59,8 @@ class _State:
         self.installed = False
         self.current: RequestRecord | None = None
         self.learning = False
-        self.app_root = None       # realpath of the app's top-level package dir + os.sep
-        self.release_root = None   # its parent dir
+        self.app_roots = []        # realpaths of the app paths (dirs end with os.sep)
+        self.release_root = None   # stack paths are relative to this dir
         self.allowed_roots = []    # realpaths
         self.allowlist = {"/dev/null", "/dev/urandom", "/dev/random"}
         self._rel_cache = {}
@@ -70,10 +70,12 @@ STATE = _State()
 _tls = threading.local()
 
 
-def configure(app_pkg_dir: str, allowed_roots: list[str]) -> None:
-    root = os.path.realpath(app_pkg_dir)
-    STATE.app_root = root.rstrip(os.sep) + os.sep
-    STATE.release_root = os.path.dirname(root.rstrip(os.sep))
+def configure(app_pkg_dir: str, allowed_roots: list[str], release_root: str | None = None,
+              release_paths: list[str] | None = None) -> None:
+    root = os.path.realpath(app_pkg_dir).rstrip(os.sep)
+    STATE.release_root = os.path.realpath(release_root) if release_root else os.path.dirname(root)
+    paths = [os.path.realpath(os.path.join(STATE.release_root, p)) for p in (release_paths or []) if p]
+    STATE.app_roots = [p + os.sep if os.path.isdir(p) else p for p in (paths or [root])]
     STATE.allowed_roots = [os.path.realpath(r) for r in allowed_roots if r]
     STATE._rel_cache.clear()
 
@@ -83,9 +85,9 @@ def _rel(filename: str):
     if filename in cache:
         return cache[filename]
     rel = None
-    if STATE.app_root and not filename.startswith("<"):
+    if STATE.app_roots and not filename.startswith("<"):
         real = os.path.realpath(filename)
-        if real.startswith(STATE.app_root):
+        if any(real == r or (r.endswith(os.sep) and real.startswith(r)) for r in STATE.app_roots):
             rel = os.path.relpath(real, STATE.release_root).replace(os.sep, "/")
     cache[filename] = rel
     return rel

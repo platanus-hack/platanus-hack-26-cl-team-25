@@ -200,3 +200,57 @@ def test_failure_closes_rule_only_and_loop_continues(env, events):
     assert p.state.incident(a)["rule"]["scope"] == "param"   # built-in rule after derive_rule failed
     p.step()
     assert p.state.incident(b)["status"] == "closed"
+
+
+def _project_with(tmp_path, **over):
+    """A copy of the demo project config (victim/ and the OpenAPI symlinked) with top-level keys replaced."""
+    import yaml
+    from immune import config as icfg
+    proj = tmp_path / "proj"
+    (proj / ".immune").mkdir(parents=True)
+    (proj / "contracts").mkdir()
+    os.symlink(os.path.join(ROOT, "victim"), proj / "victim")
+    os.symlink(os.path.join(ROOT, "contracts", "openapi.yaml"), proj / "contracts" / "openapi.yaml")
+    raw = yaml.safe_load(open(os.path.join(ROOT, ".immune", "config.yaml")))
+    for k, v in over.items():
+        if v is None:
+            raw.pop(k, None)
+        else:
+            raw[k] = v
+    (proj / ".immune" / "config.yaml").write_text(yaml.safe_dump(raw))
+    return icfg.load(str(proj))
+
+
+def test_autopatch_pr_stops_after_the_pr(env, events, tmp_path):
+    env["cfg"].app = _project_with(tmp_path, autopatch="pr")
+    p = make(env)
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    assert (inc["outcome"], inc["outcome_detail"]) == ("rule_only", "pr_open"), inc["reason"]
+    s = seq(env, iid)
+    assert "pr.opened" in s and "gate.result:legit" in s and "pr.merged" not in s and env["fleet"].deploys == []
+    assert env["gw"].deleted == []                                   # the rule stays
+    closed = [e for e in env["bus"].events if e["type"] == "incident.closed"][-1]["data"]
+    assert closed["outcome"] == "rule_only" and closed["outcome_detail"] == "pr_open"
+
+
+def test_no_tests_command_caps_merge_at_pr(env, events, tmp_path):
+    env["cfg"].app = _project_with(tmp_path, autopatch="merge", tests=None)
+    p = make(env)
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    assert (inc["outcome"], inc["outcome_detail"], inc["autopatch"]) == ("rule_only", "pr_open", "pr"), inc["reason"]
+    assert "no tests.command" in inc["reason"] and env["fleet"].deploys == []
+
+
+def test_autopatch_off_keeps_only_the_rule(env, events, tmp_path):
+    env["cfg"].app = _project_with(tmp_path, autopatch="off")
+    p = make(env)
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    assert (inc["outcome"], inc["outcome_detail"]) == ("rule_only", "autopatch_off")
+    s = seq(env, iid)
+    assert "rule.active" in s and "patch.attempt" not in s and stub_patcher.calls == []

@@ -1,0 +1,12 @@
+services:
+  notas:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      NOTAS_DB: /data/notas.db
+    volumes:
+      - notas-data:/data
+
+volumes:
+  notas-data:

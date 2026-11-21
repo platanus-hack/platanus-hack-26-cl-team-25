@@ -98,12 +98,18 @@ class Lifespan:
 
 class Engine:
     def __init__(self, profile: str, seed_db: str | None, state: bytes | None = None, collector: str | None = None,
-                 clone_id: str = "", clone_key: str = "", release: str = ""):
+                 clone_id: str = "", clone_key: str = "", release: str = "", db_env: str | None = None,
+                 release_root: str | None = None, release_paths: list[str] | None = None):
         instrument.install()  # before anything of the app is imported
-        if not os.environ.get("APP_DB"):
-            os.environ["APP_DB"] = os.path.join(tempfile.mkdtemp(prefix="shadow-"), "app.db")
+        # the env var through which the app receives its sqlite path (database.path_env)
+        self.db_env = db_env or os.environ.get("SHADOW_DB_ENV") or "APP_DB"
+        if not os.environ.get(self.db_env):
+            os.environ[self.db_env] = os.path.join(tempfile.mkdtemp(prefix="shadow-"), "app.db")
         os.environ.setdefault("APP_SECRET", "shadow-secret")
-        self.db_path = os.environ["APP_DB"]
+        self.db_path = os.environ[self.db_env]
+        self.release_root = release_root or os.environ.get("SHADOW_RELEASE_ROOT") or None
+        rp = release_paths if release_paths is not None else os.environ.get("SHADOW_RELEASE_PATHS", "").split(":")
+        self.release_paths = [p for p in rp if p]
         self.seed_db = seed_db
         self.base_state = state
         self.collector = collector.rstrip("/") if collector else None
@@ -133,7 +139,7 @@ class Engine:
 
     # ------------------------------------------------------------ setup
     def _activate(self):
-        instrument.configure(self.pkg_dir, self.allowed_roots)
+        instrument.configure(self.pkg_dir, self.allowed_roots, self.release_root, self.release_paths)
         STATE.allowlist = self.allowlist
 
     async def start(self):
@@ -318,6 +324,15 @@ class Engine:
             self.reset()
 
     def _client_identity(self, h, env):
+        hook = getattr(self.profile, "identify", None)   # optional profile hook: (env, headers) -> (uid, role) | None
+        if callable(hook):
+            try:
+                got = hook(env, h)
+            except Exception:
+                got = None
+            if not got:
+                return None
+            return authtoken.Identity(uid=int(got[0]), role=str(got[1] or "user"))
         tok = authtoken.bearer(h)
         if not tok:
             return None

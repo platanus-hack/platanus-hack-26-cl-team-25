@@ -2,12 +2,13 @@
 
   local     a git repo under the runtime dir (<runtime>/repo), no GitHub. PRs are JSON records
             in <repo>/.git/immune/prs/. Development and tests.
-  scratch   } the `gh` CLI against env GITHUB_REPO (owner/name). The repo must contain victim/ at its
-  official  } root and the tag victim-t0. Branch protection is not required.
+  scratch   } the `gh` CLI against env GITHUB_REPO (owner/name). The repo must contain the project's
+  official  } app.release_paths at its root and the tag repo.t0_tag. Branch protection is not required.
 
 Flow per incident: ensure_base() -> open_change() after the policy gate -> report() per gate ->
 merge() when green (or abandon()) -> materialise(sha) -> comment() with timings -> revert() on rollback.
-Branches: run/<run>/base (created from tag victim-t0), run/<run>/fix-<incident>; label run-<run>.
+Branches: run/<run>/base (created from tag repo.t0_tag), run/<run>/fix-<incident>; label run-<run>.
+What a release holds (and what is committed / extracted) is `app.release_paths` of .immune/config.yaml.
 """
 from __future__ import annotations
 
@@ -26,7 +27,19 @@ from dataclasses import dataclass, field
 from . import diffs
 
 log = logging.getLogger("pipeline.repo")
-T0_TAG = "victim-t0"
+
+
+def _project():
+    from immune import config as icfg
+    return icfg.current()
+
+
+def _paths(paths):
+    return list(paths) if paths is not None else list(_project().app.release_paths)
+
+
+def _tag(tag):
+    return tag or _project().repo.t0_tag
 
 
 class RepoError(Exception):
@@ -55,13 +68,16 @@ def fix_branch(run: str, incident: str) -> str:
     return "run/%s/fix-%s" % (run, incident)
 
 
-def safe_extract(tf: tarfile.TarFile, dest: str, strip: int = 0, prefix: str = "victim/") -> int:
-    """Extract regular files/dirs under `prefix` only; refuse links and escaping paths. -> files written."""
+def safe_extract(tf: tarfile.TarFile, dest: str, strip: int = 0, prefix=None) -> int:
+    """Extract regular files/dirs under the release paths (`prefix`: list or str, default app.release_paths)
+    only; refuse links and escaping paths. -> files written."""
+    prefixes = [prefix] if isinstance(prefix, str) else _paths(prefix)
+    prefixes = [p.rstrip("/") + "/" for p in prefixes]
     n = 0
     for m in tf.getmembers():
         parts = m.name.split("/")[strip:]
         name = "/".join(p for p in parts if p not in ("", "."))
-        if not name or not (name + "/").startswith(prefix):
+        if not name or not any((name + "/").startswith(p) for p in prefixes):
             continue
         if name.startswith("/") or ".." in name.split("/") or m.issym() or m.islnk() or m.isdev():
             raise RepoError("unsafe archive member %r" % m.name)
@@ -78,8 +94,12 @@ def safe_extract(tf: tarfile.TarFile, dest: str, strip: int = 0, prefix: str = "
     return n
 
 
-def _install(tmp: str, dest: str) -> None:
-    if os.path.isdir(os.path.join(dest, "victim")):
+def _complete(dest: str, paths) -> bool:
+    return bool(paths) and all(os.path.exists(os.path.join(dest, p)) for p in paths)
+
+
+def _install(tmp: str, dest: str, paths=None) -> None:
+    if _complete(dest, _paths(paths)):
         shutil.rmtree(tmp, ignore_errors=True)
         return
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -92,8 +112,9 @@ def _install(tmp: str, dest: str) -> None:
 class LocalRepo:
     kind = "local"
 
-    def __init__(self, path: str, run: str, t0_release_dir: str, timeout: float = 60):
+    def __init__(self, path: str, run: str, t0_release_dir: str, timeout: float = 60, paths=None, t0_tag=None):
         self.path, self.run, self.t0, self.timeout = path, run, t0_release_dir, timeout
+        self.paths, self.t0_tag = _paths(paths), _tag(t0_tag)
         self.prs_dir = os.path.join(path, ".git", "immune", "prs")
 
     def git(self, *args, input=None, check=True) -> str:
@@ -113,18 +134,23 @@ class LocalRepo:
         if not os.path.isdir(os.path.join(self.path, ".git")):
             os.makedirs(self.path, exist_ok=True)
             self.git("init", "-q", "-b", "main")
-            shutil.copytree(os.path.join(self.t0, "victim"), os.path.join(self.path, "victim"),
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
+            for p in self.paths:
+                src, dst = os.path.join(self.t0, p), os.path.join(self.path, p)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
+                elif os.path.isfile(src):
+                    os.makedirs(os.path.dirname(dst) or self.path, exist_ok=True)
+                    shutil.copy2(src, dst)
             with open(os.path.join(self.path, ".gitignore"), "w") as f:
                 f.write("__pycache__/\n*.pyc\n.pytest_cache/\n")
             self.git("add", "-A")
-            self.git("commit", "-q", "-m", "victim t0")
-            self.git("tag", T0_TAG)
-        if not self._has_ref("refs/tags/" + T0_TAG):
-            raise RepoError("local repo has no tag %s" % T0_TAG)
+            self.git("commit", "-q", "-m", "t0")
+            self.git("tag", self.t0_tag)
+        if not self._has_ref("refs/tags/" + self.t0_tag):
+            raise RepoError("local repo has no tag %s" % self.t0_tag)
         base = base_branch(self.run)
         if not self._has_ref("refs/heads/" + base):
-            self.git("branch", base, T0_TAG)
+            self.git("branch", base, self.t0_tag)
         os.makedirs(self.prs_dir, exist_ok=True)
         return self.git("rev-parse", base)
 
@@ -158,8 +184,8 @@ class LocalRepo:
                 diffs.apply(diff, wt)
             except diffs.DiffError as e:
                 raise RepoError("diff does not apply on %s: %s" % (base, e))
-            g = LocalRepo(wt, self.run, self.t0, self.timeout)
-            g.git("add", "-A", "victim")
+            g = LocalRepo(wt, self.run, self.t0, self.timeout, self.paths, self.t0_tag)
+            g.git("add", "-A", "--", *self.paths)
             g.git("commit", "-q", "-m", "%s (attempt %d)\n\n%s" % (title, attempt, incident))
             head = g.git("rev-parse", "HEAD")
         finally:
@@ -189,7 +215,7 @@ class LocalRepo:
         wt = tempfile.mkdtemp(prefix="pipeline-wt-")
         try:
             self.git("worktree", "add", "-q", "-f", wt, base)
-            g = LocalRepo(wt, self.run, self.t0, self.timeout)
+            g = LocalRepo(wt, self.run, self.t0, self.timeout, self.paths, self.t0_tag)
             g.git("merge", "--no-ff", "-q", "-m", "Merge PR #%d from %s" % (change.number, change.branch), change.head)
             sha = g.git("rev-parse", "HEAD")
         finally:
@@ -201,16 +227,16 @@ class LocalRepo:
         return sha
 
     def materialise(self, sha: str, dest: str) -> str:
-        if os.path.isdir(os.path.join(dest, "victim")):
+        if _complete(dest, self.paths):
             return dest
-        raw = subprocess.run(["git", "-C", self.path, "archive", "--format=tar", sha, "victim"],
+        raw = subprocess.run(["git", "-C", self.path, "archive", "--format=tar", sha, "--", *self.paths],
                              capture_output=True, timeout=self.timeout)
         if raw.returncode != 0:
             raise RepoError("git archive failed: %s" % raw.stderr.decode()[-300:])
         tmp = tempfile.mkdtemp(prefix=".rel-", dir=os.path.dirname(dest) if os.path.isdir(os.path.dirname(dest)) else None)
         with tarfile.open(fileobj=io.BytesIO(raw.stdout)) as tf:
-            safe_extract(tf, tmp)
-        _install(tmp, dest)
+            safe_extract(tf, tmp, prefix=self.paths)
+        _install(tmp, dest, self.paths)
         return dest
 
     def comment(self, change: Change, text: str) -> None:
@@ -229,7 +255,7 @@ class LocalRepo:
         wt = tempfile.mkdtemp(prefix="pipeline-wt-")
         try:
             self.git("worktree", "add", "-q", "-f", wt, base)
-            g = LocalRepo(wt, self.run, self.t0, self.timeout)
+            g = LocalRepo(wt, self.run, self.t0, self.timeout, self.paths, self.t0_tag)
             g.git("revert", "--no-edit", "-m", "1", sha)
             new = g.git("rev-parse", "HEAD")
         finally:
@@ -259,10 +285,12 @@ def run_gh(args: list, input: bytes | None = None, timeout: float = 60) -> bytes
 class GitHubRepo:
     """scratch/official targets. All git objects are created through the REST API (`gh api`), no clone."""
 
-    def __init__(self, repo: str, run: str, kind: str = "scratch", gh=run_gh, timeout: float = 60):
+    def __init__(self, repo: str, run: str, kind: str = "scratch", gh=run_gh, timeout: float = 60, paths=None,
+                 t0_tag=None):
         if not repo or "/" not in repo:
             raise RepoError("GITHUB_REPO must be owner/name (got %r)" % repo)
         self.repo, self.run, self.kind, self.gh, self.timeout = repo, run, kind, gh, timeout
+        self.paths, self.t0_tag = _paths(paths), _tag(t0_tag)
 
     def api(self, path: str, method: str = "GET", body: dict | None = None) -> dict:
         args = ["api", "-X", method, "repos/%s/%s" % (self.repo, path.lstrip("/")), "-H", "Accept: application/vnd.github+json"]
@@ -290,9 +318,9 @@ class GitHubRepo:
         sha = self._ref_sha("heads/" + base)
         if sha:
             return sha
-        t0 = self._ref_sha("tags/" + T0_TAG)
+        t0 = self._ref_sha("tags/" + self.t0_tag)
         if not t0:
-            raise RepoError("%s has no tag %s" % (self.repo, T0_TAG))
+            raise RepoError("%s has no tag %s" % (self.repo, self.t0_tag))
         self.api("git/refs", "POST", {"ref": "refs/heads/" + base, "sha": t0})
         try:
             self.gh(["label", "create", "run-%s" % self.run, "--repo", self.repo, "--force",
@@ -351,14 +379,14 @@ class GitHubRepo:
         return sha
 
     def materialise(self, sha: str, dest: str) -> str:
-        if os.path.isdir(os.path.join(dest, "victim")):
+        if _complete(dest, self.paths):
             return dest
         raw = self.gh(["api", "repos/%s/tarball/%s" % (self.repo, sha)], timeout=max(self.timeout, 120))
         tmp = tempfile.mkdtemp(prefix=".rel-", dir=os.path.dirname(dest) if os.path.isdir(os.path.dirname(dest)) else None)
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as tf:
-            if not safe_extract(tf, tmp, strip=1):
-                raise RepoError("tarball of %s has no victim/" % sha)
-        _install(tmp, dest)
+            if not safe_extract(tf, tmp, strip=1, prefix=self.paths):
+                raise RepoError("tarball of %s has none of %s" % (sha, ", ".join(self.paths)))
+        _install(tmp, dest, self.paths)
         return dest
 
     def comment(self, change: Change, text: str) -> None:
@@ -383,9 +411,10 @@ class GitHubRepo:
 
 def make_target(cfg, gh=run_gh):
     kind = cfg.repo_target
+    app = cfg.project
     if kind == "local":
         return LocalRepo(os.environ.get("REPO_TARGET_DIR") or os.path.join(cfg.runtime_dir, "repo"), cfg.run_id,
-                         cfg.release_dir("t0"))
+                         cfg.release_dir("t0"), paths=app.app.release_paths, t0_tag=app.repo.t0_tag)
     if kind in ("scratch", "official"):
-        return GitHubRepo(cfg.github_repo, cfg.run_id, kind, gh=gh)
+        return GitHubRepo(cfg.github_repo, cfg.run_id, kind, gh=gh, paths=app.app.release_paths, t0_tag=app.repo.t0_tag)
     raise RepoError("REPO_TARGET must be local|scratch|official (got %r)" % kind)

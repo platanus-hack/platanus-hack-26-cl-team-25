@@ -1,6 +1,6 @@
 import os
 
-from conftest import ROOT, auth_header
+from .conftest import ROOT, auth_header
 
 STATIC = os.path.join(ROOT, "victim", "static")
 
@@ -229,7 +229,7 @@ def test_profile(client, manifest, user_h):
 
 def test_frozen_time(seeded, tmp_path, monkeypatch):
     import sqlite3
-    from conftest import make_client
+    from .conftest import make_client
     work = str(tmp_path / "w.db")
     src, dst = sqlite3.connect(seeded["prod"]), sqlite3.connect(work)
     src.backup(dst)

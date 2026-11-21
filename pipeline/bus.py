@@ -25,6 +25,11 @@ FIELDS = {
     E.INCIDENT_CLOSED: {"incident", "outcome", "seconds_to_rule", "seconds_to_patch"},
     E.VERIFY_RESULT: {"incident", "exploit_blocked_on_prod"},
 }
+# optional fields added by contracts/product.md §3 (pr_open / autopatch_off, a skipped tests gate)
+OPTIONAL = {
+    E.INCIDENT_CLOSED: {"outcome_detail"},
+    E.GATE_RESULT: {"skipped"},
+}
 
 
 class Publisher:
@@ -41,7 +46,7 @@ class Publisher:
 
     def publish(self, type_: str, data: dict, incident: str | None = None, rid: str | None = None) -> dict:
         want = FIELDS.get(type_)
-        if want is not None and set(data) != want:
+        if want is not None and not (want <= set(data) <= want | OPTIONAL.get(type_, set())):
             raise ValueError("%s data fields %s != contract %s" % (type_, sorted(data), sorted(want)))
         ev = E.make(type_, "pipeline", data, run=self.run, rid=rid, incident=incident)
         with self._lock:

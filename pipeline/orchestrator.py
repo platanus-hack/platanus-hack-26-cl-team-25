@@ -28,9 +28,9 @@ log = logging.getLogger("pipeline")
 class Closed(Exception):
     """Raised inside the flow to close the incident with an outcome."""
 
-    def __init__(self, outcome: str, reason: str):
+    def __init__(self, outcome: str, reason: str, detail: str | None = None):
         super().__init__(reason)
-        self.outcome, self.reason = outcome, reason
+        self.outcome, self.reason, self.detail = outcome, reason, detail
 
 
 def _call_with_timeout(fn, timeout: float, *a, **kw):
@@ -93,7 +93,7 @@ class Pipeline:
     def current_release(self) -> str:
         try:
             rel = (self.fleet.state().get("prod") or {}).get("release")
-            if rel and os.path.isdir(os.path.join(self.cfg.release_dir(rel), "victim")):
+            if rel and self.cfg.project.release_complete(self.cfg.release_dir(rel)):
                 return rel
         except Exception as e:  # noqa: BLE001
             log.info("fleet state unavailable (%s); using the last known release", e)
@@ -185,7 +185,7 @@ class Pipeline:
         try:
             self._flow(inc)
         except Closed as c:
-            self.close(inc, c.outcome, c.reason)
+            self.close(inc, c.outcome, c.reason, c.detail)
         except Exception as e:  # noqa: BLE001
             log.error("[%s] failed: %s\n%s", iid, e, traceback.format_exc())
             self.close(inc, "rule_only", "pipeline error: %s: %s" % (type(e).__name__, e))
@@ -194,15 +194,17 @@ class Pipeline:
                 shutil.rmtree(d, ignore_errors=True)
         return inc
 
-    def close(self, inc, outcome: str, reason: str):
+    def close(self, inc, outcome: str, reason: str, detail: str | None = None):
         t0 = inc.get("first_seen") or inc["t"]["start"]
         str_ = round(inc["rule_posted"] - t0, 1) if inc.get("rule_posted") else None
         stp = round(inc["t"]["verified"] - t0, 1) if outcome == "patched" and inc["t"].get("verified") else None
         inc.update(status="closed", outcome=outcome, reason=reason, closed_at=time.time(),
-                   seconds_to_rule=str_, seconds_to_patch=stp)
+                   seconds_to_rule=str_, seconds_to_patch=stp, outcome_detail=detail)
         self.note(inc, "closed %s: %s" % (outcome, reason))
-        self.publish(E.INCIDENT_CLOSED, {"incident": inc["incident"], "outcome": outcome,
-                                         "seconds_to_rule": str_, "seconds_to_patch": stp}, inc)
+        data = {"incident": inc["incident"], "outcome": outcome, "seconds_to_rule": str_, "seconds_to_patch": stp}
+        if detail:
+            data["outcome_detail"] = detail
+        self.publish(E.INCIDENT_CLOSED, data, inc)
         self.state.save()
 
     def _flow(self, inc):
@@ -210,10 +212,11 @@ class Pipeline:
         iid = inc["incident"]
         self.publish(E.INCIDENT_OPENED, {k: inc[k] for k in ("incident", "vuln_class", "method", "route", "param",
                                                             "sink", "evidence_rid", "request")}, inc)
+        app = cfg.reload_project() if hasattr(cfg, "reload_project") else None
         release = self.current_release()
         base_dir = cfg.release_dir(release)
-        if not os.path.isdir(os.path.join(base_dir, "victim")):
-            raise RuntimeError("release dir %s has no victim/" % base_dir)
+        if not cfg.project.release_complete(base_dir):
+            raise RuntimeError("release dir %s lacks %s" % (base_dir, ", ".join(cfg.project.app.release_paths)))
         inc["base_release"] = release
         self.note(inc, "opened on release %s" % release)
 
@@ -255,6 +258,10 @@ class Pipeline:
         self.state.save()
 
         # 3. fix loop
+        autopatch, caps = app.effective_autopatch() if app is not None else ("merge", [])
+        inc["autopatch"] = autopatch
+        if autopatch == "off":
+            raise Closed("rule_only", "autopatch is off; the rule stays active", "autopatch_off")
         if pm is None:
             raise Closed("rule_only", "patch generator unavailable (%s); the rule stays active" % self._patcher_err)
         try:
@@ -280,8 +287,10 @@ class Pipeline:
 
             def on_result(gate, ok, detail, secs, attempt=attempt, rec=rec, holder=holder):
                 rec["gates"].append({"gate": gate, "ok": ok, "detail": detail, "seconds": secs})
-                self.publish(E.GATE_RESULT, {"incident": iid, "attempt": attempt, "gate": gate, "ok": ok,
-                                             "detail": detail}, inc)
+                data = {"incident": iid, "attempt": attempt, "gate": gate, "ok": ok, "detail": detail}
+                if ok and str(detail).startswith("skipped:"):
+                    data["skipped"] = True
+                self.publish(E.GATE_RESULT, data, inc)
                 if holder["change"] is not None and holder["change"].attempt == attempt:
                     self._report(holder["change"], gate, ok, detail)
                 else:
@@ -310,6 +319,13 @@ class Pipeline:
             raise Closed("rule_only", reason)
         if change is None:
             raise Closed("rule_only", "the pull request could not be opened; the rule stays active")
+        caps = list(caps) + list(getattr(self.v, "caps", []) or [])
+        if autopatch == "pr" or caps:
+            why = "; ".join(caps) or "autopatch: pr"
+            inc["caps"] = caps
+            self._safe(self.repo.comment, change, "The validation gates passed. Not merged automatically (%s): "
+                       "review and merge this pull request by hand. The containment rule stays active." % why)
+            raise Closed("rule_only", "pull request open, not merged (%s); the rule stays active" % why, "pr_open")
 
         # 4. merge + release
         try:

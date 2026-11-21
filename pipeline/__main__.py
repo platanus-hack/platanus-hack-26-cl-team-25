@@ -38,7 +38,7 @@ def build(cfg: Config, patcher=None) -> Pipeline:
 
     def local():
         return LocalRepo(os.environ.get("REPO_TARGET_DIR") or os.path.join(cfg.runtime_dir, "repo"), cfg.run_id,
-                         cfg.release_dir("t0"))
+                         cfg.release_dir("t0"), paths=cfg.project.app.release_paths, t0_tag=cfg.project.repo.t0_tag)
     return Pipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local)
 
 

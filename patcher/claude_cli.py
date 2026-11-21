@@ -8,8 +8,8 @@ Confinement is passed on every invocation (nothing is written to ~/.claude):
                              settings ignored (so no user allow-rules, hooks or plugins leak in)
   --permission-mode dontAsk  anything not pre-allowed is denied
   --permission-prompts none  nobody can approve anything at runtime
-  --settings <json>          allow: Read(<work>/**), Edit(<each editable file>) only;
-                             deny: Edit of tests; disableAllHooks
+  --settings <json>          allow: Read(<work>/**), Edit(<each editable file>) only (none if the
+                             list is empty); deny: Edit of tests dirs, Write; disableAllHooks
 """
 from __future__ import annotations
 
@@ -51,19 +51,37 @@ def _rule_path(p: str) -> str:
     return "/" + os.path.realpath(p)
 
 
-def settings_for(workdir: str, editable: list[str]) -> dict:
-    """Per-invocation settings. `editable` are paths relative to workdir."""
-    edit_allow = [f"Edit({_rule_path(os.path.join(workdir, e))})" for e in editable] or \
-                 [f"Edit({_rule_path(os.path.join(workdir, 'victim', 'app'))}/**)"]
+def settings_for(workdir: str, editable: list[str], deny_dirs: list[str] | None = None) -> dict:
+    """Per-invocation settings. `editable` are paths relative to workdir; `deny_dirs` (relative dirs)
+    are never editable (default: every `tests` dir at the top two levels of workdir)."""
+    edit_allow = [f"Edit({_rule_path(os.path.join(workdir, e))})" for e in editable]
+    if deny_dirs is None:
+        deny_dirs = _test_dirs(workdir)
     return {
         "permissions": {
             "allow": [f"Read({_rule_path(workdir)}/**)", *edit_allow],
-            "deny": [f"Edit({_rule_path(os.path.join(workdir, 'victim', 'tests'))}/**)",
+            "deny": [*(f"Edit({_rule_path(os.path.join(workdir, d))}/**)" for d in deny_dirs),
                      f"Write({_rule_path(workdir)}/**)"],
             "defaultMode": "dontAsk",
         },
         "disableAllHooks": True,
     }
+
+
+def _test_dirs(workdir: str) -> list[str]:
+    out = []
+    try:
+        for a in sorted(os.listdir(workdir)):
+            pa = os.path.join(workdir, a)
+            if a == "tests" and os.path.isdir(pa):
+                out.append(a)
+            elif os.path.isdir(pa) and not os.path.islink(pa):
+                for b in sorted(os.listdir(pa)):
+                    if b == "tests" and os.path.isdir(os.path.join(pa, b)):
+                        out.append(a + "/" + b)
+    except OSError:
+        pass
+    return out
 
 
 def command(workdir: str, editable: list[str], model_name: str | None = None) -> list[str]:

@@ -1,4 +1,6 @@
-name: immune
+# Stack for one project, started by `immune up` (immune/__main__.py), which sets every variable below:
+#   docker compose -p immune-<name> -f deploy/compose.yaml up -d
+# IMMUNE_HOME (this repository) is mounted read-only at /opt/immune; runtime state at /runtime.
 networks:
   prodnet: {internal: true}
   clonenet: {internal: true}
@@ -7,39 +9,50 @@ networks:
 x-base: &base
   image: immune-base:1
   restart: unless-stopped
-  env_file: [demo.env]
+  env_file: ["${IMMUNE_SECRETS_FILE}"]
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   tmpfs: [/tmp]
+  working_dir: /opt/immune
+  user: "${IMMUNE_UID}:${IMMUNE_GID}"   # the host user, so cap-drop ALL can still write the runtime dir
+  labels:
+    immune.project: "${IMMUNE_NAME}"
 services:
   gateway:
     <<: *base
-    container_name: immune-gateway
+    container_name: "immune-${IMMUNE_NAME}-gateway"
     command: python -m gateway
     environment:
-      PROD_ADDR: prod-blue:8000
+      PYTHONPATH: /opt/immune
+      RUN_ID: "${RUN_ID}"
+      PROD_ADDR: "prod-blue:${IMMUNE_APP_PORT}"
       PROD_RELEASE: t0
-      OPENAPI_PATH: /srv/contracts/openapi.yaml
+      OPENAPI_PATH: /config/openapi.yaml
       MANIFEST_PATH: /runtime/data/manifest.json
       RECORD_PATH: /runtime/recordings/requests.jsonl
+      GW_MODE: "${IMMUNE_MODE}"
+      IMMUNE_AUTH: "${IMMUNE_AUTH}"
     volumes:
-      - ..:/srv:ro
-      - ../runtime:/runtime
+      - "${IMMUNE_HOME}:/opt/immune:ro"
+      - "${IMMUNE_RUNTIME}:/runtime"
+      - "${IMMUNE_OPENAPI}:/config/openapi.yaml:ro"
     networks:
       prodnet: {aliases: [gateway]}
       clonenet: {aliases: [gateway]}
       ctrlnet: {aliases: [gateway]}
       edge: {}
-    ports: ["127.0.0.1:8080:8080", "127.0.0.1:8081:8081"]
+    ports: ["127.0.0.1:${IMMUNE_PORT_GATEWAY}:8080", "127.0.0.1:${IMMUNE_PORT_ADMIN}:8081"]
   dashboard:
     <<: *base
-    container_name: immune-dashboard
+    container_name: "immune-${IMMUNE_NAME}-dashboard"
     command: python -m dashboard
     environment:
+      PYTHONPATH: /opt/immune
+      RUN_ID: "${RUN_ID}"
       BUS_STORE: /runtime/bus/events.jsonl
     volumes:
-      - ..:/srv:ro
-      - ../runtime:/runtime
+      - "${IMMUNE_HOME}:/opt/immune:ro"
+      - "${IMMUNE_RUNTIME}:/runtime"
     networks: [ctrlnet, edge]
-    ports: ["127.0.0.1:8090:8090"]
+    ports: ["127.0.0.1:${IMMUNE_PORT_DASHBOARD}:8090"]

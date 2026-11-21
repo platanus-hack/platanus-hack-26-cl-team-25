@@ -3,14 +3,20 @@
   policy      mechanical AST policy on the diff (host, no app code runs)
   properties  positive properties per class (runner)
   poc         PoC + variants: those firing the oracle on the unpatched code must not fire on the patched one (runner)
-  tests       the victim test suite (runner)
-  legit       legit scenarios give identical output before/after, and cover the patched endpoint (runner)
+  tests       the app's test suite, `tests.command` (runner); reported as skipped when absent
+  legit       legit scenarios give identical output before/after, and cover the patched endpoint (runner);
+              without `scenarios`, the gateway recording (clean GETs to prod, most recent 200 per path)
+              is replayed before/after instead
+
+A gate that is skipped (tests) or fails only for lack of coverage (legit on recordings) does not
+reject the patch: it caps autopatch at `pr` (contracts/product.md §3). `Validator.caps` lists why.
 
 `Validator.validate()` stops at the first failing gate. Every result has a human-readable
 `detail` that is published live and fed back to the patch generator.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -31,6 +37,7 @@ class Validator:
         self.runner = runner or Runner(cfg)
         self.cache = {}
         self._lock = threading.Lock()
+        self.caps = []      # reasons the last validate() capped autopatch at pr
 
     # ------------------------------------------------------------ runner helpers (cached per base release)
     def run(self, release_dir, job, timeout=None):
@@ -90,7 +97,7 @@ class Validator:
     # ------------------------------------------------------------ gates
     def gate_policy(self, ctx):
         return policy.check(ctx["diff"], ctx["base_dir"], ctx["patched_dir"], self.cfg.policy_max_lines,
-                            self.cfg.policy_max_files)[:2]
+                            self.cfg.policy_max_files, dirs=self.cfg.project.app.source_dirs)[:2]
 
     def gate_properties(self, ctx):
         return properties.check(self, ctx["inc"], ctx["poc"], ctx["base_dir"], ctx["patched_dir"])
@@ -119,13 +126,96 @@ class Validator:
                               if rep["ignored"] else ""))
 
     def gate_tests(self, ctx):
+        if not self.cfg.project.tests_command:
+            ctx.setdefault("caps", []).append("tests skipped (no tests.command)")
+            return True, "skipped: no tests.command configured; autopatch capped at pr"
         res = self.run(ctx["patched_dir"], {"kind": "pytest", "timeout": 600}, timeout=700)
+        if res.get("skipped"):
+            ctx.setdefault("caps", []).append("tests skipped (no tests.command)")
+            return True, "skipped: %s; autopatch capped at pr" % res.get("summary")
         if res.get("ok"):
-            return True, "victim test suite: %s" % res.get("summary")
+            return True, "test suite: %s" % res.get("summary")
         failed = ", ".join(l.split(" ", 1)[1].split(" - ")[0].split("::")[-1] for l in res.get("failed") or [])
-        return False, "victim test suite failed: %s%s" % (res.get("summary"), (" — failing: " + failed) if failed else "")
+        return False, "test suite failed: %s%s" % (res.get("summary"), (" — failing: " + failed) if failed else "")
+
+    def _targets(self, ctx) -> list:
+        inc = ctx["inc"]
+        targets = [(inc["method"], inc["route"])]
+        for r in ctx.get("changed_routes") or []:
+            m, _, p = r.partition(" ")
+            if (m, p) not in targets:
+                targets.append((m, p))
+        return targets
+
+    def recorded_requests(self, limit: int = 200) -> list:
+        """Clean GET requests the gateway forwarded to prod with status 200: the most recent per path+query."""
+        path = self.cfg.record_path
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 8 * 1024 * 1024))
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return []
+        seen, out = set(), []
+        for line in reversed(lines):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(r, dict) or r.get("method") != "GET" or r.get("class") != "clean" \
+                    or r.get("route") != "prod" or r.get("status") != 200:
+                continue
+            key = (r.get("path"), r.get("query") or "", r.get("uid"))
+            if key in seen or "<redacted>" in (r.get("query") or ""):
+                continue
+            seen.add(key)
+            rq = {"name": "rec:%s?%s" % (r.get("path"), r.get("query") or ""), "method": "GET",
+                  "path": r.get("path") or "/", "query": r.get("query") or "", "headers": {}}
+            if r.get("uid") is not None:
+                rq["uid"], rq["role"] = int(r["uid"]), "user"
+            out.append(rq)
+            if len(out) >= limit:
+                break
+        out.reverse()
+        return out
+
+    def gate_legit_replay(self, ctx):
+        """No `scenarios`: replay recorded clean GETs before/after and compare status + body."""
+        reqs_ = self.recorded_requests()
+        if not reqs_:
+            ctx.setdefault("caps", []).append("legit: no coverage (no recorded clean GET requests)")
+            return False, "no coverage: the gateway recording holds no clean GET request to replay", True
+        key = ("replay", os.path.realpath(ctx["base_dir"]), len(reqs_), reqs_[-1]["name"])
+        before = self.cache.get(key) or self.run(ctx["base_dir"], {"kind": "replay", "requests": reqs_})
+        self.cache[key] = before
+        after = self.run(ctx["patched_dir"], {"kind": "replay", "requests": reqs_})
+        diffs_ = []
+        for x, y in zip(before["results"], after["results"]):
+            if x.get("status") != 200:
+                continue     # does not reproduce on the seed: not a usable baseline
+            if (x["status"], x["body"]) != (y["status"], y["body"]):
+                what = "status %s -> %s" % (x["status"], y["status"]) if x["status"] != y["status"] else "body differs"
+                diffs_.append("%s: %s" % (x["name"][4:], what))
+        if diffs_:
+            return False, "legit behaviour changed on recorded requests: " + "; ".join(diffs_[:4])
+        usable = [x for x in before["results"] if x.get("status") == 200]
+        cover, uncovered = {}, []
+        for m, tpl in self._targets(ctx):
+            n = sum(1 for x in usable if openapi.route_matches(tpl, m, x.get("method"), x.get("path")))
+            cover["%s %s" % (m, tpl)] = n
+            if not n:
+                uncovered.append("%s %s" % (m, tpl))
+        if uncovered:
+            ctx.setdefault("caps", []).append("legit: no coverage of %s" % ", ".join(uncovered))
+            return False, ("no coverage: %d recorded request(s) identical before and after, none covers %s; "
+                           "autopatch capped at pr" % (len(usable), ", ".join(uncovered))), True
+        return True, ("%d recorded request(s) identical before and after; patched endpoint coverage: %s" % (
+            len(usable), ", ".join("%s (%d)" % kv for kv in cover.items())))
 
     def gate_legit(self, ctx):
+        if not self.cfg.scenarios_module:
+            return self.gate_legit_replay(ctx)
         inc = ctx["inc"]
         before = self.base_scenarios(ctx["base_dir"])
         after = self.scenarios(ctx["patched_dir"])
@@ -154,11 +244,7 @@ class Validator:
                     diffs_.append("scenario %s: %d steps before, %d after" % (name, len(s["steps"]), len(t["steps"])))
         if diffs_:
             return False, "legit behaviour changed: " + "; ".join(diffs_[:4]) + note
-        targets = [(inc["method"], inc["route"])]
-        for r in ctx.get("changed_routes") or []:
-            m, _, p = r.partition(" ")
-            if (m, p) not in targets:
-                targets.append((m, p))
+        targets = self._targets(ctx)
         steps = [st for s in b.values() for st in s["steps"]]
         uncovered = []
         cover = {}
@@ -175,7 +261,7 @@ class Validator:
     # ------------------------------------------------------------ driver
     def prepare(self, diff: str, base_dir: str, work_parent: str | None = None):
         """-> (patched_dir or None, error detail)"""
-        patched = diffs.copy_release(base_dir, work_parent)
+        patched = diffs.copy_release(base_dir, work_parent, paths=self.cfg.project.app.release_paths)
         try:
             diffs.apply(diff, patched)
         except diffs.DiffError as e:
@@ -191,6 +277,7 @@ class Validator:
         on_result(gate, ok, detail, seconds); after_policy(patched_dir) runs once policy passed (e.g. open the PR).
         -> (ok, [(gate, ok, detail, seconds)], patched_dir or None)"""
         results = []
+        self.caps = []
 
         def emit(g, ok, detail, secs):
             results.append((g, ok, detail, secs))
@@ -214,19 +301,25 @@ class Validator:
         ok_all = True
         for g in gates:
             t = time.time()
+            soft = False
             try:
-                ok, detail = getattr(self, "gate_" + g)(ctx)
+                out = getattr(self, "gate_" + g)(ctx)
+                ok, detail = out[0], out[1]
+                soft = len(out) > 2 and bool(out[2])
             except RunnerError as e:
                 ok, detail = False, "gate could not run: %s" % e
             except Exception as e:  # noqa: BLE001
                 log.exception("gate %s crashed", g)
                 ok, detail = False, "gate crashed: %s: %s" % (type(e).__name__, e)
             emit(g, ok, detail, round(time.time() - t, 2))
+            if not ok and soft:
+                continue    # caps autopatch at pr (ctx["caps"]) instead of rejecting the patch
             if not ok:
                 ok_all = False
                 break
             if g == "policy" and after_policy:
                 after_policy(patched)
+        self.caps = list(ctx.get("caps") or []) if ok_all else []
         if not keep:
             shutil.rmtree(patched, ignore_errors=True)
             patched = None

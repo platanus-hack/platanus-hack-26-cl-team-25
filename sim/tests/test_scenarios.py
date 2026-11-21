@@ -3,7 +3,7 @@ import re
 
 import yaml
 
-from conftest import ROOT
+from .conftest import ROOT
 from sim.scenarios import SCENARIOS
 
 

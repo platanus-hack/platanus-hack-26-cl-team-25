@@ -1,0 +1,39 @@
+# Built-in demo: the "Tienda" app in victim/ (contracts/product.md §2).
+# IMMUNE_HOME (this repository) is also the project.
+version: 1
+name: tienda
+runtime_dir: runtime
+app:
+  runtime: python-asgi
+  release_paths: [victim]
+  source_dirs: [victim/app]
+  asgi: victim.app.main:app
+  port: 8000
+  health: /health
+  static: victim/static
+  env:
+    APP_DB: "{db}"
+    APP_STATIC: "{static}"
+    APP_SECRET: "{secret}"
+  frozen_time_env: APP_NOW
+database:
+  kind: sqlite
+  path_env: APP_DB
+data:
+  prod_db: runtime/data/prod/app.db
+  seed_command: "python -m victim.seed --out-prod {prod_db} --out-shadow {shadow_db} --manifest {manifest} --markers {markers} --seed {seed}"
+auth:
+  kind: immune-token
+openapi: contracts/openapi.yaml
+shadow:
+  profile: victim.shadow_profile
+tests:
+  command: "python -m pytest victim/tests -q -p no:cacheprovider"
+scenarios: sim.scenarios
+repo:
+  target: local
+  t0_tag: victim-t0               # tag the local/GitHub repo target starts each run from
+autopatch: merge
+mode: enforce
+pool_size: 4
+ports: {gateway: 8080, admin: 8081, dashboard: 8090, fleet: 8070}

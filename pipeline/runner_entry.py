@@ -1,7 +1,9 @@
 """Runner entry point: one JSON job on stdin -> one JSON result on stdout.
 
-Runs INSIDE the sandbox (docker --network none, read-only, release mounted at
-/srv/victim). This is the only pipeline module that executes application code.
+Runs INSIDE the sandbox (docker --network none, read-only, release mounted at /app,
+the working directory). This is the only pipeline module that executes application code.
+App facts (ASGI entry, shadow profile, db env var, app env, seed and tests commands) come
+in the job as "app" (immune.config.Config.facts()).
 
     python -m pipeline.runner_entry < job.json
 
@@ -9,8 +11,9 @@ Job kinds
   harness    sequences of requests through the shadow in-process harness (oracles)
   plain      requests against the plain app on a fresh PROD-like seed, recording
              executed SQL (text + bound params) and file opens per request
-  pytest     the release's own test suite
+  pytest     the release's own test suite (tests.command; skipped when absent)
   scenarios  the legit scenarios (sim.scenarios or the stand-in) on fresh PROD-like seeds
+  replay     recorded clean GET requests (legit gate without scenarios) on fresh PROD-like seeds
 
 The last stdout line is  @@RESULT@@ <json>.
 """
@@ -35,20 +38,54 @@ MARK = "@@RESULT@@"
 MARKER_RE = re.compile(rb"MK[A-Z0-9]{10}")
 
 
+APP: dict = {}        # the job's app facts
+
+
 def _release_root() -> str:
-    spec = importlib.util.find_spec("victim")
-    if spec is None or not spec.submodule_search_locations:
-        raise RuntimeError("victim package not importable")
-    return os.path.dirname(os.path.realpath(list(spec.submodule_search_locations)[0]))
+    return os.path.realpath(os.getcwd())
 
 
-def _seed(seed: int) -> dict:
+def _db_env() -> str:
+    return APP.get("db_env") or "APP_DB"
+
+
+def _set_app_env(db: str, secret: str) -> None:
+    """app.env ({db} {static} {secret}) into os.environ, plus the db path env var."""
+    from immune.config import substitute
+    root = _release_root()
+    vals = {"db": db, "secret": secret, "static": os.path.join(root, APP["static"]) if APP.get("static") else ""}
+    for k, v in (APP.get("env") or {}).items():
+        os.environ[k] = substitute(str(v), vals)
+    os.environ[_db_env()] = db
+    os.environ["SHADOW_DB_ENV"] = _db_env()
+    os.environ["SHADOW_RELEASE_ROOT"] = root
+    os.environ["SHADOW_RELEASE_PATHS"] = ":".join(APP.get("release_paths") or [])
+
+
+def _secret(default: str) -> str:
+    os.environ.setdefault("RUNNER_APP_SECRET", default)
+    return os.environ["RUNNER_APP_SECRET"]
+
+
+def _seed(seed: int, job: dict | None = None) -> dict:
     d = tempfile.mkdtemp(prefix="runner-seed-")
     p = {k: os.path.join(d, v) for k, v in
          {"prod": "prod.db", "shadow": "shadow.db", "manifest": "manifest.json", "markers": "markers.json"}.items()}
-    subprocess.run([sys.executable, "-m", "victim.seed", "--out-prod", p["prod"], "--out-shadow", p["shadow"],
-                    "--manifest", p["manifest"], "--markers", p["markers"], "--seed", str(seed)],
-                   check=True, cwd=_release_root(), stdout=subprocess.DEVNULL, timeout=120)
+    cmd = APP.get("seed_command") or ""
+    sp = (job or {}).get("seed_paths") or {}
+    if cmd:
+        from immune.config import substitute
+        line = substitute(cmd, {"prod_db": p["prod"], "shadow_db": p["shadow"], "manifest": p["manifest"],
+                                "markers": p["markers"], "seed": str(seed)}, quote=True)
+        subprocess.run(["/bin/sh", "-c", line], check=True, cwd=_release_root(), stdout=subprocess.DEVNULL, timeout=120)
+    elif sp.get("dir"):
+        # no seed command: the stack's synthetic shadow seed stands in for both databases (never prod data)
+        _copy_db(os.path.join(sp["dir"], "seed.db"), p["shadow"])
+        _copy_db(os.path.join(sp["dir"], "seed.db"), p["prod"])
+        shutil.copyfile(os.path.join(sp["dir"], "markers.json"), p["markers"])
+        shutil.copyfile(sp.get("manifest") or os.path.join(os.path.dirname(sp["dir"]), "manifest.json"), p["manifest"])
+    else:
+        raise RuntimeError("no data.seed_command and no shadow seed available to the runner")
     with open(p["manifest"]) as f:
         p["m"] = json.load(f)
     with open(p["markers"]) as f:
@@ -89,13 +126,12 @@ def _b(req) -> bytes:
 
 # ------------------------------------------------------------------ harness
 def job_harness(job: dict) -> dict:
-    seed = _seed(int(job.get("seed", 1)))
+    seed = _seed(int(job.get("seed", 1)), job)
     os.environ["MARKERS_PATH"] = seed["markers"]
-    os.environ.setdefault("APP_SECRET", "runner-shadow-secret")
-    os.environ["APP_DB"] = os.path.join(tempfile.mkdtemp(prefix="runner-db-"), "app.db")
+    _set_app_env(os.path.join(tempfile.mkdtemp(prefix="runner-db-"), "app.db"), _secret("runner-shadow-secret"))
     from shadow.harness import Harness
     state = base64.b64decode(job["state_b64"]) if job.get("state_b64") else None
-    h = Harness(profile=job.get("profile", "victim.shadow_profile"), seed_db=seed["shadow"], state=state)
+    h = Harness(profile=job.get("profile") or APP["profile"], seed_db=seed["shadow"], state=state)
     out = []
     try:
         for seq in job.get("sequences") or []:
@@ -184,17 +220,27 @@ def _install_recorders():
     sys.addaudithook(hook)
 
 
+def _asgi():
+    mod, _, attr = (APP.get("asgi") or "").partition(":")
+    obj = importlib.import_module(mod)
+    for part in (attr or "app").split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
 def _client(db_path: str):
-    os.environ["APP_DB"] = db_path
+    os.environ[_db_env()] = db_path
     from starlette.testclient import TestClient
-    app = importlib.import_module("victim.app.main").app
-    return TestClient(app, raise_server_exceptions=False)
+    return TestClient(_asgi(), raise_server_exceptions=False)
+
+
+def _profile():
+    return importlib.import_module(APP["profile"])
 
 
 def _token(uid, role):
-    from immune_contracts import authtoken
-    now = float(os.environ["APP_NOW"]) if os.environ.get("APP_NOW") else None
-    return authtoken.mint(os.environ["APP_SECRET"], int(uid), role or "user", now=now)
+    """A credential the app accepts for uid, minted by the shadow profile (prod-like secret)."""
+    return _profile().mint_token(dict(os.environ), int(uid), role or "user")
 
 
 def _send_plain(client, rq):
@@ -215,8 +261,7 @@ def _send_plain(client, rq):
 
 
 def _roots():
-    prof = importlib.import_module("victim.shadow_profile")
-    return [os.path.realpath(r) for r in prof.allowed_file_roots(dict(os.environ)) if r]
+    return [os.path.realpath(r) for r in _profile().allowed_file_roots(dict(os.environ)) if r]
 
 
 def _expand(spec: dict, base_req: dict) -> list:
@@ -243,10 +288,10 @@ def _expand(spec: dict, base_req: dict) -> list:
 
 
 def job_plain(job: dict) -> dict:
-    seed = _seed(int(job.get("seed", 1)))
-    os.environ.setdefault("APP_SECRET", "runner-prod-secret")
-    _install_recorders()
+    seed = _seed(int(job.get("seed", 1)), job)
     work = os.path.join(tempfile.mkdtemp(prefix="runner-plain-"), "app.db")
+    _set_app_env(work, _secret("runner-prod-secret"))
+    _install_recorders()
     requests = list(job.get("requests") or [])
     if job.get("expand"):
         requests = _expand(job["expand"], job["expand"]["base"]) + requests
@@ -270,15 +315,15 @@ def job_plain(job: dict) -> dict:
 
 # ------------------------------------------------------------------ pytest
 def job_pytest(job: dict) -> dict:
-    root = _release_root()
-    tests = os.path.join(root, "victim", "tests")
-    if not os.path.isdir(tests):
-        return {"ok": False, "summary": "no test suite at victim/tests", "tail": ""}
+    cmd = APP.get("tests_command") or ""
+    if not cmd:
+        return {"ok": True, "skipped": True, "summary": "skipped: no tests.command configured", "tail": ""}
     t0 = time.time()
-    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "--timeout=120",
-           "-rf", tests]
+    env = dict(os.environ)
+    env.pop("RUNNER_APP_SECRET", None)
     try:
-        p = subprocess.run(cmd, cwd=os.getcwd(), capture_output=True, text=True, timeout=float(job.get("timeout", 600)))
+        p = subprocess.run(["/bin/sh", "-c", cmd], cwd=_release_root(), capture_output=True, text=True, env=env,
+                           timeout=float(job.get("timeout", 600)))
         out = (p.stdout or "") + (p.stderr or "")
         code = p.returncode
     except subprocess.TimeoutExpired as e:
@@ -304,8 +349,8 @@ def _norm_step(s):
 
 
 def job_scenarios(job: dict) -> dict:
-    seed = _seed(int(job.get("seed", 1)))
-    os.environ.setdefault("APP_SECRET", "runner-prod-secret")
+    seed = _seed(int(job.get("seed", 1)), job)
+    _set_app_env(os.path.join(tempfile.mkdtemp(prefix="runner-scn-"), "app.db"), _secret("runner-prod-secret"))
     used = job.get("module") or "sim.scenarios"
     note = ""
     try:
@@ -333,13 +378,38 @@ def job_scenarios(job: dict) -> dict:
     return {"module": used, "note": note, "scenarios": out}
 
 
-JOBS = {"harness": job_harness, "plain": job_plain, "pytest": job_pytest, "scenarios": job_scenarios}
+def _norm_body(body: bytes):
+    try:
+        return json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return {"sha256": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b"")}
+
+
+def job_replay(job: dict) -> dict:
+    """Recorded clean GET requests, each on a fresh PROD-like seed: [{name, method, path, status, body}]."""
+    seed = _seed(int(job.get("seed", 1)), job)
+    work = os.path.join(tempfile.mkdtemp(prefix="runner-replay-"), "app.db")
+    _set_app_env(work, _secret("runner-prod-secret"))
+    client = _client(work)
+    out = []
+    for rq in job.get("requests") or []:
+        _copy_db(seed["prod"], work)
+        status, body, _rec = _send_plain(client, rq)
+        out.append({"name": rq.get("name"), "method": rq.get("method", "GET"), "path": rq.get("path"),
+                    "status": status, "body": _norm_body(body)})
+    return {"results": out}
+
+
+JOBS = {"harness": job_harness, "plain": job_plain, "pytest": job_pytest, "scenarios": job_scenarios,
+        "replay": job_replay}
 
 
 def main() -> int:
     job = json.loads(sys.stdin.read() or "{}")
-    if job.get("app_now"):
-        os.environ["APP_NOW"] = str(job["app_now"])
+    APP.clear()
+    APP.update(job.get("app") or {})
+    if job.get("app_now") and APP.get("frozen_time_env"):
+        os.environ[APP["frozen_time_env"]] = str(job["app_now"])
     t0 = time.time()
     try:
         res = JOBS[job["kind"]](job)

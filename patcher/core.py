@@ -70,10 +70,18 @@ def stack_frames(incident: dict) -> list[dict]:
     return out
 
 
-def editable_files(incident: dict, workdir: str) -> list[str]:
-    """Files the model may edit (relative to workdir): the app files of the stack, except a
-    file that only appears as the innermost frame below app code (the generic DB helper the
-    statement reached, not where it was built), plus the reported sink file."""
+def _source_dirs(dirs=None) -> list[str]:
+    if dirs is None:
+        from immune import config as icfg
+        dirs = icfg.current().app.source_dirs
+    return [d.strip("/") for d in dirs if d and d.strip("/")]
+
+
+def editable_files(incident: dict, workdir: str, source_dirs: list[str] | None = None) -> list[str]:
+    """Files the model may edit (relative to workdir): the app files of the stack under
+    `app.source_dirs`, except a file that only appears as the innermost frame below app code
+    (the generic DB helper the statement reached, not where it was built), plus the reported sink file."""
+    dirs = _source_dirs(source_dirs)
     cands = []
     for e in (incident.get("evidence") or {}).get("events") or []:
         st = list(e.get("stack") or [])
@@ -85,7 +93,7 @@ def editable_files(incident: dict, workdir: str) -> list[str]:
     files = []
     for fr in cands:
         f = os.path.normpath(str(fr.get("file") or ""))
-        if f.startswith("victim/app/") and f.endswith(".py") and f not in files \
+        if any(f.startswith(d + "/") for d in dirs) and f.endswith(".py") and f not in files \
                 and os.path.isfile(os.path.join(workdir, f)):
             files.append(f)
     return files
@@ -112,7 +120,7 @@ def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, edit
         param=(f"{param.get('name')} (in {param.get('in')})" if param.get("name") else "(none)"),
         sink=(f"{sink.get('file')}:{sink.get('line')}" if sink.get("file") else "(unknown)"),
         stack=stack,
-        editable_files=", ".join(f"`{e}`" for e in editable) or "`victim/app/*.py`",
+        editable_files=", ".join(f"`{e}`" for e in editable) or ", ".join(f"`{d}/*.py`" for d in _source_dirs()),
         class_rules=_class_rules(incident.get("vuln_class", "other")),
         nonce=nonce,
         evidence_json=evidence_json,

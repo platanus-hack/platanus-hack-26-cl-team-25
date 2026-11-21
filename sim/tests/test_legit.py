@@ -7,7 +7,7 @@ import time
 import pytest
 import uvicorn
 
-from conftest import fresh_db, load_app
+from .conftest import fresh_db, load_app
 from sim import legit
 
 

@@ -14,8 +14,6 @@ import time
 
 import httpx
 
-from immune_contracts import authtoken
-
 from . import bus as busmod, reqs
 
 log = logging.getLogger("pipeline.verify")
@@ -36,11 +34,20 @@ def _identity(cfg, ev: dict, manifest: dict | None):
     uid = ev.get("uid")
     if uid is None:
         return None, None, ""
+    from immune.auth import Authenticator
+    proj = getattr(cfg, "project", None)
+    auth = proj.auth if proj is not None else None
+    kind = auth.kind if auth is not None else "immune-token"
+    if kind in ("introspect", "none"):
+        return None, None, "auth.kind %s: the pipeline cannot mint a fresh identity of the same trust class" % kind
     if not cfg.prod_app_secret:
-        return None, None, "PROD_APP_SECRET not available: cannot open a fresh identified session"
+        return None, None, "prod secret not available: cannot open a fresh identified session"
     seed_max = int((manifest or {}).get("seed_max_uid") or 0)
     fresh = uid if (seed_max and uid <= seed_max) else (max(seed_max, int(uid)) + random.randint(5000, 50000))
-    tok = authtoken.mint(cfg.prod_app_secret, int(fresh), ev.get("role") or "user")
+    tok = Authenticator(auth.to_dict() if auth is not None else None, cfg.prod_app_secret).mint(
+        int(fresh), ev.get("role") or "user")
+    if not tok:
+        return None, None, "auth.kind %s cannot mint a credential" % kind
     return "Bearer " + tok, "uid:%d" % fresh, ""
 
 
@@ -57,12 +64,12 @@ def _find_route(cfg, session: str, path: str, since: int, deadline: float):
             if rid is None and e["type"] == "request.classified" and d.get("session") == session and d.get("path") == path:
                 rid = e.get("rid")
             if rid and e["type"] == "request.routed" and e.get("rid") == rid:
-                route = d.get("route")
+                route = d.get("would_route") or d.get("route")   # observe mode: what enforce would do
         if rid and route:
             return rid, route
         rec = _from_recordings(cfg.record_path, session, path)
         if rec:
-            return rec.get("rid"), rec.get("route")
+            return rec.get("rid"), rec.get("would_route") or rec.get("route")
         time.sleep(0.3)
     return rid, route
 
@@ -85,10 +92,28 @@ def _from_recordings(path: str, session: str, req_path: str):
     return None
 
 
+def _off_canary(inc: dict, path: str, manifest: dict | None):
+    """A canary path value is evidence for every non-owner, so the gateway always diverts it whatever the
+    code does. Verify with the same route and another (non-canary) seed id instead. -> (path, swapped)"""
+    param = inc.get("param") or {}
+    canaries = {str(v) for v in ((manifest or {}).get("canaries") or {}).get(param.get("name") or "", [])}
+    if param.get("in") != "path" or not canaries:
+        return path, False
+    tpl = (inc.get("route") or "").strip("/").split("/")
+    segs = path.strip("/").split("/")
+    want = "{%s}" % param["name"]
+    if len(tpl) != len(segs) or want not in tpl or segs[tpl.index(want)] not in canaries:
+        return path, False
+    alt = next(str(i) for i in range(1, 10 ** 6) if str(i) not in canaries)
+    segs[tpl.index(want)] = alt
+    return "/" + "/".join(segs), True
+
+
 def through_gateway(cfg, inc: dict, gateway_admin, manifest: dict | None = None):
     ev = inc["evidence"]
     rq = ev.get("request") or {}
     path, query = rq.get("path") or "/", rq.get("query") or ""
+    path, swapped = _off_canary(inc, path, manifest)
     headers = reqs.clean_headers(rq.get("headers") or {}, drop_auth=True)
     auth, session, why = _identity(cfg, ev, manifest)
     if why:
@@ -121,5 +146,6 @@ def through_gateway(cfg, inc: dict, gateway_admin, manifest: dict | None = None)
     except Exception as e:  # noqa: BLE001
         log.warning("prodlog: %s", e)
     if route == "prod" and forwarded is not False:
-        return True, "fresh session %s: forwarded to prod (status %d, rid %s)" % (session.split(":")[0], r.status_code, rid[:8])
+        return True, "fresh session %s: %s forwarded to prod (status %d, rid %s)%s" % (
+            session.split(":")[0], path, r.status_code, rid[:8], " (canary id replaced by a non-canary one)" if swapped else "")
     return False, "fresh session: route %s, forwarded=%s (status %d) — still diverted" % (route, forwarded, r.status_code)

@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from immune.auth import Authenticator, credential_key, prod_secret_for
 from immune_contracts import authtoken, events, wire
 
 from . import l0
@@ -38,6 +39,7 @@ RESP_DROP = HOP | {"content-encoding", "date", "server"}
 DENY_BODY = b'{"detail":"Not Found"}'
 SID_RE = re.compile(r"[A-Za-z0-9_\-]{16,64}")
 MAX_BODY = 10 * 1024 * 1024
+MODES = ("enforce", "observe", "passthrough")
 CLONE_WAIT_S = 0.3
 
 
@@ -68,14 +70,22 @@ class Config:
     manifest_path: str = ""
     record_path: str = ""
     captive_ttl_s: float = 900.0
+    mode: str = "enforce"            # enforce | observe | passthrough (initial; POST /_admin/mode changes it)
+    auth: dict = field(default_factory=lambda: {"kind": "immune-token"})   # the `auth` block of config.yaml
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
         g = env.get
-        return cls(host=g("GW_HOST", "0.0.0.0"), data_port=int(g("GW_DATA_PORT", "8080")),
+        try:
+            auth = json.loads(g("IMMUNE_AUTH") or "{}") or {"kind": "immune-token"}
+        except ValueError:
+            auth = {"kind": "immune-token"}
+        mode = g("GW_MODE", "enforce")
+        return cls(mode=mode if mode in MODES else "enforce", auth=auth,
+                   prod_secret=prod_secret_for(auth, env), shadow_secret=g("SHADOW_APP_SECRET", ""),
+                   host=g("GW_HOST", "0.0.0.0"), data_port=int(g("GW_DATA_PORT", "8080")),
                    admin_port=int(g("GW_ADMIN_PORT", "8081")), ingest_port=int(g("GW_INGEST_PORT", "9000")),
                    prod_addr=g("PROD_ADDR", "127.0.0.1:8000"), prod_release=g("PROD_RELEASE", ""),
-                   prod_secret=g("PROD_APP_SECRET", ""), shadow_secret=g("SHADOW_APP_SECRET", ""),
                    admin_token=g("ADMIN_TOKEN", ""), bus_url=g("BUS_URL", ""), bus_token=g("BUS_TOKEN", ""),
                    run_id=g("RUN_ID", ""), openapi_path=g("OPENAPI_PATH", ""), manifest_path=g("MANIFEST_PATH", ""),
                    record_path=g("RECORD_PATH", ""), captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
@@ -107,6 +117,7 @@ class Ctx:
     route: str = "prod"
     verdict: str | None = None
     status: int = 0
+    would: str | None = None          # observe mode: the route enforce would have taken
 
 
 class Recorder:
@@ -141,7 +152,9 @@ class Gateway:
         self.pool = Pool(idle_ttl_s=cfg.captive_ttl_s, on_release=self._on_release)
         self.rules: dict[str, Rule] = {}
         self.enum = EnumTracker()
-        self.mode = "enforce"
+        self.mode = cfg.mode if cfg.mode in MODES else "enforce"
+        self.auth = Authenticator(cfg.auth, cfg.prod_secret, cfg.shadow_secret)
+        self._introspect_cache: OrderedDict = OrderedDict()   # credential hash -> (expires, Who fields)
         self.recorder = Recorder(cfg.record_path)
         self.prodlog: OrderedDict = OrderedDict()
         self.rid_ctx: OrderedDict = OrderedDict()
@@ -223,16 +236,53 @@ class Gateway:
 
     # ---------------------------------------------------------- identity
     def identify(self, hmap: dict) -> Who:
-        token = authtoken.bearer(hmap)
-        if not token:
-            return Who()
-        ident = authtoken.verify(self.cfg.prod_secret, token) if self.cfg.prod_secret else None
-        if ident is not None:
-            return Who(uid=ident.uid, role=ident.role, trusted=ident.uid <= self.manifest.seed_max_uid)
-        # shadow-secret token arriving from outside = honeytoken (expired ones too: now=0)
-        if self.cfg.shadow_secret and authtoken.verify(self.cfg.shadow_secret, token, now=0) is not None:
+        """Identity from the request's own credentials (no network). Introspection: see resolve()."""
+        ident = self.auth.from_token(authtoken.bearer(hmap))
+        if ident.honeytoken:
             return Who(honeytoken=True)
+        if ident.uid is not None:
+            return Who(uid=ident.uid, role=ident.role, trusted=ident.uid <= self.manifest.seed_max_uid)
         return Who()
+
+    async def resolve(self, hmap: dict) -> Who:
+        if self.auth.kind != "introspect":
+            return self.identify(hmap)
+        authz = hmap.get("authorization", "")
+        cookie = _strip_cookie(hmap.get("cookie", ""), "gwsid")
+        if not authz and not cookie:
+            return Who()
+        key = credential_key(authz, cookie)
+        now = time.monotonic()
+        hit = self._introspect_cache.get(key)
+        if hit is not None and hit[0] > now:
+            uid, role = hit[1]
+        else:
+            uid, role = await self._introspect(authz, cookie)
+            ttl = self.auth.cache_s if uid is not None else min(self.auth.cache_s, 5.0)
+            self._introspect_cache[key] = (now + ttl, (uid, role))
+            while len(self._introspect_cache) > 10000:
+                self._introspect_cache.popitem(last=False)
+        if uid is None:
+            return Who()
+        return Who(uid=uid, role=role, trusted=uid <= self.manifest.seed_max_uid)
+
+    async def _introspect(self, authz: str, cookie: str):
+        """GET <auth.path> on PROD with the client's credentials -> (uid, role) or (None, None)."""
+        headers = [("accept", "application/json")]
+        if authz:
+            headers.append(("authorization", authz))
+        if cookie:
+            headers.append(("cookie", cookie))
+        host, _, port = self.upstream["addr"].rpartition(":")
+        try:
+            url = httpx.URL(scheme="http", host=host or self.upstream["addr"], port=int(port or 80),
+                            raw_path=self.auth.path.encode("latin-1"))
+            r = await self.prod_client.get(url, headers=headers, timeout=3.0)
+            ident = self.auth.from_introspection(r.status_code, r.content)
+        except Exception as e:  # noqa: BLE001
+            log.warning("introspection failed: %s", e)
+            return None, None
+        return ident.uid, ident.role
 
     # ---------------------------------------------------------- data plane
     async def data_app(self, scope, receive, send):
@@ -290,7 +340,7 @@ class Gateway:
         new_sid = None
         if not sid or not SID_RE.fullmatch(sid):
             sid = new_sid = secrets.token_urlsafe(18)
-        who = self.identify(hmap)
+        who = await self.resolve(hmap)
         cookie_session = f"gwsid:{sid}"
         session = f"uid:{who.uid}" if who.uid is not None else cookie_session
         return Ctx(rid=uuid.uuid4().hex, t0=time.monotonic(), method=scope["method"].upper(), raw_path=raw_path,
@@ -306,6 +356,8 @@ class Gateway:
         if self.mode == "passthrough":
             ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, None)
             return await self.to_prod(ctx)
+        if self.mode == "observe":
+            return await self.observe(ctx, view)
 
         # 3. captive session -> its (lazily bound) L2 clone; never for a trusted identity
         if not ctx.who.trusted:
@@ -334,6 +386,47 @@ class Gateway:
         if ctx.res.cls == EVIDENCE:
             return await self.evidence(ctx)
         return await self.detonate(ctx)
+
+    # -- observe mode (contracts/product.md §3): classify and detonate as in enforce, answer from prod
+    async def observe(self, ctx: Ctx, view: View) -> Upstream:
+        """Nothing is denied, diverted or captured; ctx.would records what enforce would have done."""
+        if l0.is_scanner_path(ctx.raw_path) and self.spec.match(ctx.method, ctx.raw_path)[0] is None:
+            ctx.res = Result(cls=SUSPECT, reasons=["scanner"])
+            self._publish_classified(ctx)
+            ctx.would = "l0"
+            return await self.to_prod(ctx)
+        ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, self.enum)
+        self._publish_classified(ctx)
+        if ctx.res.cls == CLEAN:
+            ctx.would = "prod"
+        elif ctx.res.cls == EVIDENCE and ctx.who.trusted:
+            ctx.would = "deny"
+        else:   # suspect, or evidence (enforce would capture and replay in L2): detonate in L1
+            fail_closed = bool(ctx.res.rule_hit) or _high_signal(ctx.res.reasons) or ctx.res.cls == EVIDENCE
+            clone = await self.pool.acquire(CLONE_WAIT_S)
+            if clone is None:
+                ctx.verdict = "no_clone"
+                ctx.would = "deny" if fail_closed else "prod"
+            else:
+                try:
+                    async with clone.lock:
+                        up = await self.to_clone(ctx, clone, "L1")
+                    ctx.verdict = up.verdict
+                    await self.pool.release(clone)
+                    if up.verdict == wire.VERDICT_ORACLE:
+                        ctx.would = "deny" if ctx.who.trusted else "shadow_l1"
+                    elif up.verdict == wire.VERDICT_CLEAN:
+                        ctx.would = "prod"
+                    else:
+                        ctx.would = "deny" if ctx.res.rule_hit else "prod"
+                    if ctx.res.cls == EVIDENCE:
+                        ctx.would = "shadow_l2"
+                except Exception as e:
+                    log.warning("clone %s failed: %s", clone.id, e)
+                    await self.pool.retire(clone)
+                    ctx.verdict = "no_clone"
+                    ctx.would = "deny" if fail_closed else "prod"
+        return await self.to_prod(ctx)
 
     # -- step 7
     async def detonate(self, ctx: Ctx) -> Upstream:
@@ -487,10 +580,15 @@ class Gateway:
         await send({"type": "http.response.start", "status": up.status, "headers": headers})
         await send({"type": "http.response.body", "body": up.body})
 
+    def _obs(self, data: dict) -> dict:
+        if self.mode == "observe":
+            data["observe"] = True
+        return data
+
     def _publish_classified(self, ctx: Ctx):
-        self.bus.publish(events.REQ_CLASSIFIED, {"class": ctx.res.cls, "reasons": list(ctx.res.reasons),
-                                                 "method": ctx.method, "path": ctx.raw_path,
-                                                 "session": ctx.session, "uid": ctx.who.uid}, rid=ctx.rid)
+        self.bus.publish(events.REQ_CLASSIFIED, self._obs({"class": ctx.res.cls, "reasons": list(ctx.res.reasons),
+                                                           "method": ctx.method, "path": ctx.raw_path,
+                                                           "session": ctx.session, "uid": ctx.who.uid}), rid=ctx.rid)
 
     def _finish(self, ctx: Ctx):
         ms = round((time.monotonic() - ctx.t0) * 1000, 1)
@@ -500,8 +598,10 @@ class Gateway:
         st["requests"] += 1
         st["by_class"][ctx.res.cls] = st["by_class"].get(ctx.res.cls, 0) + 1
         st["by_route"][ctx.route] = st["by_route"].get(ctx.route, 0) + 1
-        self.bus.publish(events.REQ_ROUTED, {"route": ctx.route, "status": ctx.status, "verdict": ctx.verdict, "ms": ms},
-                         rid=ctx.rid)
+        data = {"route": ctx.route, "status": ctx.status, "verdict": ctx.verdict, "ms": ms}
+        if ctx.would is not None:
+            data["would_route"] = ctx.would
+        self.bus.publish(events.REQ_ROUTED, self._obs(data), rid=ctx.rid)
         self.recorder.write(self._record(ctx, ms))
 
     def _record(self, ctx: Ctx, ms: float) -> dict:
@@ -520,7 +620,8 @@ class Gateway:
                 "query": redact_query(ctx.query, sens.get("query") or set()), "headers": headers,
                 "body_b64": base64.b64encode(body).decode(), "class": ctx.res.cls, "reasons": list(ctx.res.reasons),
                 "route": ctx.route, "verdict": ctx.verdict, "status": ctx.status, "ms": ms,
-                "release": self.upstream["release"], "mode": self.mode}
+                "release": self.upstream["release"], "mode": self.mode,
+                **({"observe": True, "would_route": ctx.would} if ctx.would is not None else {})}
 
     # ---------------------------------------------------------- admin
     async def switch_upstream(self, addr: str, release: str):
@@ -632,8 +733,8 @@ class Gateway:
         async def mode(request):
             d = await body_json(request)
             m = d.get("mode") if isinstance(d, dict) else None
-            if m not in ("enforce", "passthrough"):
-                return JSONResponse({"detail": "mode must be enforce|passthrough"}, status_code=422)
+            if m not in MODES:
+                return JSONResponse({"detail": "mode must be enforce|observe|passthrough"}, status_code=422)
             gw.mode = m
             return JSONResponse({"mode": gw.mode})
 
@@ -693,7 +794,7 @@ class Gateway:
             session, uid = gw.rid_ctx.get(str(ev.get("rid", "")), (None, None))
             data["session"] = session
             data["uid"] = uid if uid is not None else ev.get("uid")
-            gw.bus.publish(events.ORACLE_FIRED, data, rid=str(ev.get("rid") or "") or None)
+            gw.bus.publish(events.ORACLE_FIRED, gw._obs(data), rid=str(ev.get("rid") or "") or None)
             return JSONResponse({"ok": True})
 
         return Starlette(routes=[Route("/_clone/evidence", evidence, methods=["POST"])])
@@ -710,6 +811,12 @@ def _cookie(header: str, name: str) -> str | None:
         if k == name:
             return v.strip().strip('"')
     return None
+
+
+def _strip_cookie(header: str, name: str) -> str:
+    """The Cookie header without `name` (the gateway's own session cookie never reaches the app)."""
+    parts = [p.strip() for p in (header or "").split(";") if p.strip()]
+    return "; ".join(p for p in parts if p.partition("=")[0].strip() != name)
 
 
 def _clean_resp_headers(items) -> list:

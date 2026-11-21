@@ -29,11 +29,13 @@ def test_reset_layout_and_hardening(env):
         assert hc["ReadonlyRootfs"] and hc["CapDrop"] == ["ALL"] and "no-new-privileges:true" in hc["SecurityOpt"]
         assert hc["PidsLimit"] > 0 and hc["Memory"] > 0 and "/tmp" in hc["Tmpfs"]
     mounts = {m["Destination"]: m for m in prod.attrs["Mounts"]}
-    assert mounts["/srv"]["RW"] is False and mounts["/srv/fixture_app"]["RW"] is False
-    assert mounts["/srv/fixture_app"]["Source"].endswith("releases/r1/fixture_app")
+    assert mounts["/opt/immune"]["RW"] is False and mounts["/app"]["RW"] is False
+    assert mounts["/app"]["Source"].endswith("releases/r1")
+    assert prod.attrs["Config"]["WorkingDir"] == "/app" and prod.labels["immune.project"] == "wp4"
     assert mounts["/data"]["RW"] is True and mounts["/data"]["Source"] == env.prod
     envs = dict(e.split("=", 1) for e in prod.attrs["Config"]["Env"])
-    assert envs["APP_SECRET"] == "ps" and envs["APP_DB"] == "/data/app.db" and envs["APP_STATIC"] == "/srv/fixture_app/static"
+    assert envs["APP_SECRET"] == "ps" and envs["APP_DB"] == "/data/app.db" and envs["APP_STATIC"] == "/app/fixture_app/static"
+    assert envs["PYTHONPATH"].split(":")[0] == "/app" and "/opt/immune" in envs["PYTHONPATH"].split(":")
     for n in (1, 2):
         c = ctr(env, f"clone-{n}")
         assert c.labels["immune.role"] == "clone" and c.labels["immune.run"] == run
