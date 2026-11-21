@@ -6,7 +6,7 @@ import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from urllib.parse import parse_qsl, unquote_plus
+from urllib.parse import parse_qsl, unquote, unquote_plus
 
 from immune_contracts import grammar
 
@@ -149,6 +149,42 @@ class EnumTracker:
         self.seen.clear()
 
 
+# ---------------------------------------------------------------- built-in rule: classic path traversal
+
+# Works on any route, in or out of the OpenAPI spec (an unknown app has no spec to violate).
+_OVERLONG = {"%c0%ae": ".", "%e0%80%ae": ".", "%c0%af": "/", "%e0%80%af": "/", "%c1%9c": "\\", "%c0%5c": "\\"}
+_OVERLONG_RE = re.compile("|".join(re.escape(k) for k in _OVERLONG), re.IGNORECASE)
+_DECODE_ROUNDS = 4   # %252e%252e, %%32%65 ... : decode until stable, bounded
+
+
+def _forms(raw: str):
+    """The value as successive decoders would see it, with backslashes folded to '/'."""
+    cur = raw
+    for _ in range(_DECODE_ROUNDS):
+        cur = _OVERLONG_RE.sub(lambda m: _OVERLONG[m.group(0).lower()], cur)
+        yield cur.replace("\\", "/")
+        nxt = unquote(cur)
+        if nxt == cur:
+            return
+        cur = nxt
+
+
+def traversal_in_path(raw_path: str) -> bool:
+    """A '..' path segment under any classic encoding. Clients resolve dot segments before sending,
+    so a request that still carries one was built by hand."""
+    return any(seg.split(";", 1)[0] == ".." for form in _forms(raw_path) for seg in form.split("/"))
+
+
+def traversal_in_value(value: str) -> bool:
+    """A parameter value that climbs directories: '../', '/..' or a bare '..' (also '....//')."""
+    return any(f == ".." or "../" in f or f.endswith("/..") for f in _forms(value))
+
+
+def is_builtin_rule(reasons) -> bool:
+    """Reasons that fail closed like an active rule (deny unless a clone says clean)."""
+    return any(r == "traversal:path" for r in reasons)
+
+
 # ---------------------------------------------------------------- helpers
 
 def _check_text(res: Result, where: str, name: str, value: str, schema: dict | None, sensitive: bool):
@@ -248,6 +284,13 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
     for k, n in counts.items():
         if n > 1:
             res.add(f"dup_query:{k}")
+
+    # ---- built-in rule: classic path traversal (path and query, on- or off-spec)
+    if traversal_in_path(view.raw_path):
+        res.add("traversal:path")
+    for k, v in pairs:
+        if traversal_in_value(v):
+            res.add(f"traversal:query.{k if SAFE_KEY.fullmatch(k) else '?'}")
 
     if op is not None:
         sens_q = res.sensitive.setdefault("query", set())

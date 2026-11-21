@@ -139,3 +139,42 @@ def test_enumeration():
     assert "enumeration" not in results[2] and "enumeration" in results[4]
     # another session is unaffected
     assert c("GET", "/api/orders/1", who=TRUSTED, enum=enum, session="uid:4").cls == CLEAN
+
+
+# ---- built-in rule: classic path traversal (any route, on- or off-spec)
+from gateway.classifier import traversal_in_path, traversal_in_value  # noqa: E402
+
+OFF_SPEC = Spec(None)
+
+
+@pytest.mark.parametrize("path", [
+    "/public/plugins/alertlist/../../../../etc/passwd",
+    "/cgi-bin/.%2e/.%2e/etc/passwd",
+    "/icons/.%%32%65/.%%32%65/etc/passwd",
+    "/a/%252e%252e/%252e%252e/x",
+    "/a/..%5c..%5cwin.ini",
+    "/a/%c0%ae%c0%ae/x",
+    "/x/..;/admin",
+])
+def test_traversal_path_detected_off_spec(path):
+    assert traversal_in_path(path)
+    r = c("GET", path, who=ANON, spec=OFF_SPEC)
+    assert r.cls == SUSPECT and "traversal:path" in r.reasons
+
+
+@pytest.mark.parametrize("path", [
+    "/public/plugins/alertlist/img/icn.svg", "/api/dashboards/uid/a..b", "/files/manual.v1..2.pdf",
+    "/a/.../b", "/a/.hidden/b", "/a/%2e/b", "/a/..b/c", "/",
+])
+def test_traversal_path_benign(path):
+    assert not traversal_in_path(path)
+    assert c("GET", path, who=ANON, spec=OFF_SPEC).cls == CLEAN
+
+
+def test_traversal_query_value():
+    for v in ("../../etc/passwd", "..%2f..%2fetc", "....//....//etc", "..\\..\\x"):
+        assert traversal_in_value(v), v
+    for v in ("manual.v1.2.pdf", "a..b", "O'Brien", "..."):
+        assert not traversal_in_value(v), v
+    r = c("GET", "/anything", "file=..%2F..%2Fetc%2Fpasswd", who=ANON, spec=OFF_SPEC)
+    assert "traversal:query.file" in r.reasons
