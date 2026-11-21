@@ -203,7 +203,8 @@ def test_log_parsers():
                  "1795286000.400 [77] STATEMENT:  SELECT x x"]:
         out += pg.feed(line)
     out += pg.flush()
-    assert out == [(1795286000.1, "SELECT 1"), (1795286000.2, "SELECT *\nFROM users WHERE id = $1")]
+    assert out == [(1795286000.1, "SELECT 1"), (1795286000.2, "SELECT *\nFROM users WHERE id = $1"),
+                   (1795286000.4, "SELECT x x")]        # a statement that failed to parse is still evidence
     my = LogParser("mysql")
     out = []
     for line in ["2026-11-21T15:40:01.250000Z\t   12 Connect\troot@localhost on app using Socket",
@@ -217,21 +218,18 @@ def test_log_parsers():
 
 
 async def test_sql_event_from_statement_log():
-    class Fake:
+    class Fake(SqlLog):
         async def window(self, t0, t1):
             return [Q % "5 AND 1=(SELECT 1 FROM pg_sleep(5))"]
-
-        async def stop(self):
-            pass
     sc, _, pushed = make(b'{"id": 5}')
-    sc.sqllog = Fake()
+    sc.sqllog = Fake("true")
     sc_scope = dict(scope("/api/users"), query_string=b"id=5%20AND%201%3D(SELECT%201%20FROM%20pg_sleep(5))")
     _, headers, _ = await sc.handle(sc_scope, b"")
     assert dict(headers)[wire.H_VERDICT] == "oracle"
     ev = json.loads(pushed[0][1])["events"][0]
     assert ev["oracle"] == "sql" and ev["detail"]["param"] == "id" and ev["detail"]["location"] == "query"
     sc2, _, pushed2 = make(b'{"id": 5}')
-    sc2.sqllog = Fake()
+    sc2.sqllog = Fake("true")
     _, headers, _ = await sc2.handle(dict(scope("/api/users"), query_string=b"id=5"), b"")
     assert dict(headers)[wire.H_VERDICT] == "clean" and not pushed2
 
@@ -242,3 +240,92 @@ def test_sqllog_window_takes_only_the_request():
                  "1795286101.500 [1] LOG:  statement: SELECT 'after'"]:
         s.feed(line)
     assert s.take(1795286100.4, 1795286101.0) == ["SELECT 'during'"] and s.take(1795286101.0, 1795286102.0) == ["SELECT 'after'"]
+
+
+# --- sql oracle: structure rule ---------------------------------------------------------------------------
+from sidecar.core import H_LEARN, learn_message      # noqa: E402
+from sidecar.sqllog import Baseline, fingerprint      # noqa: E402
+
+
+@pytest.mark.parametrize("a,b,same", [
+    ("SELECT name FROM items WHERE id = 5", "select name  from ITEMS where id = 912", True),
+    ("SELECT * FROM u WHERE name = 'ana'", "SELECT * FROM u WHERE name = 'O''Brien'", True),
+    ("SELECT * FROM u WHERE id = $1", "SELECT * FROM u WHERE id = 7", True),
+    ("SELECT * FROM u WHERE id IN (1)", "SELECT * FROM u WHERE id IN (1, 2, 3, 4)", True),
+    ("INSERT INTO t (a, b) VALUES (1, 'x')", "INSERT INTO t (a, b) VALUES (1, 'x'), (2, 'y'), (3, 'z')", True),
+    ("SELECT * FROM u WHERE balance > -5", "SELECT * FROM u WHERE balance > 5", True),
+    ("SELECT name FROM items WHERE id = 5", "SELECT name FROM items WHERE id = 5 AND 1=1", False),
+    ("SELECT name FROM items WHERE id = 5", "SELECT name FROM items WHERE id = 5 AND SLEEP(5)", False),
+    ("SELECT name FROM items WHERE id = 5", "SELECT name FROM items WHERE id = 5 -- x", False),
+    ("SELECT name FROM items WHERE id = 5", "SELECT name FROM items WHERE id = 5 UNION SELECT pw FROM users", False),
+    ("SELECT * FROM u WHERE name = 'a'", "SELECT * FROM u WHERE name = 'a' OR '1'='1'", False),
+    ("SELECT * FROM u ORDER BY name", "SELECT * FROM u ORDER BY created", False),      # a different column is new
+    ("SELECT a - 5 FROM t", "SELECT a FROM t", False),                                 # binary minus is kept
+])
+def test_fingerprint(a, b, same):
+    assert (fingerprint(a) == fingerprint(b)) is same
+
+
+def test_baseline_learns_and_flags(tmp_path):
+    path = str(tmp_path / "baseline.json")
+    s = SqlLog("true", baseline=Baseline(path))
+    legit = "SELECT name FROM items WHERE id = 5"
+    second_order = "SELECT * FROM orders WHERE owner = 'bob' OR 1=1"        # the value came from the database
+    assert s.novel([second_order]) == []                                    # rule off: nothing learnt yet
+    assert s.learn([legit, "SELECT * FROM orders WHERE owner = 'ana'"]) == 2
+    assert s.novel([legit.replace("5", "77")]) == []
+    ev = s.events([legit.replace("5", "77"), second_order], [("query", "id", "77")])
+    assert [(e["reason"], e["param"]) for e in ev] == [("new_structure", "")] and "or ? = ?" in ev[0]["structure"]
+    both = s.events(["SELECT name FROM items WHERE id = 5 AND 1=1"], [("query", "id", "5 AND 1=1")])
+    assert [(e["reason"], e["param"]) for e in both] == [("input_as_syntax+new_structure", "id")]
+    again = SqlLog("true", baseline=Baseline(path))                         # persisted
+    assert again.baseline.ready and again.novel([legit]) == [] and len(again.novel([second_order])) == 1
+
+
+def test_background_statements_join_the_baseline():
+    s = SqlLog("true")
+    s.feed("1795286100.100 [1] LOG:  statement: DELETE FROM sessions WHERE expires < 17")      # scheduled job
+    s.feed("1795286100.500 [1] LOG:  statement: SELECT 1")
+    assert s.take(1795286100.4, 1795286101.0) == ["SELECT 1"]
+    assert fingerprint("DELETE FROM sessions WHERE expires < 99") in s.baseline.known
+
+
+def test_inputs_include_cookies_and_headers():
+    ins = inputs_of("/x", "", b"", "", [("cookie", "sid=abc; lang=es%27%20OR%201=1"), ("user-agent", "ua' OR 1=1"),
+                                        ("accept", "text/html")])
+    assert ("cookie", "lang", "es' OR 1=1") in ins and ("header", "user-agent", "ua' OR 1=1") in ins
+    assert not any(n == "accept" for _, n, _ in ins)
+
+
+async def test_learn_mode_needs_a_valid_signature():
+    class Fake(SqlLog):
+        async def window(self, t0, t1):
+            return ["SELECT * FROM audit WHERE actor = 'x' AND 1=1"]
+    for signed in (True, False):
+        sc, _, pushed = make(b"{}")
+        sc.sqllog = Fake("true")
+        sc.sqllog.baseline.add([fingerprint("SELECT 1")], from_request=True)
+        sig = wire.sign("k", learn_message("GET", b"/audit")) if signed else "0" * 64
+        _, headers, _ = await sc.handle(scope("/audit", [("x-imm-mode", "learn"), (H_LEARN, sig)]), b"")
+        h = dict(headers)
+        if signed:
+            assert h[wire.H_VERDICT] == "clean" and h["x-imm-learnt"] == "1" and not pushed
+        else:       # treated as a normal request: the unknown structure fires
+            assert h[wire.H_VERDICT] == "oracle" and len(pushed) == 1
+
+
+def test_learn_replays_only_clean_recordings():
+    from sidecar.learn import replay
+    sent = []
+
+    def app(req: httpx.Request):
+        sent.append((req.method, req.extensions.get("target"), req.headers.get(wire.H_MODE),
+                     wire.check("k", learn_message(req.method, req.extensions["target"]), req.headers.get(H_LEARN))))
+        return httpx.Response(200, headers={"x-imm-learnt": "2"})
+    base = {"method": "GET", "path": "/api/items", "query": "id=5", "headers": {"host": "x", "cookie": "sid=1"},
+            "body_b64": "", "class": "clean", "reasons": [], "route": "prod", "status": 200}
+    recs = [base, dict(base), dict(base, query="id=6", **{"class": "suspect"}, reasons=["grammar:query.id"]),
+            dict(base, query="id=7", status=500), dict(base, query="id=8", route="clone")]
+    out = replay("http://sc:1", "k", recs, httpx.Client(transport=httpx.MockTransport(app)))
+    assert sent == [("GET", b"/api/items?id=5", "learn", True)]
+    assert out == {"replayed": 1, "learnt": 2, "skipped": 4, "errors": 0}

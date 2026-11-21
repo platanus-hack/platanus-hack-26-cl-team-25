@@ -4,13 +4,20 @@ The shadow database is ours, so it can log every statement (Postgres: log_statem
 log_line_prefix='%n [%p] '; MySQL: general_log=ON to a file). The sidecar follows that log and, for each
 request, looks at the statements executed while it was being served.
 
-`sql` event: a value sent in the request appears in a statement as SQL syntax, i.e. the text of the value
-covers more than one token (it is not just one literal, one number or one identifier). That is what an
-injection is, whatever the response looks like: time-based, boolean-blind, login bypass and writes all fire.
-Bound parameters never fire (the value is not part of the statement, or is one escaped literal).
+Two rules produce a `sql` event; neither looks at the response, so time-based, boolean-blind, login bypass
+and write injections all fire:
 
-No learning period and no per-app knowledge. Not seen: input that is transformed before reaching the query
-(decoded from base64, stored and used later), and values sent in headers or cookies.
+input_as_syntax  a value sent in the request appears in a statement as SQL syntax: the text of the value
+                 covers more than one token (not just one literal, number or identifier). No learning, no
+                 per-app knowledge. Bound parameters never fire. Blind to input that is transformed before
+                 it reaches the query (base64, stored now and used later).
+new_structure    the statement's structure (`fingerprint`: literals -> ?, lists collapsed, case folded) is
+                 not in the baseline of structures the app is known to produce. Does not need the value to
+                 appear, so it covers transformed and second-order input. The baseline is learnt from
+                 (a) what the database executes with no request in flight and (b) legitimate requests
+                 replayed in learn mode (`python -m sidecar.learn`, from the gateway's recordings). The rule
+                 is off until at least one request has been learnt. A legitimate structure that was never
+                 learnt fires: coverage of the learning traffic is what bounds the false positives.
 """
 from __future__ import annotations
 
@@ -18,6 +25,7 @@ import asyncio
 import calendar
 import json
 import logging
+import os
 import re
 import shlex
 import time
@@ -77,8 +85,67 @@ def injected(sql: str, value: str, dialect: str = "postgres") -> bool:
     return False
 
 
-def inputs_of(raw_path: str, query: str, body: bytes, content_type: str = "") -> list:
-    """[(location, name, value)] sent by the client: path segments, query string, form or JSON body."""
+def fingerprint(sql: str, dialect: str = "postgres") -> str:
+    """The statement's structure: literals and placeholders -> ?, comments -> /**/, value lists collapsed."""
+    out = []
+    for kind, s, e in tokens(sql, dialect):
+        text = sql[s:e]
+        if kind in ("string", "number") or (kind == "word" and (text == "?" or text[0] == "$")):
+            if out and out[-1] in ("-", "+") and (len(out) == 1 or out[-2] in OPENERS):
+                out.pop()                   # sign of a literal: "= -5" has the structure of "= 5"
+            out.append("?")
+        elif kind == "comment":
+            out.append("/**/")
+        elif kind == "word":
+            out.append(text if text[0] in '"`' else text.lower())
+        else:
+            out.append(text)
+    fp = " ".join(out)
+    fp = LIST.sub("( ?+ )", fp)             # IN (1, 2, 3) and IN (1) are the same structure
+    while True:
+        new = ROWS.sub("( ?+ )", fp)        # multi-row VALUES
+        if new == fp:
+            return fp
+        fp = new
+
+
+OPENERS = {"(", ",", "=", "<", ">", "!", "+", "-", "*", "/", "%", "|", "select", "where", "and", "or", "not", "in",
+           "values", "set", "when", "then", "else", "by", "limit", "offset", "like", "between", "return", "on"}
+LIST = re.compile(r"\( \?(?: , \?)* \)")
+ROWS = re.compile(r"\( \?\+ \)(?: , \( \?\+ \))+")
+SKIP_HEADERS = {"host", "accept", "accept-encoding", "accept-language", "content-type", "content-length",
+                "connection", "cookie", "cache-control", "pragma", "upgrade-insecure-requests"}
+
+
+class Baseline:
+    """Statement structures the app is known to produce. Persisted as JSON when a path is given."""
+
+    def __init__(self, path: str = ""):
+        self.path, self.known, self.requests = path, set(), 0
+        if path and os.path.isfile(path):
+            with open(path) as f:
+                raw = json.load(f)
+            self.known, self.requests = set(raw.get("structures") or []), int(raw.get("requests") or 0)
+
+    @property
+    def ready(self) -> bool:
+        return self.requests > 0
+
+    def add(self, fingerprints, from_request: bool = False) -> int:
+        new = set(fingerprints) - self.known
+        self.known |= new
+        self.requests += bool(from_request)
+        if self.path and (new or from_request):
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"requests": self.requests, "structures": sorted(self.known)}, f, indent=1)
+            os.replace(tmp, self.path)
+        return len(new)
+
+
+def inputs_of(raw_path: str, query: str, body: bytes, content_type: str = "", headers=()) -> list:
+    """[(location, name, value)] sent by the client: path segments, query string, form or JSON body,
+    cookies and the other request headers."""
     out = [("path", "", unquote(seg)) for seg in raw_path.split("/") if seg]
     out += [("query", k, v) for k, v in parse_qsl(query, keep_blank_values=False)]
     text = body.decode("utf-8", "replace") if body else ""
@@ -98,6 +165,13 @@ def inputs_of(raw_path: str, query: str, body: bytes, content_type: str = "") ->
             pass
     elif text and ("urlencoded" in content_type or not content_type):
         out += [("body", k, v) for k, v in parse_qsl(text, keep_blank_values=False)]
+    for k, v in headers:
+        if k.lower() == "cookie":
+            for part in v.split(";"):
+                name, _, val = part.strip().partition("=")
+                out += [("cookie", name, val), ("cookie", name, unquote(val))]
+        elif k.lower() not in SKIP_HEADERS:
+            out.append(("header", k.lower(), v))
     seen, uniq = set(), []
     for loc, name, v in out:
         if len(v.strip()) >= 2 and v not in seen:
@@ -142,8 +216,8 @@ class LogParser:
         m = PG.match(line)
         if m or PG_OTHER.match(line):
             done, self.cur = self._flush(), None
-            if m and ("statement: " in line or "execute " in line):
-                self.cur = [float(m.group(1)), m.group(2)]
+            if m and (" STATEMENT:" in line or "statement: " in line or "execute " in line):
+                self.cur = [float(m.group(1)), m.group(2)]      # STATEMENT: one that failed (syntax errors too)
         elif self.cur and line.startswith("\t"):
             self.cur[1] += "\n" + line[1:]
         return done
@@ -159,9 +233,10 @@ class LogParser:
 class SqlLog:
     """Follows the log command and hands out the statements of a request window."""
 
-    def __init__(self, cmd, dialect: str = "postgres", settle_s: float = 0.2):
+    def __init__(self, cmd, dialect: str = "postgres", settle_s: float = 0.2, baseline: Baseline | None = None):
         self.cmd = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
         self.dialect, self.settle_s = dialect, settle_s
+        self.baseline = baseline or Baseline()
         self.parser = LogParser(dialect)
         self.statements = []        # (ts, text)
         self.last_ts = 0.0
@@ -181,8 +256,42 @@ class SqlLog:
         for ts, text in self.parser.flush():       # the last statement has no following line yet
             self._add(ts, text)
         got = [text for ts, text in self.statements if t0 <= ts <= t1]
+        # executed with no request in flight (start-up, scheduled jobs): the app's own structures
+        n = self.baseline.add(fingerprint(text, self.dialect) for ts, text in self.statements if ts < t0)
+        if n:
+            log.info("baseline: %d background structure(s) learnt (%d known)", n, len(self.baseline.known))
         self.statements = [(ts, text) for ts, text in self.statements if ts > t1]
         return got
+
+    def learn(self, statements: list) -> int:
+        """A legitimate request (learn mode): its structures join the baseline."""
+        return self.baseline.add((fingerprint(t, self.dialect) for t in statements), from_request=True)
+
+    def novel(self, statements: list) -> list:
+        """[(statement, structure)] whose structure is not in the baseline. Empty until a request was learnt."""
+        if not self.baseline.ready:
+            return []
+        out, seen = [], set()
+        for text in statements:
+            fp = fingerprint(text, self.dialect)
+            if fp not in self.baseline.known and fp not in seen:
+                seen.add(fp)
+                out.append((text, fp))
+        return out
+
+    def events(self, statements: list, inputs: list) -> list:
+        """`sql` event details for one request: both rules, one event per statement or input."""
+        hits = [dict(h, reason="input_as_syntax") for h in find_injections(statements, inputs, self.dialect)]
+        flagged = {h["statement"] for h in hits}
+        for text, fp in self.novel(statements):
+            if text[:800] in flagged:
+                for h in hits:
+                    if h["statement"] == text[:800]:
+                        h["reason"] = "input_as_syntax+new_structure"
+                continue
+            hits.append({"statement": text[:800], "input": "", "param": "", "location": "",
+                         "reason": "new_structure", "structure": fp[:400]})
+        return hits
 
     async def window(self, t0: float, t1: float) -> list:
         if not self.attached:

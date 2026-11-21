@@ -8,8 +8,8 @@ Speaks the same clone protocol as `shadow/` (contracts/README.md §5), so the ga
    app database, /etc/passwd ...). The marker map says which file each marker lives in. With
    SYSCALL_CONTAINER set, also what the app process did while serving this request (sidecar/syscalls.py):
    `file` it opened a protected path, `proc` it executed a program, `net` it connected to an address.
-   With SQL_LOG_CMD set, `sql`: a request value reached a statement of the shadow database as SQL syntax
-   (sidecar/sqllog.py);
+   With SQL_LOG_CMD set, `sql`: a request value reached a statement of the shadow database as SQL syntax,
+   or the statement has a structure the app is not known to produce (sidecar/sqllog.py);
 4. verdict: oracle if any event; else inconclusive on 401/404/>=500; else clean;
 5. on oracle, POST the signed evidence to {COLLECTOR_URL}/_clone/evidence before releasing the response;
 6. release the response with x-imm-verdict / x-imm-events.
@@ -31,7 +31,7 @@ import time
 import httpx
 
 from immune_contracts import wire
-from .sqllog import SqlLog, find_injections, inputs_of
+from .sqllog import Baseline, SqlLog, inputs_of
 from .syscalls import Policy, Tracer, tracer_cmd
 
 log = logging.getLogger("sidecar")
@@ -57,6 +57,7 @@ class Config:
     syscall_settle_s: float = 0.1
     sql_log_cmd: str = ""                     # command that follows the shadow database's statement log; empty = off
     sql_dialect: str = "postgres"             # postgres | mysql
+    sql_baseline: str = ""                    # JSON file with the learnt statement structures (new_structure rule)
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -75,7 +76,8 @@ class Config:
                    syscall_policy=env.get("SYSCALL_POLICY", ""),
                    syscall_label=env.get("SYSCALL_LABEL", ""),
                    syscall_settle_s=float(env.get("SYSCALL_SETTLE_S", "0.1")),
-                   sql_log_cmd=env.get("SQL_LOG_CMD", ""), sql_dialect=env.get("SQL_DIALECT", "postgres"))
+                   sql_log_cmd=env.get("SQL_LOG_CMD", ""), sql_dialect=env.get("SQL_DIALECT", "postgres"),
+                   sql_baseline=env.get("SQL_BASELINE", ""))
 
 
 def find_markers(body: bytes, markers: dict) -> list:
@@ -116,6 +118,13 @@ def oracle_events(leaked: list, observed: list) -> list:
     return events
 
 
+H_LEARN = wire.INTERNAL_PREFIX + "learn"      # signature that authorises a learn-mode request
+
+
+def learn_message(method: str, target: bytes) -> bytes:
+    return b"learn " + method.upper().encode() + b" " + target
+
+
 def verdict_of(status: int, events: list) -> str:
     if events:
         return wire.VERDICT_ORACLE
@@ -127,7 +136,8 @@ def verdict_of(status: int, events: list) -> str:
 class Sidecar:
     def __init__(self, cfg: Config, tracer=None, sqllog=None):
         self.cfg = cfg
-        self.sqllog = sqllog or (SqlLog(cfg.sql_log_cmd, cfg.sql_dialect) if cfg.sql_log_cmd else None)
+        self.sqllog = sqllog or (SqlLog(cfg.sql_log_cmd, cfg.sql_dialect, baseline=Baseline(cfg.sql_baseline))
+                                 if cfg.sql_log_cmd else None)
         self.tracer = tracer
         if tracer is None and cfg.syscall_container:
             name = "%s-strace" % cfg.syscall_container
@@ -184,6 +194,8 @@ class Sidecar:
                 client_h.append((name, val))
         rid, mode = imm.get(wire.H_RID, ""), imm.get(wire.H_MODE, "L1")
         target = (raw_path + ("?" + query if query else "")).encode("latin-1")
+        learn = mode == "learn" and bool(self.sqllog) and wire.check(
+            self.cfg.clone_key, learn_message(scope["method"], target), imm.get(H_LEARN, ""))
         async with self.lock:
             host, _, port = self.cfg.upstream.rpartition(":")
             t0 = time.time()
@@ -203,9 +215,13 @@ class Sidecar:
             opened = await self.tracer.window(t0, t1) if self.tracer else []
             events = oracle_events(find_markers(rbody, self.cfg.markers), opened)
             if self.sqllog:
+                statements = await self.sqllog.window(t0, t1)
+                if learn:       # a legitimate request replayed by `python -m sidecar.learn`
+                    n = self.sqllog.learn(statements)
+                    return status, rheaders + [(wire.H_VERDICT, wire.VERDICT_CLEAN), (wire.H_EVENTS, "0"),
+                                               ("x-imm-learnt", str(n))], rbody
                 ctype = next((v for k, v in client_h if k == "content-type"), "")
-                hits = find_injections(await self.sqllog.window(t0, t1), inputs_of(raw_path, query, body, ctype),
-                                       self.cfg.sql_dialect)
+                hits = self.sqllog.events(statements, inputs_of(raw_path, query, body, ctype, client_h))
                 events += [{"oracle": wire.ORACLE_SQL, "detail": dict(h, observed="dblog"), "stack": []} for h in hits]
             verdict = verdict_of(status, events)
             if verdict == wire.VERDICT_ORACLE:
