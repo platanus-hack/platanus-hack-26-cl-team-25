@@ -39,6 +39,16 @@ RESP_DROP = HOP | {"content-encoding", "date", "server"}
 DENY_BODY = b'{"detail":"Not Found"}'
 SID_RE = re.compile(r"[A-Za-z0-9_\-]{16,64}")
 MAX_BODY = 10 * 1024 * 1024
+BODY_TIMEOUT_S = 30.0
+RETRY_SAFE = ("GET", "HEAD", "OPTIONS")
+
+
+class BadRequest(Exception):
+    """A request the gateway answers itself (4xx) because it cannot be read or forwarded as sent."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status, self.detail = status, detail
 MODES = ("enforce", "observe", "passthrough")
 CLONE_WAIT_S = 0.3
 # after-check (contracts/product.md §3b): clean requests already answered by prod are replayed in a clone
@@ -73,6 +83,7 @@ class Config:
     openapi_path: str = ""
     manifest_path: str = ""
     record_path: str = ""
+    state_path: str = ""             # upstream, rules and mode survive a gateway restart (same run only)
     captive_ttl_s: float = 900.0
     mode: str = "enforce"            # enforce | observe | passthrough (initial; POST /_admin/mode changes it)
     aftercheck: bool = False         # replay clean requests in a clone after prod has answered (enforce mode only)
@@ -94,7 +105,8 @@ class Config:
                    prod_addr=g("PROD_ADDR", "127.0.0.1:8000"), prod_release=g("PROD_RELEASE", ""),
                    admin_token=g("ADMIN_TOKEN", ""), bus_url=g("BUS_URL", ""), bus_token=g("BUS_TOKEN", ""),
                    run_id=g("RUN_ID", ""), openapi_path=g("OPENAPI_PATH", ""), manifest_path=g("MANIFEST_PATH", ""),
-                   record_path=g("RECORD_PATH", ""), captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
+                   record_path=g("RECORD_PATH", ""), state_path=g("GW_STATE_PATH", ""),
+                   captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
 
 
 @dataclass
@@ -127,9 +139,19 @@ class Ctx:
 
 
 class Recorder:
-    def __init__(self, path: str):
+    """Append-only request log. Bounded: past `max_bytes` the file becomes <path>.1 (one generation kept) and a
+    new one starts, so the recording never fills the disk. Readers use the tail (pipeline/gates.py)."""
+
+    def __init__(self, path: str, max_bytes: int | None = None):
         self.path = path
         self._fh = None
+        self._size = 0
+        if max_bytes is None:
+            try:
+                max_bytes = int(float(os.environ.get("RECORD_MAX_MB") or 256) * 1024 * 1024)
+            except ValueError:
+                max_bytes = 256 * 1024 * 1024
+        self.max_bytes = max_bytes
 
     def write(self, rec: dict):
         if not self.path:
@@ -140,7 +162,14 @@ class Recorder:
                 if d:
                     os.makedirs(d, exist_ok=True)
                 self._fh = open(self.path, "a", buffering=1)
-            self._fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                self._size = os.fstat(self._fh.fileno()).st_size
+            line = json.dumps(rec, separators=(",", ":")) + "\n"
+            self._fh.write(line)
+            self._size += len(line)
+            if self.max_bytes > 0 and self._size >= self.max_bytes:
+                self._fh.close()
+                self._fh = None
+                os.replace(self.path, self.path + ".1")
         except Exception as e:  # recording must never break traffic
             log.warning("recording failed: %s", e)
             self._fh = None
@@ -176,6 +205,67 @@ class Gateway:
         self.prod_client = None
         self.clone_client = None
         self._tasks = []
+        self._saved = None
+        self.restore_state()
+
+    # ---------------------------------------------------------- persisted state
+    # A restarted gateway would otherwise point at the compose default upstream (a colour that may no longer
+    # exist) and forget every containment rule, reopening confirmed attack points until the fleet and the
+    # pipeline noticed. Kept in <runtime>/stack/gateway-state.json, valid for the run that wrote it.
+    def _state_doc(self) -> dict:
+        return {"run_id": self.cfg.run_id, "upstream": dict(self.upstream), "mode": self.mode,
+                "rules": [dict(r.raw, _expires=r.expires) for r in self.rules.values()]}
+
+    def save_state(self) -> None:
+        path = self.cfg.state_path
+        if not path:
+            return
+        doc = self._state_doc()
+        if doc == self._saved:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(doc, f)
+            os.replace(tmp, path)
+            self._saved = doc
+        except OSError as e:
+            log.warning("cannot persist gateway state at %s: %s", path, e)
+
+    def restore_state(self) -> bool:
+        path = self.cfg.state_path
+        if not path:
+            return False
+        try:
+            with open(path) as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(doc, dict) or doc.get("run_id") != self.cfg.run_id:
+            return False
+        up = doc.get("upstream")
+        if isinstance(up, dict) and isinstance(up.get("addr"), str) and up["addr"]:
+            self.upstream = {"addr": up["addr"], "release": str(up.get("release") or "")}
+        if doc.get("mode") in MODES:
+            self.mode = doc["mode"]
+        now = time.time()
+        for raw in doc.get("rules") or []:
+            try:
+                raw = dict(raw)
+                expires = float(raw.pop("_expires"))
+                if expires <= now:
+                    continue
+                rule = Rule(raw)
+                rule.expires = expires
+                self.rules[rule.id] = rule
+            except Exception as e:  # noqa: BLE001
+                log.warning("dropping an unreadable persisted rule: %s", e)
+        self.stats = self._new_stats()
+        self._saved = self._state_doc()
+        log.info("restored state of run %s: upstream %s (%s), mode %s, %d rule(s)", self.cfg.run_id,
+                 self.upstream["addr"], self.upstream["release"], self.mode, len(self.rules))
+        return True
 
     # ---------------------------------------------------------- lifecycle
     async def start(self):
@@ -208,6 +298,7 @@ class Gateway:
             await asyncio.sleep(0.5)
             try:
                 self.expire_rules()
+                self.save_state()
                 n += 1
                 if n % 10 == 0:
                     await self.pool.expire_idle()
@@ -311,8 +402,10 @@ class Gateway:
             return
         try:
             ctx = await self._read(scope, receive)
-        except ValueError:
-            await self._send(send, Upstream(413, [("content-type", "application/json")], b'{"detail":"Request Entity Too Large"}'), None)
+        except BadRequest as e:
+            # refused before it reaches production or a clone: not a production error (never counted as one)
+            await self._send(send, Upstream(e.status, [("content-type", "application/json"), ("connection", "close")],
+                                            json.dumps({"detail": e.detail}).encode()), None)
             return
         try:
             resp = await self.handle(ctx)
@@ -325,21 +418,34 @@ class Gateway:
         self._after_enqueue(ctx)
 
     async def _read(self, scope, receive) -> Ctx:
+        raw_path = scope.get("raw_path")
+        raw_path = raw_path.decode("latin-1") if raw_path else quote(scope.get("path", "/"))
+        if not raw_path.startswith("/"):                 # absolute-form or authority-form target: we are not a forward proxy
+            raise BadRequest(400, "Bad Request")
+        for k, v in scope.get("headers", []):
+            if k.lower() == b"content-length":
+                try:
+                    if int(v) > MAX_BODY:
+                        raise BadRequest(413, "Request Entity Too Large")
+                except ValueError:
+                    raise BadRequest(400, "Bad Request") from None
         chunks, size = [], 0
+        deadline = time.monotonic() + BODY_TIMEOUT_S     # a client that never finishes its body does not hold a slot
         while True:
-            msg = await receive()
+            try:
+                msg = await asyncio.wait_for(receive(), timeout=max(0.1, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                raise BadRequest(408, "Request Timeout") from None
             if msg["type"] == "http.disconnect":
                 break
             b = msg.get("body", b"")
             size += len(b)
             if size > MAX_BODY:
-                raise ValueError("body too large")
+                raise BadRequest(413, "Request Entity Too Large")
             chunks.append(b)
             if not msg.get("more_body"):
                 break
         body = b"".join(chunks)
-        raw_path = scope.get("raw_path")
-        raw_path = raw_path.decode("latin-1") if raw_path else quote(scope.get("path", "/"))
         query = (scope.get("query_string") or b"").decode("latin-1")
         headers = []
         for k, v in scope.get("headers", []):
@@ -619,7 +725,24 @@ class Gateway:
                 req = self.prod_client.build_request(ctx.method, self._url(addr, ctx), headers=self._out_headers(ctx),
                                                      content=ctx.body if ctx.body else None,
                                                      extensions=self._target(ctx))
-                r = await self.prod_client.send(req)
+            except Exception as e:  # noqa: BLE001
+                # bytes that cannot be put on the wire as sent (header or target): the client's fault, not prod's.
+                # Counting it as a production error would let anyone roll a deploy back with a malformed cookie.
+                log.info("unforwardable request rid=%s: %s", ctx.rid, e)
+                self._prodlog(ctx.rid, {"forwarded": False, "status": 400})
+                return Upstream(400, [("content-type", "application/json")], b'{"detail":"Bad Request"}')
+            try:
+                try:
+                    r = await self.prod_client.send(req)
+                except httpx.ConnectError:
+                    # nothing was sent: once more, for any method (the upstream may be restarting)
+                    await asyncio.sleep(0.2)
+                    r = await self.prod_client.send(req)
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError):
+                    # a pooled connection the upstream had already closed; replaying is only safe when idempotent
+                    if ctx.method not in RETRY_SAFE:
+                        raise
+                    r = await self.prod_client.send(req)
                 up = Upstream(r.status_code, _clean_resp_headers(r.headers.multi_items()), r.content)
             except httpx.TimeoutException:
                 self.stats["prod_conn_errors"] += 1
@@ -721,6 +844,7 @@ class Gateway:
                 self.upstream = {"addr": addr, "release": release}
                 self.stats = self._new_stats()
                 self.after_seen.clear()
+                self.save_state()
             finally:
                 self.gate.set()
         self.bus.publish(events.UPSTREAM_SWITCHED, {"release": release, "addr": addr})
@@ -736,6 +860,7 @@ class Gateway:
         self.after_seen.clear()
         self.stats = self._new_stats()
         self.reload_manifest(force=True)
+        self.save_state()
 
     def admin_app(self) -> Starlette:
         gw = self
@@ -790,6 +915,7 @@ class Gateway:
             for rule in created:
                 gw.rules[rule.id] = rule
                 gw.bus.publish(events.RULE_ACTIVE, rule.to_dict(), incident=rule.raw.get("incident"))
+            gw.save_state()
             out = [r.to_dict() for r in created]
             return JSONResponse(out[0] if not isinstance(d, list) else out, status_code=201)
 
@@ -799,6 +925,7 @@ class Gateway:
             if gw.rules.pop(rid, None) is None:
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
             gw.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "deleted"})
+            gw.save_state()
             return JSONResponse({"ok": True, "id": rid})
 
         @authed
@@ -824,6 +951,7 @@ class Gateway:
             if m not in MODES:
                 return JSONResponse({"detail": "mode must be enforce|observe|passthrough"}, status_code=422)
             gw.mode = m
+            gw.save_state()
             return JSONResponse({"mode": gw.mode})
 
         @authed

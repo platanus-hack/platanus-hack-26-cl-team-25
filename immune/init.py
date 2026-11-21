@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -438,7 +439,16 @@ def main(argv=None) -> int:
         if not sys.stdin.isatty() or input("%s/.immune exists; overwrite? [y/N] " % project).strip().lower() != "y":
             print("NEEDS ATTENTION:\n  - %s/.immune/config.yaml exists (use --yes to regenerate)" % shlex.quote(project))
             return 1
-    return Init(project, use_llm=not a.no_llm, prod_db=a.prod_db, seed=a.seed).run()
+    use_llm = not a.no_llm
+    if use_llm:
+        from patcher import claude_cli
+        cb = claude_cli.claude_bin()
+        if not (shutil.which(cb) or (os.path.isfile(cb) and os.access(cb, os.X_OK))):
+            print("claude CLI not found (%s): continuing as --no-llm. The steps that adapt the profile, the column "
+                  "classification and the OpenAPI marks are drafts to review; install and log in to `claude`, then "
+                  "run init again." % cb)
+            use_llm = False
+    return Init(project, use_llm=use_llm, prod_db=a.prod_db, seed=a.seed).run()
 
 
 if __name__ == "__main__":

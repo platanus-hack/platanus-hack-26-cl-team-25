@@ -13,6 +13,27 @@ team-25
 - Isidro Pasman ([@isidropasman](https://github.com/isidropasman))
 - Uriel Gandelman ([@UriGandel](https://github.com/UriGandel))
 
+## Install
+
+Needs Linux with Docker Engine usable without sudo, the Docker Compose plugin, git and Python 3.12 or newer
+with the venv module (Debian/Ubuntu: `python3-venv`). Network access to PyPI and Docker Hub is needed once.
+
+```bash
+git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25.git immune && cd immune
+./install.sh                 # checks prerequisites, creates .venv, builds the images, links ~/.local/bin/immune
+immune doctor --prereqs      # what this machine has and what is optional
+cd /path/to/your-app && immune init && immune up
+```
+
+`install.sh` never uses sudo, can be re-run at any time and says what to do when something is missing.
+Optional, each reported by `immune doctor --prereqs`:
+
+- **Claude Code CLI** (`claude`, logged in): the model steps of `immune init` and the automatic patches.
+  Without it use `immune init --no-llm`; attacks are still detected and blocked by a rule, but not patched.
+- **`immune-cbuild:1`** (C toolchain image, only for `immune anticipate`): `IMMUNE_WITH_ANTICIPATE=1 ./install.sh`.
+- **GitHub CLI** (`gh`, logged in): only for `repo.target: github`.
+- Apps with `app.runtime: generic` pull `postgres:16-alpine` from Docker Hub on first use.
+
 Before Submitting:
 
 - ✅ Fill in the project metadata (name, oneliner, description and deploy URL) in platanus-hack-project.jsonc
