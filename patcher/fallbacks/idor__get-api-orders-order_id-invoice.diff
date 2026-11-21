@@ -1,0 +1,21 @@
+diff --git a/victim/app/orders.py b/victim/app/orders.py
+index c568ea1..6c7879d 100644
+--- a/victim/app/orders.py
++++ b/victim/app/orders.py
+@@ -84,13 +84,13 @@ def get_order(order_id: int, authorization: str = Header(None)):
+ 
+ @router.get("/api/orders/{order_id}/invoice")
+ def invoice(order_id: int, authorization: str = Header(None)):
+-    auth.current(authorization)
++    ident = auth.current(authorization)
+     row = db.fetch_one(
+-        "SELECT o.id, o.total, o.note, o.shipping_address, o.created_at, u.name, u.email "
++        "SELECT o.id, o.user_id, o.total, o.note, o.shipping_address, o.created_at, u.name, u.email "
+         "FROM orders o JOIN users u ON u.id = o.user_id WHERE o.id = ?",
+         (order_id,),
+     )
+-    if not row:
++    if not row or (row["user_id"] != ident.uid and ident.role != "admin"):
+         raise HTTPException(404, "not found")
+     out = [
+         "TIENDA - FACTURA #%d" % row["id"],

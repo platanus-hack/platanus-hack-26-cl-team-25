@@ -1,0 +1,16 @@
+diff --git a/victim/app/orders.py b/victim/app/orders.py
+index c568ea1..2dedde6 100644
+--- a/victim/app/orders.py
++++ b/victim/app/orders.py
+@@ -75,9 +75,9 @@ def create_order(body: NewOrder, authorization: str = Header(None)):
+ 
+ @router.get("/api/orders/{order_id}")
+ def get_order(order_id: int, authorization: str = Header(None)):
+-    auth.current(authorization)
++    ident = auth.current(authorization)
+     row = db.fetch_one("SELECT " + COLUMNS + " FROM orders WHERE id = ?", (order_id,))
+-    if not row:
++    if not row or (row["user_id"] != ident.uid and ident.role != "admin"):
+         raise HTTPException(404, "not found")
+     return full(row)
+ 

@@ -1,0 +1,16 @@
+diff --git a/victim/app/files.py b/victim/app/files.py
+index 08c7e65..cdd9258 100644
+--- a/victim/app/files.py
++++ b/victim/app/files.py
+@@ -14,8 +14,9 @@ def static_root():
+ 
+ @router.get("/api/files/download")
+ def download(name: str):
+-    path = os.path.join(static_root(), "manuals", name)
+-    if not os.path.isfile(path):
++    root = os.path.realpath(os.path.join(static_root(), "manuals"))
++    path = os.path.realpath(os.path.join(root, name))
++    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
+         raise HTTPException(404, "not found")
+     return FileResponse(path)
+ 

@@ -193,6 +193,20 @@ Objetivo: una app falsa vulnerable que **se va endureciendo sola, de verdad**, a
   - `official`: el repo del hackathon, solo para el ensayo final y el demo.
 - Si GitHub falla, el ciclo sigue en local y el dashboard lo muestra igual.
 
+## 9d. Memoria y aprendizaje (diferencial)
+
+**Memoria inmunológica (barrido de clase).** Después de curar un incidente, la técnica capturada y la batería de su clase se prueban en la sombra contra todos los demás parámetros de todos los endpoints del OpenAPI. Cada oráculo que dispara abre un incidente de origen `barrido`, que pasa por el mismo ciclo.
+
+**Detección que mejora sola.** Cada detonación deja un ejemplo etiquetado por el oráculo (request → veredicto). Con eso:
+
+- **Muestreo de limpios:** el gateway detona un porcentaje al azar del tráfico que clasificó como limpio. Si un oráculo dispara, es un ataque que la etapa 1 no vio: se mide la tasa de escapes y ese request alimenta el clasificador.
+- **Gramática aprendida por parámetro:** a partir de los requests con veredicto limpio, cada parámetro obtiene su propia gramática en lugar de la genérica. Menos detonaciones innecesarias y menos margen para lo anómalo. Solo se ajusta con evidencia y nunca bloquea: lo que cae fuera se detona.
+- **Corpus de técnicas:** cada payload confirmado y cada variante que disparó un oráculo se suman a la batería de su clase, que usan el barrido y las validaciones.
+- **Huella de actor:** rasgos de la sesión cautiva (herramienta, cadencia, orden de pasos) para reconocer al mismo actor cuando vuelve con otra identidad. Efecto: prioridad de detonación, nunca bloqueo.
+- **Métricas por nodo en el dashboard:** tasa de escapes de la etapa 1, porcentaje de detonaciones que terminan limpias, tiempo a la regla y al parche, y su evolución en la corrida.
+
+Límite: los oráculos no se corrigen solos. Sus fallos solo aparecen por el barrido, el equipo rojo y la vulnerabilidad ciega.
+
 ## 10. Qué cambió respecto del borrador
 
 | Problema encontrado | Cambio |

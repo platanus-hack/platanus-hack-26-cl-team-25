@@ -1,0 +1,206 @@
+{
+ "events": [
+  {
+   "data": {
+    "clone": "clone-1",
+    "events": [
+     {
+      "detail": {
+       "input": "zzzzzz' OR '1'='1",
+       "location": "query",
+       "param": "q",
+       "reason": "structure",
+       "statement": "SELECT COUNT(*) AS n FROM products WHERE (name LIKE '%zzzzzz' OR '1'='1%' OR category LIKE 'zzzzzz' OR '1'='1')"
+      },
+      "oracle": "sql",
+      "stack": [
+       {
+        "file": "victim/app/products.py",
+        "func": "list_products",
+        "line": 28
+       },
+       {
+        "file": "victim/app/db.py",
+        "func": "fetch_one",
+        "line": 31
+       },
+       {
+        "file": "victim/app/db.py",
+        "func": "fetch",
+        "line": 25
+       }
+      ]
+     },
+     {
+      "detail": {
+       "input": "zzzzzz' OR '1'='1",
+       "location": "query",
+       "param": "q",
+       "reason": "structure",
+       "statement": "SELECT id, name, category, price, description FROM products WHERE (name LIKE '%zzzzzz' OR '1'='1%' OR category LIKE 'zzzzzz' OR '1'='1') ORDER BY name ASC, id ASC LIMIT ? OFFSET ?"
+      },
+      "oracle": "sql",
+      "stack": [
+       {
+        "file": "victim/app/products.py",
+        "func": "list_products",
+        "line": 29
+       },
+       {
+        "file": "victim/app/db.py",
+        "func": "fetch",
+        "line": 25
+       }
+      ]
+     }
+    ],
+    "mode": "L1",
+    "pre_state_b64": null,
+    "release": "t0",
+    "request": {
+     "body_b64": "",
+     "headers": {
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate",
+      "connection": "keep-alive",
+      "host": "immune-clone-1:8000",
+      "user-agent": "curl/8.5.0"
+     },
+     "method": "GET",
+     "path": "/api/products",
+     "query": "q=zzzzzz'%20OR%20'1'='1"
+    },
+    "rid": "803986064b704ad893206de6ef14d043",
+    "role": null,
+    "session": "gwsid:YAnfQHJoLoD0RWFQEOEkjGyS",
+    "status": 200,
+    "uid": null,
+    "verdict": "oracle"
+   },
+   "incident": null,
+   "rid": "803986064b704ad893206de6ef14d043",
+   "run": "dev",
+   "seq": 10,
+   "src": "gateway",
+   "ts": 1795259658.4678504,
+   "type": "oracle.fired"
+  },
+  {
+   "data": {
+    "clone": "clone-3",
+    "events": [
+     {
+      "detail": {
+       "path": "/srv/victim/static/manuals/../../../../../../../../etc/hostname",
+       "realpath": "/etc/hostname"
+      },
+      "oracle": "file",
+      "stack": [
+       {
+        "file": "victim/app/files.py",
+        "func": "download",
+        "line": 20
+       }
+      ]
+     }
+    ],
+    "mode": "L1",
+    "pre_state_b64": null,
+    "release": "t0",
+    "request": {
+     "body_b64": "",
+     "headers": {
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate",
+      "connection": "keep-alive",
+      "host": "immune-clone-3:8000",
+      "user-agent": "curl/8.5.0"
+     },
+     "method": "GET",
+     "path": "/api/files/download",
+     "query": "name=../../../../../../../../etc/hostname"
+    },
+    "rid": "1fa30ebb78d54027bfbb006cd47060a6",
+    "role": null,
+    "session": "gwsid:MNZKtI17c7Fk3ZrD2cwRJOa7",
+    "status": 200,
+    "uid": null,
+    "verdict": "oracle"
+   },
+   "incident": null,
+   "rid": "1fa30ebb78d54027bfbb006cd47060a6",
+   "run": "dev",
+   "seq": 14,
+   "src": "gateway",
+   "ts": 1795259658.6222064,
+   "type": "oracle.fired"
+  },
+  {
+   "data": {
+    "clone": "clone-4",
+    "events": [
+     {
+      "detail": {
+       "marker_owner": 6,
+       "requester": 61
+      },
+      "oracle": "owner",
+      "stack": [
+       {
+        "file": "victim/app/orders.py",
+        "func": "get_order",
+        "line": 82
+       },
+       {
+        "file": "victim/app/orders.py",
+        "func": "full",
+        "line": 33
+       },
+       {
+        "file": "victim/app/orders.py",
+        "func": "lines",
+        "line": 25
+       },
+       {
+        "file": "victim/app/db.py",
+        "func": "fetch",
+        "line": 25
+       }
+      ]
+     }
+    ],
+    "mode": "L1",
+    "pre_state_b64": null,
+    "release": "t0",
+    "request": {
+     "body_b64": "",
+     "headers": {
+      "accept": "*/*",
+      "accept-encoding": "gzip, deflate",
+      "authorization": "Bearer eyJ1aWQiOjYxLCJyb2xlIjoidXNlciIsImV4cCI6MTc5NTM0NjA1OH0.c8b02c991b82219a8f7d65a5741fb186e307624800a113d0e66bed62bba9d7cd",
+      "connection": "keep-alive",
+      "host": "immune-clone-4:8000",
+      "user-agent": "curl/8.5.0"
+     },
+     "method": "GET",
+     "path": "/api/orders/5",
+     "query": ""
+    },
+    "rid": "c77194005e9e42a390ea7b9d7014b3cd",
+    "role": "user",
+    "session": "uid:61",
+    "status": 200,
+    "uid": 61,
+    "verdict": "oracle"
+   },
+   "incident": null,
+   "rid": "c77194005e9e42a390ea7b9d7014b3cd",
+   "run": "dev",
+   "seq": 18,
+   "src": "gateway",
+   "ts": 1795259658.7984133,
+   "type": "oracle.fired"
+  }
+ ],
+ "next": 18
+}

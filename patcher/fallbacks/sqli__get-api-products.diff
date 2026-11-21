@@ -1,0 +1,14 @@
+diff --git a/victim/app/products.py b/victim/app/products.py
+index 182adfe..1499764 100644
+--- a/victim/app/products.py
++++ b/victim/app/products.py
+@@ -20,7 +20,8 @@ def list_products(
+     conds = []
+     params = []
+     if q:
+-        conds.append("(name LIKE '%" + q + "%' OR category LIKE '" + q + "')")
++        conds.append("(name LIKE ? OR category LIKE ?)")
++        params.extend(["%" + q + "%", q])
+     if category:
+         conds.append("category = ?")
+         params.append(category)

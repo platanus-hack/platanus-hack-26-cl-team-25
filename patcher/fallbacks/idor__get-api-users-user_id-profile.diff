@@ -1,0 +1,15 @@
+diff --git a/victim/app/users.py b/victim/app/users.py
+index 6c8a5c0..040307c 100644
+--- a/victim/app/users.py
++++ b/victim/app/users.py
+@@ -7,7 +7,9 @@ router = APIRouter()
+ 
+ @router.get("/api/users/{user_id}/profile")
+ def profile(user_id: int, authorization: str = Header(None)):
+-    auth.current(authorization)
++    ident = auth.current(authorization)
++    if user_id != ident.uid and ident.role != "admin":
++        raise HTTPException(404, "not found")
+     row = db.fetch_one("SELECT id, name, email, address, phone FROM users WHERE id = ?", (user_id,))
+     if not row:
+         raise HTTPException(404, "not found")

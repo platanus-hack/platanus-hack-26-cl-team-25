@@ -1,0 +1,15 @@
+diff --git a/victim/app/files.py b/victim/app/files.py
+index 08c7e65..92a604e 100644
+--- a/victim/app/files.py
++++ b/victim/app/files.py
+@@ -24,7 +24,8 @@ def download(name: str):
+ def product_image(product_id: int, file: str):
+     if not db.fetch_one("SELECT id FROM products WHERE id = ?", (product_id,)):
+         raise HTTPException(404, "not found")
+-    path = os.path.join(static_root(), "images", file)
+-    if not os.path.isfile(path):
++    root = os.path.realpath(os.path.join(static_root(), "images"))
++    path = os.path.realpath(os.path.join(root, file))
++    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
+         raise HTTPException(404, "not found")
+     return FileResponse(path)
