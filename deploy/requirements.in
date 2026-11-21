@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+httpx
+pytest
+pytest-asyncio
+pytest-timeout
+pyyaml
+sqlglot
+sqlparse
+jsonschema
+docker
+python-multipart

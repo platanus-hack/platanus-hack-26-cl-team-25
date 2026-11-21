@@ -1,0 +1,45 @@
+name: immune
+networks:
+  prodnet: {internal: true}
+  clonenet: {internal: true}
+  ctrlnet: {internal: true}
+  edge: {}
+x-base: &base
+  image: immune-base:1
+  restart: unless-stopped
+  env_file: [demo.env]
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+services:
+  gateway:
+    <<: *base
+    container_name: immune-gateway
+    command: python -m gateway
+    environment:
+      PROD_ADDR: prod-blue:8000
+      PROD_RELEASE: t0
+      OPENAPI_PATH: /srv/contracts/openapi.yaml
+      MANIFEST_PATH: /runtime/data/manifest.json
+      RECORD_PATH: /runtime/recordings/requests.jsonl
+    volumes:
+      - ..:/srv:ro
+      - ../runtime:/runtime
+    networks:
+      prodnet: {aliases: [gateway]}
+      clonenet: {aliases: [gateway]}
+      ctrlnet: {aliases: [gateway]}
+      edge: {}
+    ports: ["127.0.0.1:8080:8080", "127.0.0.1:8081:8081"]
+  dashboard:
+    <<: *base
+    container_name: immune-dashboard
+    command: python -m dashboard
+    environment:
+      BUS_STORE: /runtime/bus/events.jsonl
+    volumes:
+      - ..:/srv:ro
+      - ../runtime:/runtime
+    networks: [ctrlnet, edge]
+    ports: ["127.0.0.1:8090:8090"]
