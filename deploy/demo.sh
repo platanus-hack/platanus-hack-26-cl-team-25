@@ -26,7 +26,7 @@ wait_url() { for _ in $(seq 60); do curl -fsS -m 2 "${@:2}" "$1" >/dev/null 2>&1
 
 case "${1:-}" in
   up|reset)
-    stop_host
+    stop_host; docker ps -aq --filter label=immune.run | xargs -r docker rm -f >/dev/null
     [ "$1" = reset ] && docker compose -f deploy/compose.yaml down >/dev/null 2>&1 || true
     seed
     RUN_ID="$(cat "$RT/run_id")" docker compose -f deploy/compose.yaml up -d --force-recreate >/dev/null
@@ -36,7 +36,7 @@ case "${1:-}" in
     [ -d "$ROOT/pipeline" ] && [ "${NO_PIPELINE:-}" = "" ] && start_host pipeline pipeline || true
     ;;
   down)
-    stop_host
+    stop_host; docker ps -aq --filter label=immune.run | xargs -r docker rm -f >/dev/null
     docker ps -aq --filter label=immune.run | xargs -r docker rm -f >/dev/null
     docker compose -f deploy/compose.yaml down >/dev/null 2>&1 || true ;;
   status)

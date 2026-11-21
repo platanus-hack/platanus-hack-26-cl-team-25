@@ -5,16 +5,25 @@ Complementa `docs/plan-construccion.md`; no lo reemplaza. Nada de lo de este doc
 
 ## 1. Experiencia objetivo
 
+Un solo comando hace todo el trabajo; el usuario no corre pruebas a mano.
+
 ```
-curl -fsSL <url>/install.sh | sh      # instala la CLI `immune` y verifica Docker
-cd mi-app && immune init              # analiza la app y genera .immune/
-immune up --observe                   # levanta todo sin desviar ni parchear
-immune report                         # qué habría hecho; falsos positivos
-immune enforce                        # activa desvío y reglas
-immune autopatch pr|merge             # parches como PR (por defecto) o con merge
+curl -fsSL <url>/install.sh | sh
+cd mi-app && immune init
 ```
 
-`immune doctor` valida la instalación en cualquier momento. `immune down` lo quita todo.
+`immune init`:
+
+1. analiza la app y genera `.immune/` (sección 3);
+2. levanta un clon y **se verifica solo** (los chequeos de la sección 5 corren adentro del comando, con corrección automática por LLM);
+3. detecta cómo se despliega la app hoy (Docker Compose, Kubernetes, systemd, PaaS) y **genera los artefactos de deploy** para ese entorno: `compose.immune.yaml`, manifiestos o unit files, con el gateway delante de la app;
+4. termina con uno de dos resultados:
+   - **Listo:** el comando exacto de deploy (`immune deploy`, o `docker compose -f … up -d`, o `kubectl apply -f …`) y qué cambia en el tráfico;
+   - **Falta algo:** una lista corta y concreta de lo que no pudo resolver solo (por ejemplo, "no encontré cómo se emite el token; indicá el archivo").
+
+Después del deploy el sistema está activo: desvío, reglas y parches como pull request. El merge automático es una opción (`immune autopatch merge`).
+
+`immune status`, `immune report` y `immune down` son los únicos otros comandos.
 
 ## 2. Qué es genérico y qué hay que adaptar
 
@@ -109,23 +118,20 @@ Requisitos del host: Linux con eBPF habilitado o seccomp-notify, y permiso para 
 
 Los tests y el build por lenguaje (`dotnet test`, `go test`, `cargo test`) los declara `.immune/config.yaml`; `init` los detecta.
 
-## 6c. Camino a producción
+## 6c. Deploy en producción
 
-Los hooks y oráculos corren **solo en los clones**, nunca en el proceso de prod. En prod se instala el gateway delante de la app y nada más.
+Los hooks y oráculos corren **solo en los clones**, nunca en el proceso de prod. En prod se agrega el gateway delante de la app y el pool de clones al lado.
 
-1. `immune init` + `immune doctor` en staging.
-2. `observe` en prod: el gateway reenvía todo a prod y detona una copia en paralelo. Riesgo: latencia cero para el cliente, solo cómputo.
-3. `enforce` por rutas, empezando por las de menor riesgo.
-4. `autopatch pr`; `merge` solo con tests y decisión explícita.
+`immune deploy` aplica los artefactos generados por `init`. Si el entorno no se puede automatizar (PaaS sin acceso, balanceador externo), `init` escribe en `.immune/DEPLOY.md` los pasos exactos para ese entorno.
 
-Fail-open del gateway y `immune down` como salida en cada etapa.
+Protecciones que no requieren acción del usuario: fail-open del gateway, verificación de salud antes de tomar tráfico, y rollback automático del deploy si suben los errores.
 
 ## 7. Modos y seguridad por defecto
 
 | Modo | Qué hace |
 |---|---|
-| `observe` (por defecto) | Clasifica y detona en paralelo; **nunca** cambia la respuesta al cliente |
-| `enforce` | Desvío, cautiverio y reglas |
+| `observe` (opcional) | Clasifica y detona en paralelo; **nunca** cambia la respuesta al cliente |
+| `enforce` (por defecto tras el deploy) | Desvío, cautiverio y reglas |
 | `autopatch pr` | Abre el PR con evidencia y validaciones; no hace merge |
 | `autopatch merge` | Merge y deploy automáticos; requiere tests y activación explícita |
 
