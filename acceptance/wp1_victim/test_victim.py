@@ -155,7 +155,7 @@ def test_vulns_documented():
     text = open(os.path.join(ROOT, "victim/VULNS.md")).read()
     assert len(re.findall(r"victim/app/\S+\.py:\d+", text)) >= 7
     src = "".join(open(os.path.join(dp, f)).read() for dp, _, fs in os.walk(os.path.join(ROOT, "victim/app")) for f in fs if f.endswith(".py"))
-    assert not re.search(r"(?i)vuln|insecure|sqli|idor|traversal|exploit|todo|fixme|hack", src)
+    assert not re.search(r"(?i)vuln|insecure|\bsqli\b|idor|traversal|exploit|todo|fixme|hack", src)
 
 
 def test_shadow_profile_and_suite(data, tmp_path, monkeypatch):

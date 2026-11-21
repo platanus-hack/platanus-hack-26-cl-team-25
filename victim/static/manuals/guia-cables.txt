@@ -1,0 +1,2 @@
+Guia de cables
+USB-C, HDMI y DisplayPort: velocidades y longitudes maximas.

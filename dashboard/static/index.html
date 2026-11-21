@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sistema inmune - en vivo</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Sistema inmune <span class="sub">la app se cura sola</span></h1>
+  <div class="conn" id="conn" data-state="off"><span class="dot"></span><span id="conn-text">conectando...</span></div>
+</header>
+
+<section class="score" id="score" aria-label="Marcador">
+  <div class="big open"><div class="num" id="sc-open">0</div><div class="lbl">abiertas</div></div>
+  <div class="big contained"><div class="num" id="sc-contained">0</div><div class="lbl">contenidas por regla</div></div>
+  <div class="big cured"><div class="num" id="sc-cured">0</div><div class="lbl">curadas por parche</div></div>
+  <div class="small"><div class="num" id="sc-seen">0</div><div class="lbl">vulnerabilidades vistas</div></div>
+  <div class="small"><div class="num" id="sc-prod">0</div><div class="lbl">requests a prod</div></div>
+  <div class="small"><div class="num" id="sc-det">0</div><div class="lbl">requests detonadas</div></div>
+  <div class="small"><div class="num" id="sc-cap">0</div><div class="lbl">sesiones cautivas</div></div>
+  <div class="small"><div class="num" id="sc-clones">-</div><div class="lbl">clones libres / ocupados</div></div>
+</section>
+
+<main class="cols">
+  <section class="incidents">
+    <h2>Incidentes</h2>
+    <p class="empty" id="inc-empty">Sin incidentes todavia. Esperando ataques...</p>
+    <div id="incidents"></div>
+  </section>
+  <aside class="side">
+    <section class="panel">
+      <h2>Bot atacante <span class="legend"><i class="c-leak"></i>datos reales <i class="c-exec"></i>ejecuto <i class="c-blocked"></i>bloqueado</span></h2>
+      <div id="attacks"><p class="empty">Sin intentos todavia.</p></div>
+    </section>
+    <section class="panel">
+      <h2>Trafico <span class="legend"><i class="r-prod"></i>prod <i class="r-shadow"></i>sombra <i class="r-deny"></i>deny</span></h2>
+      <div id="ticker" class="ticker"><p class="empty">Sin trafico todavia.</p></div>
+    </section>
+  </aside>
+</main>
+<script src="/static/state.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

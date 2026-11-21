@@ -1,0 +1,2 @@
+USB Hub 4 puertos - manual v2
+Conecte el hub a un puerto USB 3.0.
