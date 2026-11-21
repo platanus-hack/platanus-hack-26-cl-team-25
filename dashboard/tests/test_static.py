@@ -11,15 +11,20 @@ FORBIDDEN = ["innerhtml", "outerhtml", "insertadjacenthtml", "document.write", "
 
 def test_no_dangerous_sinks_or_external_urls():
     for f in STATIC.iterdir():
+        if f.suffix == ".woff2":
+            continue
         txt = f.read_text()
         low = txt.lower()
         for bad in FORBIDDEN:
             assert bad not in low, f"{f.name} contains {bad}"
         for url in re.findall(r"""(?:https?:)?//[A-Za-z0-9.-]+\.[A-Za-z]{2,}[^\s"')]*""", txt):
             # the only allowed literal is the github allow-list prefix in JS
-            assert url.startswith("https://github.com/"), f"{f.name} references {url}"
+            # ... and the SVG namespace, a constant that is never fetched
+            assert url.startswith("https://github.com/") or url == "http://www.w3.org/2000/svg", f"{f.name} references {url}"
         if f.suffix == ".css":
-            assert "@import" not in low and "url(" not in low
+            assert "@import" not in low
+            # the only urls a stylesheet may load are the two self-hosted fonts
+            assert set(re.findall(r"url\(([^)]*)\)", low)) <= {'"/static/inter.woff2"', '"/static/mono.woff2"'}
 
 
 def test_html_has_no_inline_script_or_handlers():
