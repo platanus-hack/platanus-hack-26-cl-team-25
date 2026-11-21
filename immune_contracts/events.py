@@ -18,7 +18,7 @@ REQ_CLASSIFIED = "request.classified"   # data: {class: clean|suspect|captive|ev
 REQ_ROUTED = "request.routed"           # data: {route: prod|shadow_l1|shadow_l2|l0|deny, status, verdict, ms}
 ORACLE_FIRED = "oracle.fired"           # data: evidence object (contracts/schemas/evidence.schema.json) + {session, uid}
 SESSION_CAPTURED = "session.captured"   # data: {session, clone, reason}
-SESSION_RELEASED = "session.released"   # data: {session, reason: ttl|evicted|patched}
+SESSION_RELEASED = "session.released"   # data: {session, reason: ttl|evicted|patched|clone_gone|reset}
 RULE_ACTIVE = "rule.active"             # data: rule object
 RULE_EXPIRED = "rule.expired"           # data: {id, reason}
 UPSTREAM_SWITCHED = "upstream.switched" # data: {release, addr}
@@ -27,7 +27,7 @@ POOL_STATE = "pool.state"               # data: {l1_free, l2_busy, size}
 DEPLOY_STARTED = "deploy.started"       # data: {release}
 DEPLOY_DONE = "deploy.done"             # data: {release, ok: bool, rolled_back: bool, detail}
 # pipeline
-INCIDENT_OPENED = "incident.opened"     # data: {incident, vuln_class, route, param, sink:{file,line}}
+INCIDENT_OPENED = "incident.opened"     # data: {incident, vuln_class: sqli|traversal|idor|other, method, route, param, sink:{file,line}, evidence_rid, request:{method,path,query,body_b64}}
 POC_READY = "poc.ready"                 # data: {incident, reproducible: bool, runs, poc}
 PATCH_ATTEMPT = "patch.attempt"         # data: {incident, attempt, source: llm|fallback}
 PATCH_DIFF = "patch.diff"               # data: {incident, attempt, diff}

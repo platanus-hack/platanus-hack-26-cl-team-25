@@ -125,13 +125,28 @@ def test_attack_never_reaches_prod_and_session_is_captive(s):
         r = c.get(s.url + "/search", params={"q": "ATTACK' OR 1=1--"})
         assert r.json()["synthetic"] is True and s.prod_seen == []
         assert not any(k.lower().startswith("x-imm-") for k in r.headers)
-        clone = r.json()["from"]
-        r2 = c.get(s.url + "/search", params={"q": "usb"})  # clean request, same cookie -> same clone, L2
-        assert r2.json()["from"] == clone and s.prod_seen == []
-        assert s.clone_seen[-1]["headers"][wire.H_MODE] == "L2"
+        assert s.clone_seen[-1]["headers"][wire.H_MODE] == "L1"
         sess = httpx.get(s.admin + "/_admin/sessions", headers=ADMIN).json()["captive"]
-        assert len(sess) == 1 and sess[0]["clone"] == clone
+        assert len(sess) == 1 and sess[0]["clone"] is None                     # lazy: no clone held yet
+        states = [x["state"] for x in httpx.get(s.admin + "/_admin/pool", headers=ADMIN).json()["clones"]]
+        assert states == ["free", "free"]
+        r2 = c.get(s.url + "/search", params={"q": "usb"})  # clean request, same cookie -> bound to a clone, L2
+        assert r2.json()["synthetic"] is True and s.prod_seen == []
+        assert s.clone_seen[-1]["headers"][wire.H_MODE] == "L2"
+        r3 = c.get(s.url + "/search", params={"q": "cable"})
+        assert r3.json()["from"] == r2.json()["from"]
+        sess = httpx.get(s.admin + "/_admin/sessions", headers=ADMIN).json()["captive"]
+        assert len(sess) == 1 and sess[0]["clone"] == r2.json()["from"]
     assert httpx.get(s.url + "/search", params={"q": "usb"}).json() == {"from": "prod-a"}  # other session unaffected
+
+
+def test_cookieless_attack_flood_cannot_exhaust_pool(s):
+    for i in range(8):
+        r = httpx.get(s.url + "/search", params={"q": f"ATTACK' {i}"})
+        assert r.json()["synthetic"] is True
+    assert s.prod_seen == []
+    states = [x["state"] for x in httpx.get(s.admin + "/_admin/pool", headers=ADMIN).json()["clones"]]
+    assert states == ["free", "free"]
 
 
 def test_first_request_attack_without_cookie_is_not_forwarded(s):
@@ -172,15 +187,17 @@ def test_inconclusive_fails_open_without_rule_and_closed_with_rule(s):
     assert httpx.get(s.url + "/search", params={"q": "INCONC'"}).json() == {"from": "prod-a"}
 
 
-def test_no_clones_fail_open_without_rule_closed_with_rule(s):
+def test_no_clones_high_signal_denied_low_signal_fails_open(s):
     httpx.put(s.admin + "/_admin/pool", json={"clones": []}, headers=ADMIN)
-    assert httpx.get(s.url + "/search", params={"q": "ATTACK'"}, timeout=5).json() == {"from": "prod-a"}
-    s.prod_seen.clear()
-    rule = {"id": "r2", "incident": None, "method": "GET", "route": "/search", "param": {"in": "query", "name": "q"},
-            "grammar": r"[A-Za-z0-9 ]{0,40}", "scope": "param", "ttl_s": 600}
-    httpx.post(s.admin + "/_admin/rules", json=rule, headers=ADMIN)
-    assert httpx.get(s.url + "/search", params={"q": "ATTACK'"}, timeout=5).status_code == 404 and s.prod_seen == []
+    r = httpx.get(s.url + "/search", params={"q": "ATTACK'"}, timeout=5)          # grammar violation = high signal
+    assert r.status_code == 404 and r.json() == {"detail": "Not Found"} and s.prod_seen == []
+    assert httpx.get(s.url + "/notes/1", headers=tok(50), timeout=5).json() == {"from": "prod-a"}  # owner-scoped untrusted = low signal
     assert httpx.get(s.url + "/search", params={"q": "usb"}).json() == {"from": "prod-a"}
+    s.prod_seen.clear()
+    rule = {"id": "r2", "incident": None, "method": "GET", "route": "/notes/{note_id}", "param": None, "grammar": None,
+            "scope": "all", "ttl_s": 600}
+    httpx.post(s.admin + "/_admin/rules", json=rule, headers=ADMIN)
+    assert httpx.get(s.url + "/notes/1", headers=tok(50), timeout=5).status_code == 404 and s.prod_seen == []   # rule: fail closed
 
 
 def test_rule_applies_to_trusted_identities(s):
@@ -273,13 +290,17 @@ def test_bus_down_does_not_slow_requests(s):
 
 def test_pool_state_and_eviction(s):
     with httpx.Client() as a, httpx.Client() as b, httpx.Client() as c:
-        a.get(s.url + "/search", params={"q": "ATTACK'"}); b.get(s.url + "/search", params={"q": "ATTACK'"})
+        for cl in (a, b):
+            cl.get(s.url + "/search", params={"q": "ATTACK'"}); cl.get(s.url + "/search", params={"q": "usb"})
         states = {x["id"]: x["state"] for x in httpx.get(s.admin + "/_admin/pool", headers=ADMIN).json()["clones"]}
         assert states == {"c1": "captive", "c2": "captive"}
-        r = c.get(s.url + "/search", params={"q": "ATTACK'"}, timeout=5)   # no free clone: must not reach prod silently
-        assert s.prod_seen == [] or r.status_code == 200
+        r = c.get(s.url + "/search", params={"q": "ATTACK'"}, timeout=5)   # no free clone, high signal: denied, oldest captive evicted
+        assert r.status_code == 404 and s.prod_seen == []
         states = [x["state"] for x in httpx.get(s.admin + "/_admin/pool", headers=ADMIN).json()["clones"]]
-        assert "retired" in states or "captive" in states
+        assert sorted(states) == ["captive", "retired"]
+        assert len(httpx.get(s.admin + "/_admin/sessions", headers=ADMIN).json()["captive"]) >= 1
+        r = b.get(s.url + "/search", params={"q": "usb"}, timeout=5)        # the newer captive keeps its clone
+        assert r.json()["synthetic"] is True
 
 
 def test_recording_is_written_and_redacted(s):

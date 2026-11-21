@@ -173,10 +173,12 @@ Decision per request (enforce mode):
    - `clean` → forward the **same bytes** to prod, return prod's response.
    - `oracle` → attack confirmed (see 8).
    - `inconclusive` → if an active rule matched: generic deny; else forward to prod.
-   - no clone available → if an active rule matched: generic deny; else forward to prod.
+   - no clone available → evict the oldest clone-bound captive (its clone becomes `retired`, so fleet replaces it), then: if an active rule matched **or the request is high-signal** (a reason of kind schema/grammar violation or duplicated parameter) → generic deny; else forward to prod.
 8. Confirmed attack (`oracle` verdict, or `evidence`):
    - trusted identity (`uid ≤ seed_max_uid`): never serve synthetic data → generic deny, publish `oracle.fired`.
-   - otherwise: return the clone's response. If the session has a reusable key, mark it captive on that clone (now L2); else the clone goes back to free (the wrapper already reset it). `evidence` without a detonation: acquire a clone and replay the request there in L2.
+   - otherwise: return the clone's response and mark the session **captive**. Captivity is bound to a clone **lazily**: after an L1 detonation the clone goes back to `free` (the wrapper already reset it to the seed) and the session holds no clone. On the captive session's **next** request the gateway acquires a clone (evicting the oldest clone-bound captive if none is free), binds it and uses `L2` from then on. A captive session that never comes back costs nothing.
+   - `evidence` without a detonation (canary, honeytoken): mark captive, acquire and bind a clone now, replay the request there in `L2`.
+   - a captive request that cannot get a clone → generic deny, never prod.
 9. Generic deny = `404 {"detail":"Not Found"}`.
 
 Rules (`contracts/schemas/rule.schema.json`): a rule marks a confirmed-vulnerable point. Effects: values on that route+param not matching `grammar` are suspect **for every identity, trusted included**; `scope: "all"` makes every request on that route suspect; fail-closed as in step 7. Rules expire by TTL or `DELETE`.
@@ -193,7 +195,7 @@ PUT  /_admin/pool        {"clones":[{"id","addr","key","release"}]}   full set o
 GET  /_admin/pool        {"clones":[{"id","state":"free|busy|captive|retired","session","release"}]}
 GET|POST /_admin/rules ; DELETE /_admin/rules/{id}
 GET|POST /_admin/upstream   {"addr":"prod-green:8000","release":"..."}   POST drains in-flight requests, then switches
-GET  /_admin/sessions       {"captive":[{"session","clone","since"}]}
+GET  /_admin/sessions       {"captive":[{"session","clone","since"}]}   clone is null until bound
 POST /_admin/mode           {"mode":"enforce|passthrough"}
 GET  /_admin/prodlog?rid=   {"forwarded": bool, "status": n}
 GET  /_admin/stats          {"prod_requests", "prod_5xx", ...} since last upstream switch
