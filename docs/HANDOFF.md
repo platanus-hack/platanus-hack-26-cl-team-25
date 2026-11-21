@@ -53,17 +53,18 @@ python -m anticipate run apache-httpd-2.4.49
 
 - Puertos por defecto: gateway 8080, admin 8081, dashboard 8090, fleet 8070 (configurables en `.immune/config.yaml`). Todo en `127.0.0.1`.
 - Toda la configuración de una app vive en `<proyecto>/.immune/` (contrato: `contracts/product.md`).
-- Tests: `.venv/bin/pytest acceptance victim/tests shadow/tests gateway/tests pipeline/tests patcher/tests sim/tests dashboard/tests anticipate/tests fleet/tests immune/tests sidecar/tests -q -m "not live" -p no:cacheprovider` (446 pasan).
+- Tests: `.venv/bin/pytest acceptance victim/tests shadow/tests gateway/tests pipeline/tests patcher/tests sim/tests dashboard/tests anticipate/tests fleet/tests immune/tests sidecar/tests -q -m "not live" -p no:cacheprovider` (463 pasan).
 - El LLM usa el login de Claude Code de la máquina.
 
 ## 5. Qué está verificado (corrido por el orquestador, 2026-11-21)
 
 | Cosa | Resultado |
 |---|---|
-| Suites completas + autotest de validaciones | 446 pasan; rechaza 15 parches inadecuados, acepta 7 |
+| Suites completas + autotest de validaciones | 463 pasan; rechaza 15 parches inadecuados, acepta 7 |
 | **Tiempo de identificado a parche en producción**, app Tienda, 7 defectos × 3 rondas, de a uno | **21/21 parchados, mediana 24,9 s** (mín 22,2, máx 31,0). Regla a los 1,9 s. Datos: `docs/demo/metricas-tiempo-a-parche.json` |
 | `immune init` + `up` sobre `examples/notas` (app FastAPI ajena, sesiones opacas) | init READY en 47 s; sus 4 defectos parchados solos (22–63 s a producción) |
 | Runtime genérico sobre `examples/tareas-node` (Node + Postgres, observador externo) | Stack arriba en 11 s; SQLi parchado en 37 s. Traversal e IDOR: detectados, regla y PR abierto, sin merge por falta de tráfico legítimo grabado que cubra la ruta (comportamiento diseñado). El agente constructor reportó los tres parchados con tráfico previo |
+| **Memoria inmunológica**: solo 3 peticiones enviadas, una por clase | Los 7 defectos parchados; 4 hallados por auditoría propia sin que nadie los ejerciera. 23,7 s de mediana a producción |
 | Anticipación sobre Apache 2.4.49 | Parche sugerido equivalente al oficial en 21/21 vectores |
 
 ## 6. Qué NO está verificado ni hecho
@@ -77,7 +78,7 @@ python -m anticipate run apache-httpd-2.4.49
 - **`immune init` para apps genéricas** (Node, etc.): el perfil de `tareas-node` está escrito a mano.
 - Runtime genérico: solo Postgres; lenguajes compilados no probados en el juez; chequeos de política sobre código no Python son léxicos.
 - Revisión independiente, equipo rojo y vulnerabilidad ciega.
-- Memoria inmunológica (auditoría de clase tras cada parche): en construcción.
+
 
 ## 7. Decisiones tomadas
 
