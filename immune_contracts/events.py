@@ -36,6 +36,7 @@ PR_OPENED = "pr.opened"                 # data: {incident, url, branch}
 PR_MERGED = "pr.merged"                 # data: {incident, url, sha}
 INCIDENT_CLOSED = "incident.closed"     # data: {incident, outcome: patched|rule_only|not_reproducible, seconds_to_rule, seconds_to_patch}
 VERIFY_RESULT = "verify.result"         # data: {incident, exploit_blocked_on_prod: bool}
+FUXA_STATUS = "fuxa.status"              # data: {active, enforced, coverage, pending, monitor}
 # sim
 ATTACK_ATTEMPT = "attack.attempt"       # data: {vuln, ok: bool, saw_real_data: bool}
 

@@ -88,6 +88,10 @@ a { color: var(--blue); }
 .ticker .rt { font-weight: 700; }
 .r-prod, .rt.prod { color: var(--green); } .r-shadow, .rt.shadow { color: var(--amber); } .r-deny, .rt.deny { color: var(--red); }
 .legend .r-prod, .legend .r-shadow, .legend .r-deny { background: currentColor; }
+.fuxa .score { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fuxa .score .contained, .fuxa .score .small { display: none; }
+#fuxa-summary ul { padding-left: 20px; color: var(--text); }
+#fuxa-summary p { margin: 8px 0; }
 .ticker .row.cls-captive .path, .ticker .row.cls-suspect .path, .ticker .row.cls-evidence .path { color: var(--amber); }
 
 @media (max-width: 1250px) {

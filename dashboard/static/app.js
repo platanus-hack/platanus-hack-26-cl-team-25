@@ -75,12 +75,16 @@
 
     var head = el('div', 'card-head');
     var title = (inc.vuln_class || 'incidente') + '  ' + (inc.route || '') + (inc.param && inc.param.name ? '  [' + inc.param.name + ']' : '');
-    add(head, el('div', 'card-title', title), el('span', 'badge', labels[status]));
+    var failed = inc.fuxa && inc.closed && inc.closed.outcome === 'rejected';
+    add(head, el('div', 'card-title', title), el('span', 'badge', failed ? 'requiere revisión' : labels[status]));
     card.appendChild(head);
     card.appendChild(el('div', 'kv', inc.id + (inc.hits > 1 ? '   (' + inc.hits + ' disparos del oraculo)' : '')));
 
     var times = el('div', 'times');
-    [['Tiempo a regla', S.timeToRule(inc)], ['Tiempo a parche', S.timeToPatch(inc)]].forEach(function (p) {
+    var timings = [['Tiempo a parche', S.timeToPatch(inc)]];
+    if (!inc.fuxa) timings.unshift(['Tiempo a regla', S.timeToRule(inc)]);
+    if (inc.fuxa && (!inc.fuxa.timed || failed || timings[0][1] == null)) timings = [];
+    timings.forEach(function (p) {
       var t = el('div', 't' + (p[1] == null ? ' na' : ''));
       add(t, el('div', 'v', secs(p[1])), el('div', 'k', p[0]));
       times.appendChild(t);
@@ -115,8 +119,9 @@
       card.appendChild(s2);
       prev = o.ts;
     } else if (inc.opened) {
-      var s0 = section('1. Incidente abierto', inc.opened, null);
+      var s0 = section(inc.fuxa ? 'Evidencia' : '1. Incidente abierto', inc.opened, null);
       s0.appendChild(el('div', 'kv', (inc.route || '') + (inc.sink ? '  ' + inc.sink.file + ':' + inc.sink.line : '')));
+      if (inc.fuxa) s0.appendChild(el('div', 'kv', inc.fuxa.synthetic ? 'Simulación' : 'Observado por Inmune'));
       card.appendChild(s0);
       prev = inc.opened;
     }
@@ -139,21 +144,22 @@
     }
 
     inc.attempts.forEach(function (a) {
-      var sa = section('4. Intento de parche #' + a.attempt, a.ts, prev);
-      var box = el('div', 'attempt ' + a.status);
+      var sa = section(inc.fuxa ? 'Parche local' : '4. Intento de parche #' + a.attempt, a.ts, prev);
+      var result = inc.fuxa && inc.deploy && inc.deploy.doneTs ? (inc.deploy.ok ? 'accepted' : 'rejected') : a.status;
+      var box = el('div', 'attempt ' + result);
       var ah = el('div', 'attempt-head');
       var stl = { pending: 'en curso', rejected: 'rechazado', accepted: 'aceptado' };
-      add(ah, el('span', null, 'fuente: ' + (a.source || '?')), el('span', 'st', stl[a.status] || a.status));
+      add(ah, el('span', null, a.source || '?'), el('span', 'st', stl[result] || result));
       box.appendChild(ah);
       var gates = el('div', 'gates');
-      S.GATES.forEach(function (g) {
+      (inc.fuxa ? [] : S.GATES).forEach(function (g) {
         var gr = a.gates[g];
         var ge = el('div', 'gate ' + gr.state);
         var mark = gr.state === 'pass' ? ' OK' : gr.state === 'fail' ? ' FALLA' : ' ...';
         add(ge, el('div', 'n', g + mark), gr.detail ? el('div', 'det', clip(gr.detail, 400)) : null);
         gates.appendChild(ge);
       });
-      box.appendChild(gates);
+      if (!inc.fuxa) box.appendChild(gates);
       if (a.diff) box.appendChild(renderDiff(a.diff));
       sa.appendChild(box);
       card.appendChild(sa);
@@ -170,7 +176,7 @@
 
     if (inc.deploy) {
       var d = inc.deploy;
-      var sd = section('6. Deploy', d.doneTs || d.startTs, prev);
+      var sd = section(inc.fuxa ? 'Redespliegue' : '6. Deploy', d.doneTs || d.startTs, prev);
       var txt = 'release ' + (d.release || '?') + (d.doneTs ? (d.ok ? '  OK' : '  FALLO') + (d.rolled_back ? '  (rollback)' : '') : '  en curso...');
       sd.appendChild(el('div', 'kv', txt));
       if (d.detail) sd.appendChild(el('div', 'kv', clip(d.detail, 300)));
@@ -183,7 +189,7 @@
       sv.appendChild(el('div', 'kv', inc.verify.blocked ? 'BLOQUEADO: el exploit ya no funciona' : 'ATENCION: el exploit todavia funciona en prod'));
       card.appendChild(sv);
     }
-    if (inc.closed) card.appendChild(el('div', 'kv', 'cierre: ' + (inc.closed.outcome || '?') + ' a las ' + hms(inc.closed.ts)));
+    if (inc.closed && !inc.fuxa) card.appendChild(el('div', 'kv', 'cierre: ' + (inc.closed.outcome || '?') + ' a las ' + hms(inc.closed.ts)));
     return card;
   }
 
@@ -242,7 +248,7 @@
   function renderTicker() {
     var host = $('ticker');
     clear(host);
-    if (!st.ticker.length) { host.appendChild(el('p', 'empty', 'Sin trafico todavia.')); return; }
+    if (!st.ticker.length) { host.appendChild(el('p', 'empty', st.fuxa ? 'Sin alertas HTTP registradas.' : 'Sin tráfico todavía.')); return; }
     st.ticker.slice(0, 18).forEach(function (t) {
       var rc = t.route === 'prod' ? 'prod' : t.route === 'deny' ? 'deny' : t.route ? 'shadow' : '';
       var row = el('div', 'row cls-' + (t.cls || 'x'));
@@ -252,9 +258,28 @@
     });
   }
 
+  function renderFuxa() {
+    var live = st.fuxa;
+    if (!live) return;
+    document.body.classList.add('fuxa');
+    $('dashboard-subtitle').textContent = 'Estación Delta · FUXA v1.2.9';
+    $('fuxa-summary').hidden = false;
+    $('attack-panel').hidden = true;
+    $('traffic-title').textContent = 'Alertas HTTP';
+    $('fuxa-revision').textContent = live.active ? 'Revisión activa ' + live.active : 'FUXA sin revisión activa';
+    $('fuxa-monitor').textContent = live.monitor ? 'Monitor activo' : 'Monitor sin señal reciente';
+    $('fuxa-pending').textContent = live.pending + ' entradas del inventario con cobertura pendiente';
+    var list = $('fuxa-coverage');
+    var labels = { 'settings.write': 'Escritura de configuración', 'system-function.run': 'Funciones del sistema' };
+    clear(list);
+    live.coverage.forEach(function (id) {
+      list.appendChild(el('li', null, (labels[id] || id) + ' · ' + (live.enforced.indexOf(id) >= 0 ? 'control activo' : 'en observación')));
+    });
+  }
+
   function render() {
     dirty = false; rafId = 0;
-    renderScore(); renderIncidents(); renderAttacks(); renderTicker();
+    renderFuxa(); renderScore(); renderIncidents(); renderAttacks(); renderTicker();
   }
   function schedule() {
     if (dirty) return;

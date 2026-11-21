@@ -124,7 +124,7 @@ def _int(v, default=0) -> int:
         return default
 
 
-def create_app(store: str | None = None, token: str | None = None) -> Starlette:
+def create_app(store: str | None = None, token: str | None = None, *, lifespan=None) -> Starlette:
     bus = Bus(store if store is not None else os.environ.get("BUS_STORE") or None,
               token if token is not None else os.environ.get("BUS_TOKEN", ""))
 
@@ -210,6 +210,6 @@ def create_app(store: str | None = None, token: str | None = None) -> Starlette:
     for n, m in FILES.items():
         routes.append(Route(f"/static/{n}", _static(n, m), methods=["GET"]))
 
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, lifespan=lifespan)
     app.state.bus = bus
     return app

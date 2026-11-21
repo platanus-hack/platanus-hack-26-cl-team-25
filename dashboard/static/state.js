@@ -13,7 +13,7 @@
       attacks: {}, attackOrder: [],
       ticker: [], tickerByRid: {},
       counters: { prod: 0, detonated: 0, deny: 0, total: 0 },
-      sessions: {}, pool: null, lastSeq: 0, lastTs: 0, events: 0
+      sessions: {}, pool: null, fuxa: null, lastSeq: 0, lastTs: 0, events: 0
     };
   }
 
@@ -153,6 +153,7 @@
         inc = ensure(st, id, ts);
         inc.opened = ts; inc.t.opened = ts;
         inc.vuln_class = d.vuln_class; inc.route = d.route; inc.param = d.param; inc.sink = d.sink || null;
+        inc.fuxa = d.fuxa || null;
         var keep = [];
         for (i = 0; i < st.pendingOracles.length; i++) {
           if (oracleMatchesSink(st.pendingOracles[i].data, inc.sink)) attachOracle(inc, st.pendingOracles[i]);
@@ -229,6 +230,9 @@
         if (!st.attacks[v]) { st.attacks[v] = []; st.attackOrder.push(v); }
         st.attacks[v].push({ ts: ts, ok: !!d.ok, saw: !!d.saw_real_data });
         if (st.attacks[v].length > ATTACK_MAX) st.attacks[v].shift();
+        break;
+      case 'fuxa.status':
+        st.fuxa = d;
         break;
       default:
         break;

@@ -6,6 +6,7 @@
     immune autopatch off|pr|merge [--project DIR]
     immune init | doctor | deploy ...      (modules immune.init, immune.doctor, immune.deploycmd)
     immune anticipate ...                  (alias of python -m anticipate)
+    immune fuxa ...                        (FUXA v1.2.9 demo)
 
 One stack per project: compose project, containers and networks are named immune-<name>[-...],
 host ports come from `ports:` in .immune/config.yaml. Host processes (fleet, pipeline) keep
@@ -35,7 +36,7 @@ HOME = icfg.IMMUNE_HOME
 COMPOSE = os.path.join(HOME, "deploy", "compose.yaml")
 DEMO_ENV = os.path.join(HOME, "deploy", "demo.env")
 SECRET_KEYS = ("PROD_APP_SECRET", "SHADOW_APP_SECRET", "ADMIN_TOKEN", "BUS_TOKEN")
-DISPATCH = {"init": "immune.init", "doctor": "immune.doctor", "deploy": "immune.deploycmd"}
+DISPATCH = {"init": "immune.init", "doctor": "immune.doctor", "deploy": "immune.deploycmd", "fuxa": "immune.fuxa"}
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".git")
 
 

@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="top">
-  <h1>Sistema inmune <span class="sub">la app se cura sola</span></h1>
+  <h1>Sistema inmune <span class="sub" id="dashboard-subtitle">la app se cura sola</span></h1>
   <div class="conn" id="conn" data-state="off"><span class="dot"></span><span id="conn-text">conectando...</span></div>
 </header>
 
@@ -26,16 +26,23 @@
 <main class="cols">
   <section class="incidents">
     <h2>Incidentes</h2>
-    <p class="empty" id="inc-empty">Sin incidentes todavia. Esperando ataques...</p>
+    <p class="empty" id="inc-empty">Sin incidentes todavía.</p>
     <div id="incidents"></div>
   </section>
   <aside class="side">
-    <section class="panel">
+    <section class="panel" id="fuxa-summary" hidden>
+      <h2>Estado de FUXA</h2>
+      <p id="fuxa-revision"></p>
+      <p id="fuxa-monitor"></p>
+      <ul id="fuxa-coverage"></ul>
+      <p id="fuxa-pending" class="empty"></p>
+    </section>
+    <section class="panel" id="attack-panel">
       <h2>Bot atacante <span class="legend"><i class="c-leak"></i>datos reales <i class="c-exec"></i>ejecuto <i class="c-blocked"></i>bloqueado</span></h2>
       <div id="attacks"><p class="empty">Sin intentos todavia.</p></div>
     </section>
     <section class="panel">
-      <h2>Trafico <span class="legend"><i class="r-prod"></i>prod <i class="r-shadow"></i>sombra <i class="r-deny"></i>deny</span></h2>
+      <h2 id="traffic-title">Tráfico <span class="legend"><i class="r-prod"></i>prod <i class="r-shadow"></i>sombra <i class="r-deny"></i>deny</span></h2>
       <div id="ticker" class="ticker"><p class="empty">Sin trafico todavia.</p></div>
     </section>
   </aside>
