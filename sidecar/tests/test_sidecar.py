@@ -149,3 +149,96 @@ def test_tracer_cmd_is_confined():
     cmd = tracer_cmd("app", "immune-strace:1", "app-strace", "immune.lab=x")
     assert "--pid=container:app" in cmd and cmd[cmd.index("--network") + 1] == "none"
     assert cmd[cmd.index("--cap-drop") + 1] == "ALL" and "--privileged" not in cmd
+
+
+# --- sql oracle (database statement log) ------------------------------------------------------------------
+from sidecar.sqllog import LogParser, SqlLog, find_injections, injected, inputs_of      # noqa: E402
+
+Q = "SELECT id, name FROM users WHERE id = %s"
+
+
+@pytest.mark.parametrize("sql,value,dialect,hit", [
+    (Q % "5", "5", "postgres", False),                                    # too short / one number
+    (Q % "512", "512", "postgres", False),
+    (Q % "5 AND 1=(SELECT 1 FROM pg_sleep(5))", "5 AND 1=(SELECT 1 FROM pg_sleep(5))", "postgres", True),   # time-based
+    (Q % "5 OR 1=1", "5 OR 1=1", "postgres", True),                       # boolean-blind
+    (Q % "5; DROP TABLE t", "5; DROP TABLE t", "postgres", True),         # stacked write
+    (Q % "5-- ", "5--", "postgres", True),
+    ("SELECT * FROM u WHERE name = 'O''Brien'", "O'Brien", "postgres", False),      # escaped: not a substring
+    ("SELECT * FROM u WHERE name = 'ana maria'", "ana maria", "postgres", False),   # inside one literal
+    ("SELECT * FROM u WHERE name = 'x' OR '1'='1'", "x' OR '1'='1", "postgres", True),   # login bypass
+    ("SELECT * FROM u WHERE name = $1", "x' OR '1'='1", "postgres", False),         # bound parameter
+    ("SELECT * FROM u WHERE id IN (1,2,3)", "1,2,3", "postgres", False),            # id list
+    ("SELECT * FROM u ORDER BY created_at", "created_at", "postgres", False),       # one identifier
+    ("SELECT * FROM u ORDER BY name, (SELECT 1)", "name, (SELECT 1)", "postgres", True),
+    ("SELECT * FROM u /* route=/api/users list */ WHERE a = 1", "users list", "postgres", False),   # in a comment
+    ('SELECT * FROM u WHERE name = "x" OR "1"="1"', 'x" OR "1"="1', "mysql", True),
+    ('SELECT * FROM u WHERE name = "ana maria"', "ana maria", "mysql", False),
+    ("SELECT * FROM u WHERE name = 'x\\' OR 1=1'", "OR 1=1", "mysql", False),       # backslash-escaped literal
+    ("SELECT * FROM u WHERE id = 5 AND SLEEP(5)# x", "5 AND SLEEP(5)#", "mysql", True),
+])
+def test_injected(sql, value, dialect, hit):
+    assert injected(sql, value, dialect) is hit
+
+
+def test_inputs_and_hits():
+    ins = inputs_of("/api/users/5%20OR%201=1", "q=ana+maria&page=2", b'{"filter": {"name": "x\' OR \'1\'=\'1"}, "n": 10}',
+                    "application/json")
+    assert ("path", "", "5 OR 1=1") in ins and ("query", "q", "ana maria") in ins
+    assert ("body", "filter.name", "x' OR '1'='1") in ins and ("body", "n", "10") in ins
+    assert ("body", "user", "a b") in inputs_of("/login", "", b"user=a+b&pw=zz", "application/x-www-form-urlencoded")
+    hits = find_injections([Q % "5 OR 1=1", "SELECT * FROM u WHERE name = 'ana maria'"], ins)
+    assert hits == [{"statement": Q % "5 OR 1=1", "input": "5 OR 1=1", "param": "", "location": "path"}]
+
+
+def test_log_parsers():
+    pg = LogParser("postgres")
+    out = []
+    for line in ["1795286000.100 [77] LOG:  statement: SELECT 1",
+                 "1795286000.200 [77] LOG:  execute <unnamed>: SELECT *",
+                 "\tFROM users WHERE id = $1",
+                 "1795286000.200 [77] DETAIL:  parameters: $1 = '5'",
+                 "1795286000.300 [78] LOG:  checkpoint starting: time",
+                 "1795286000.400 [77] ERROR:  syntax error at or near \"x\"",
+                 "1795286000.400 [77] STATEMENT:  SELECT x x"]:
+        out += pg.feed(line)
+    out += pg.flush()
+    assert out == [(1795286000.1, "SELECT 1"), (1795286000.2, "SELECT *\nFROM users WHERE id = $1")]
+    my = LogParser("mysql")
+    out = []
+    for line in ["2026-11-21T15:40:01.250000Z\t   12 Connect\troot@localhost on app using Socket",
+                 "2026-11-21T15:40:01.500000Z\t   12 Query\tSELECT *",
+                 "FROM users WHERE id = 5",
+                 "2026-11-21T15:40:02.000000Z\t   12 Execute\tSELECT 2",
+                 "2026-11-21T15:40:03.000000Z\t   12 Quit\t"]:
+        out += my.feed(line)
+    assert [t for _, t in out] == ["SELECT *\nFROM users WHERE id = 5", "SELECT 2"]
+    assert abs(out[1][0] - out[0][0] - 0.5) < 1e-6 and out[0][0] > 1.7e9
+
+
+async def test_sql_event_from_statement_log():
+    class Fake:
+        async def window(self, t0, t1):
+            return [Q % "5 AND 1=(SELECT 1 FROM pg_sleep(5))"]
+
+        async def stop(self):
+            pass
+    sc, _, pushed = make(b'{"id": 5}')
+    sc.sqllog = Fake()
+    sc_scope = dict(scope("/api/users"), query_string=b"id=5%20AND%201%3D(SELECT%201%20FROM%20pg_sleep(5))")
+    _, headers, _ = await sc.handle(sc_scope, b"")
+    assert dict(headers)[wire.H_VERDICT] == "oracle"
+    ev = json.loads(pushed[0][1])["events"][0]
+    assert ev["oracle"] == "sql" and ev["detail"]["param"] == "id" and ev["detail"]["location"] == "query"
+    sc2, _, pushed2 = make(b'{"id": 5}')
+    sc2.sqllog = Fake()
+    _, headers, _ = await sc2.handle(dict(scope("/api/users"), query_string=b"id=5"), b"")
+    assert dict(headers)[wire.H_VERDICT] == "clean" and not pushed2
+
+
+def test_sqllog_window_takes_only_the_request():
+    s = SqlLog("true")
+    for line in ["1795286100.100 [1] LOG:  statement: SELECT 'before'", "1795286100.500 [1] LOG:  statement: SELECT 'during'",
+                 "1795286101.500 [1] LOG:  statement: SELECT 'after'"]:
+        s.feed(line)
+    assert s.take(1795286100.4, 1795286101.0) == ["SELECT 'during'"] and s.take(1795286101.0, 1795286102.0) == ["SELECT 'after'"]

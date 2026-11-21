@@ -7,7 +7,9 @@ Speaks the same clone protocol as `shadow/` (contracts/README.md §5), so the ga
 3. `file` oracle: the body contains a marker planted in a protected file of the shadow (grafana.ini, the
    app database, /etc/passwd ...). The marker map says which file each marker lives in. With
    SYSCALL_CONTAINER set, also what the app process did while serving this request (sidecar/syscalls.py):
-   `file` it opened a protected path, `proc` it executed a program, `net` it connected to an address;
+   `file` it opened a protected path, `proc` it executed a program, `net` it connected to an address.
+   With SQL_LOG_CMD set, `sql`: a request value reached a statement of the shadow database as SQL syntax
+   (sidecar/sqllog.py);
 4. verdict: oracle if any event; else inconclusive on 401/404/>=500; else clean;
 5. on oracle, POST the signed evidence to {COLLECTOR_URL}/_clone/evidence before releasing the response;
 6. release the response with x-imm-verdict / x-imm-events.
@@ -29,6 +31,7 @@ import time
 import httpx
 
 from immune_contracts import wire
+from .sqllog import SqlLog, find_injections, inputs_of
 from .syscalls import Policy, Tracer, tracer_cmd
 
 log = logging.getLogger("sidecar")
@@ -52,6 +55,8 @@ class Config:
     syscall_policy: str = ""                  # JSON {protected, exec_allow, net_allow}; marker paths are always protected
     syscall_label: str = ""
     syscall_settle_s: float = 0.1
+    sql_log_cmd: str = ""                     # command that follows the shadow database's statement log; empty = off
+    sql_dialect: str = "postgres"             # postgres | mysql
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -69,7 +74,8 @@ class Config:
                    syscall_image=env.get("SYSCALL_IMAGE", "immune-strace:1"),
                    syscall_policy=env.get("SYSCALL_POLICY", ""),
                    syscall_label=env.get("SYSCALL_LABEL", ""),
-                   syscall_settle_s=float(env.get("SYSCALL_SETTLE_S", "0.1")))
+                   syscall_settle_s=float(env.get("SYSCALL_SETTLE_S", "0.1")),
+                   sql_log_cmd=env.get("SQL_LOG_CMD", ""), sql_dialect=env.get("SQL_DIALECT", "postgres"))
 
 
 def find_markers(body: bytes, markers: dict) -> list:
@@ -119,8 +125,9 @@ def verdict_of(status: int, events: list) -> str:
 
 
 class Sidecar:
-    def __init__(self, cfg: Config, tracer=None):
+    def __init__(self, cfg: Config, tracer=None, sqllog=None):
         self.cfg = cfg
+        self.sqllog = sqllog or (SqlLog(cfg.sql_log_cmd, cfg.sql_dialect) if cfg.sql_log_cmd else None)
         self.tracer = tracer
         if tracer is None and cfg.syscall_container:
             name = "%s-strace" % cfg.syscall_container
@@ -132,8 +139,9 @@ class Sidecar:
         self.push_client = httpx.AsyncClient(timeout=3.0)
 
     async def aclose(self):
-        if self.tracer:
-            await self.tracer.stop()
+        for src in (self.tracer, self.sqllog):
+            if src:
+                await src.stop()
         await self.client.aclose()
         await self.push_client.aclose()
 
@@ -142,8 +150,9 @@ class Sidecar:
             while True:
                 msg = await receive()
                 if msg["type"] == "lifespan.startup":
-                    if self.tracer:
-                        await self.tracer.start()
+                    for src in (self.tracer, self.sqllog):
+                        if src:
+                            await src.start()
                     await send({"type": "lifespan.startup.complete"})
                 elif msg["type"] == "lifespan.shutdown":
                     await self.aclose()
@@ -190,8 +199,14 @@ class Sidecar:
                 log.warning("shadow app unreachable: %s", e)
                 return 502, [("content-type", "application/json"), (wire.H_VERDICT, wire.VERDICT_INCONCLUSIVE),
                              (wire.H_EVENTS, "0")], b'{"detail":"Bad Gateway"}'
-            opened = await self.tracer.window(t0, time.time()) if self.tracer else []
+            t1 = time.time()
+            opened = await self.tracer.window(t0, t1) if self.tracer else []
             events = oracle_events(find_markers(rbody, self.cfg.markers), opened)
+            if self.sqllog:
+                ctype = next((v for k, v in client_h if k == "content-type"), "")
+                hits = find_injections(await self.sqllog.window(t0, t1), inputs_of(raw_path, query, body, ctype),
+                                       self.cfg.sql_dialect)
+                events += [{"oracle": wire.ORACLE_SQL, "detail": dict(h, observed="dblog"), "stack": []} for h in hits]
             verdict = verdict_of(status, events)
             if verdict == wire.VERDICT_ORACLE:
                 await self._push({
