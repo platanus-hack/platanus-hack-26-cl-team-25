@@ -1,0 +1,30 @@
+# Unit-test vectors for a URI path normalizer (RFC 3986 §2.3 and §5.2.4).
+# call: ap_normalize_path(path, flags); flags are AP_NORMALIZE_* names.
+flags: [NOT_ABOVE_ROOT, DECODE_UNRESERVED, MERGE_SLASHES]
+# Legitimate paths: exact expected result (ret, path).
+exact:
+  - {in: "/index.html",            ret: 1, out: "/index.html"}
+  - {in: "/docs/v1.2/guide.html",  ret: 1, out: "/docs/v1.2/guide.html"}
+  - {in: "/a/./b",                 ret: 1, out: "/a/b"}
+  - {in: "/a/b/../c",              ret: 1, out: "/a/c"}
+  - {in: "/a//b///c",              ret: 1, out: "/a/b/c"}
+  - {in: "/~user/file",            ret: 1, out: "/~user/file"}
+  - {in: "/a/%41%62c",             ret: 1, out: "/a/Abc"}
+  - {in: "/a/b%2Fc",               ret: 1, out: "/a/b%2Fc"}
+  - {in: "/a/...b/c",              ret: 1, out: "/a/...b/c"}
+  - {in: "/a/.hidden",             ret: 1, out: "/a/.hidden"}
+  - {in: "/a/%2ehidden",           ret: 1, out: "/a/.hidden"}
+  - {in: "/a/b/%2e/c",             ret: 1, out: "/a/b/c"}
+# Dot-segments written with percent-encoded dots. Invariant: once normalized,
+# no segment may still mean "parent directory" (decoded '..'), and climbing
+# above the root must be reported (ret 0) because NOT_ABOVE_ROOT is set.
+no_parent_segment:
+  - {in: "/a/b/.%2e/c"}
+  - {in: "/a/b/%2e./c"}
+  - {in: "/a/b/%2e%2e/c"}
+  - {in: "/a/b/.%2E/c"}
+  - {in: "/a/b/%2E%2E/c"}
+  - {in: "/a/.%2e"}
+  - {in: "/x/.%2e/.%2e/.%2e/y", above_root: true}
+  - {in: "/.%2e/y",             above_root: true}
+  - {in: "/x/../../y",          above_root: true}

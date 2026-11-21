@@ -87,38 +87,26 @@ El LLM se usa con el login de Claude Code de la máquina. El proxy del hackathon
 - Se publica solo el dashboard, nunca el gateway con la app vulnerable detrás.
 - Diferencial: **memoria inmunológica** (tras curar un bug, buscar la misma clase en el resto de la app) y detección que mejora con cada veredicto.
 
-## 8. Sugerencia del mentor: demo sobre software real previo a un parche
+## 8. Sugerencia del mentor: demo sobre software real previo a un parche — HECHO (Apache)
 
-**Idea:** tomar una versión de un proyecto conocido (Apache HTTP Server o GitLab) anterior a un parche de seguridad público, en un laboratorio aislado y con datos sintéticos, y mostrar que nuestro sistema detecta el problema y propone un arreglo comparable al oficial.
+`anticipate/` (ver `anticipate/README.md`). Toma el código público de **Apache HTTP Server 2.4.49**, le pide al modelo confinado que revise el normalizador de rutas sin decirle cuál es el aviso, valida mecánicamente el parche y lo compara con el oficial de 2.4.50.
 
-**Evaluación:**
+```
+.venv/bin/python -m anticipate run apache-httpd-2.4.49
+```
 
-| Opción | Viabilidad con lo que hay |
-|---|---|
-| Apache HTTP Server | Es C, no Python. Requiere los oráculos **fuera del proceso** (§6b de `plan-producto.md`): observar aperturas de archivo del contenedor. La contención por regla es demostrable; el parche de código C por LLM es mucho más incierto |
-| GitLab | Ruby, Postgres, Redis y varios servicios. No entra en el alcance actual |
-| Proyecto Python conocido (por ejemplo Gradio o MLflow) | El mejor encaje: mismo stack que nuestros hooks |
+Resultado medido: 2.4.49 cumple 14/21 propiedades; el parche sugerido y el oficial, 21/21, con resultado idéntico en los 21 vectores y en la misma función. Unos 35 s. Copia del reporte: `docs/demo/anticipacion-apache-2.4.49.html`.
 
-**Forma recomendada del demo** (defensiva y reproducible):
+Es análisis de código fuente: no se levanta Apache ni se envía tráfico.
 
-1. Entorno aislado: red interna de Docker sin salida, datos sintéticos, nada expuesto a internet.
-2. El tráfico de prueba es una **petición de regresión** tomada del aviso público del proyecto, no un ataque propio.
-3. Se muestra: veredicto del oráculo → regla de contención → parche sugerido como PR → **comparación lado a lado con el parche oficial** del proyecto.
-4. Para software de terceros el mensaje correcto es: contenemos con la regla y recomendamos actualizar; el parche sugerido es evidencia de que el sistema entendió la causa.
-
-**Trabajo necesario:**
-
-- Para un proyecto Python: adaptar el perfil (`shadow_profile`) y el arranque en `fleet` a esa app; es el primer paso del desacople (PP1 en `plan-producto.md`).
-- Para Apache: construir el oráculo de archivos fuera del proceso. Es trabajo nuevo, sin estimación medida.
-
-**Pendiente de decidir por el equipo:** qué proyecto usar. Las versiones exactas y los avisos hay que verificarlos en las fuentes oficiales antes de armar el entorno.
+**Límite a decir:** es un defecto público y famoso; el modelo probablemente lo conocía. Demuestra el mecanismo, no descubrimiento ciego. GitLab no se hizo (Ruby, varios servicios).
 
 ## 9. Próximos pasos sugeridos, en orden
 
 1. Correr traversal e IDOR de punta a punta en vivo y arreglar lo que aparezca.
 2. Abrir el dashboard en un navegador y corregir lo visual.
 3. Activar PRs en un repo de pruebas (`REPO_TARGET=scratch`) y después en el oficial.
-4. Decidir y armar el demo sobre software real (sección 8).
+4. Demo sobre software real: hecho para Apache (sección 8). Pendiente: un aviso posterior a la fecha de corte del modelo para una prueba ciega.
 5. Memoria inmunológica (barrido de clase).
 6. Completar `platanus-hack-project.jsonc`, `project-description.md` y el README de la entrega (el README pide un formato particular; leerlo antes).
 
