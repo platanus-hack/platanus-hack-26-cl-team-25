@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import parse_qsl, unquote
 
 from . import openapi, reqs
@@ -58,6 +59,14 @@ def derive_param(kind: str, event: dict, req: dict, template: str | None, manife
             if len(val) >= 2 and (val in target or unquote(val) in target):
                 if best is None or len(val) > len(best[2]):
                     best = (loc, name, val)
+        if best is None:
+            # the app may normalise before opening (Node's path.join turns ../../etc/hostname into
+            # /etc/hostname): match the input with its leading ./ ../ / stripped as a suffix of the opened path
+            for loc, name, val in _inputs(req, template):
+                tail = re.sub(r"^(?:\.{1,2}[/\\]+|[/\\]+)+", "", unquote(val)).replace("\\", "/")
+                if len(tail) >= 2 and tail != unquote(val) and (target == "/" + tail or target.endswith("/" + tail)):
+                    if best is None or len(tail) > len(best[2]):
+                        best = (loc, name, tail)
         if best:
             return {"in": best[0], "name": best[1]}
     if kind in ("owner", "file", "sql"):

@@ -114,8 +114,35 @@ def columns_draft(schema: dict, doc: dict | None) -> dict:
             why[t] = "heuristic: owner=%s, private by column name/type, secret by name" % (owner,)
     out["tables"] = cls
     out["routes"] = routes_draft(schema, doc, ut)
+    _sharing_draft(schema, cls, out["routes"], ut, why)
     out["why"] = why
     return out
+
+
+def _sharing_draft(schema: dict, cls: dict, routes: dict, ut: str | None, why: dict) -> None:
+    """Propose group-shared access for a route whose table is a group: a link table holding only a user
+    column and that route's id (e.g. memberships(user_id, team_id) for /teams/{team_id}/...). Only a
+    proposal: the LLM step checks the app code and removes it when the app does not grant access that way."""
+    tables = schema["tables"]
+    for p, m in routes.items():
+        g = m.get("table")
+        if not g or g == ut or g not in tables:
+            continue
+        for lt, info in sorted(tables.items()):
+            if lt in (g, ut) or len(info["columns"]) > 4:
+                continue
+            spec = cls.get(lt) or {}
+            member = spec.get("owner") if isinstance(spec.get("owner"), str) else None
+            names = [c["name"] for c in info["columns"]]
+            single = g[:-1] if g.endswith("s") else g
+            col = next((c for c in names if c in (p, single + "_id") and c != member), None)
+            keys = set(info["pk"]) | {f["from"] for f in info["fks"]}
+            if member and col and col in keys and member in keys:
+                cls.setdefault(g, {})["shared_via"] = {"table": lt, "member": member, "group": col}
+                m["access"] = "members"
+                why[g + ".shared_via"] = ("heuristic: %s(%s, %s) looks like a membership table; review whether the app "
+                                          "lets every member read %s rows" % (lt, member, col, g))
+                break
 
 
 def routes_draft(schema: dict, doc: dict | None, ut: str | None) -> dict:

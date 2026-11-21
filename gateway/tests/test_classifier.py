@@ -191,3 +191,16 @@ def test_catchall_template():
     assert c("GET", "/public/plugins/alertlist/img/a.svg", who=ANON, spec=spec).cls == CLEAN   # '/' allowed
     r = c("GET", "/public/plugins/alertlist/../../etc/passwd", who=ANON, spec=spec)
     assert r.cls == SUSPECT and "traversal:path" in r.reasons
+
+
+def test_group_route_ownership_uses_membership():
+    from gateway.classifier import _is_owner
+    m = Manifest.from_dict({"seed_max_uid": 60, "canaries": {"team_id": [900]},
+                            "groups": {"teams": {"1": [3, 5], "900": [61]}}, "group_routes": {"team_id": "teams"},
+                            "ownership": {"teams": {"1": 99}}})
+    assert _is_owner(m, "team_id", "1", 3) and _is_owner(m, "team_id", "1", 5)
+    assert not _is_owner(m, "team_id", "1", 4) and not _is_owner(m, "team_id", "1", None)
+    assert _is_owner(m, "team_id", "900", 61) and not _is_owner(m, "team_id", "900", 3)
+    # no declared relation: the one-owner lookup is unchanged
+    assert _is_owner(MAN, "order_id", "12", 7) and not _is_owner(MAN, "order_id", "12", 3)
+    assert Manifest.from_dict({"group_routes": {"team_id": "missing"}}).group_routes == {}

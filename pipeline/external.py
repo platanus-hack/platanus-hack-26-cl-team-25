@@ -1,9 +1,14 @@
 """Incident flow for an app we did not write and cannot run in the in-process harness (any language).
 
-oracle.fired (from the sidecar) -> incident -> PoC reproduced 3/3 against a shadow clone through its sidecar
--> containment rule on the gateway -> closed `rule_only` (the patch stage for non-Python runtimes is next).
+Two modes:
+- judge (app.runtime generic, no REPRO_URL): the full flow of `orchestrator.Pipeline` (PoC 3/3, rule, LLM
+  fix, five gates, PR, blue/green deploy, verify), with every runner job executed on ephemeral clone
+  triples (app image + Postgres + observer; `pipeline/generic.py`) and the language-neutral patch
+  generator `pipeline/generic_patch.py`.
+- reproduction only (REPRO_URL set, e.g. labs/grafana-cve-2021-43798): oracle.fired -> incident -> PoC
+  reproduced 3/3 against a reserved shadow clone through its sidecar -> containment rule -> `rule_only`.
 
-Selected with PIPELINE_APP=external; REPRO_URL is the sidecar of a shadow clone reserved for reproduction.
+Selected with PIPELINE_APP=external, or automatically for app.runtime generic (pipeline/__main__.py).
 """
 from __future__ import annotations
 
@@ -21,12 +26,21 @@ HOP = {"host", "content-length", "connection", "transfer-encoding"}
 
 
 class ExternalPipeline(Pipeline):
-    def __init__(self, *a, repro_url: str, runs: int = 3, **kw):
+    def __init__(self, *a, repro_url: str = "", runs: int = 3, **kw):
+        if not repro_url:
+            from .generic import JudgeValidator
+            if kw.get("validator") is None:
+                kw["validator"] = JudgeValidator(a[0])
+            if kw.get("patcher") is None:
+                from . import generic_patch
+                kw["patcher"] = generic_patch
         super().__init__(*a, **kw)
-        self.repro_url = repro_url.rstrip("/")
+        self.repro_url = (repro_url or "").rstrip("/")
         self.runs = runs
 
     def current_release(self) -> str:
+        if not self.repro_url:
+            return super().current_release()
         return self.state.data.get("current_release") or self.cfg.base_release
 
     def replay(self, req: dict, tag: str) -> str:
@@ -43,6 +57,8 @@ class ExternalPipeline(Pipeline):
         return (r.headers.get(wire.H_VERDICT) or wire.VERDICT_INCONCLUSIVE).lower()
 
     def _flow(self, inc):
+        if not self.repro_url:
+            return super()._flow(inc)      # judge mode: the whole flow, judged on clone triples
         iid = inc["incident"]
         self.publish(E.INCIDENT_OPENED, {k: inc[k] for k in ("incident", "vuln_class", "method", "route", "param",
                                                             "sink", "evidence_rid", "request")}, inc)

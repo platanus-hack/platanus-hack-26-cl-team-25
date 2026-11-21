@@ -117,6 +117,7 @@ def compose_env(cfg: icfg.Config, sec_file: str, run_id: str) -> dict:
         "IMMUNE_NAME": cfg.name, "IMMUNE_HOME": HOME, "IMMUNE_RUNTIME": cfg.runtime_dir,
         "IMMUNE_OPENAPI": cfg.openapi, "IMMUNE_SECRETS_FILE": sec_file, "RUN_ID": run_id,
         "IMMUNE_APP_PORT": str(cfg.app.port), "IMMUNE_MODE": cfg.mode,
+        "IMMUNE_AFTERCHECK": "1" if cfg.aftercheck else "0",
         "IMMUNE_AUTH": json.dumps(cfg.auth.to_dict(), separators=(",", ":")),
         "IMMUNE_PORT_GATEWAY": str(cfg.ports["gateway"]), "IMMUNE_PORT_ADMIN": str(cfg.ports["admin"]),
         "IMMUNE_PORT_DASHBOARD": str(cfg.ports["dashboard"]),
@@ -326,6 +327,9 @@ def seed(cfg: icfg.Config) -> str:
 
 # ---------------------------------------------------------------------------- commands
 def cmd_up(cfg: icfg.Config, reset: bool) -> int:
+    if cfg.app.runtime == "generic":      # any-language app in its own image (immune/generic.py)
+        from . import generic
+        return generic.cmd_up(cfg, reset)
     sec = stack_secrets(cfg)
     stop_host(cfg)
     remove_owned(cfg)
@@ -357,6 +361,9 @@ def cmd_up(cfg: icfg.Config, reset: bool) -> int:
 
 
 def cmd_down(cfg: icfg.Config) -> int:
+    if cfg.app.runtime == "generic":
+        from . import generic
+        return generic.cmd_down(cfg)
     stop_host(cfg)
     remove_owned(cfg)
     sec_file = cfg.rt("stack", "containers.env")

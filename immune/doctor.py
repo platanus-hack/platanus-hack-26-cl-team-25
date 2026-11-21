@@ -1,4 +1,5 @@
-"""`immune doctor`: verification of a project's adaptation (contracts/product.md §5, checks 1-7).
+"""`immune doctor`: verification of a project's adaptation (contracts/product.md §5, checks 1-7, plus 8:
+the generated legit scenarios are deterministic).
 
     python -m immune.doctor [--project DIR] [--json] [--only 1,2]
     from immune import doctor; checks = doctor.run(project)
@@ -27,7 +28,8 @@ from immune import _cfg, shadowdata
 from immune.initsteps import docker, openapi as oa, sandbox
 
 NAMES = {1: "config, release, clone health", 2: "profile identity", 3: "legitimate GETs are clean",
-         4: "synthetic canaries", 5: "L1 reset", 6: "no real data in the shadow", 7: "tests in the runner"}
+         4: "synthetic canaries", 5: "L1 reset", 6: "no real data in the shadow", 7: "tests in the runner",
+         8: "legit scenarios deterministic"}
 SECRET = sandbox.SHADOW_SECRET
 
 
@@ -48,10 +50,11 @@ def build_release(cfg, dst: str | None = None) -> str:
             shutil.copytree(src, out, ignore=ign, symlinks=False)
         else:
             shutil.copyfile(src, out)
-    prof = os.path.join(cfg.project_dir, ".immune", cfg.shadow.profile.replace(".", "/") + ".py")
-    if os.path.isfile(prof):
-        os.makedirs(os.path.join(dst, ".immune"), exist_ok=True)
-        shutil.copyfile(prof, os.path.join(dst, ".immune", os.path.basename(prof)))
+    for mod in (cfg.shadow.profile, cfg.scenarios):
+        src = os.path.join(cfg.project_dir, ".immune", (mod or "").replace(".", "/") + ".py")
+        if mod and os.path.isfile(src):
+            os.makedirs(os.path.join(dst, ".immune"), exist_ok=True)
+            shutil.copyfile(src, os.path.join(dst, ".immune", os.path.basename(src)))
     return dst
 
 
@@ -290,8 +293,46 @@ def check7(cfg, release) -> dict:
                   {"tail": "\n".join(tail[-30:])})
 
 
+def check8(cfg, release) -> dict:
+    """The `scenarios` module runs twice in the pipeline's runner (fresh prod-like seed, frozen clock) with
+    identical output, and covers at least one route; otherwise the legit gate cannot be trusted."""
+    if not cfg.scenarios:
+        return _check(8, True, "no scenarios: the legit gate replays recordings (no coverage caps autopatch at pr)",
+                      status="warn")
+    ok, why = docker.available()
+    if not ok:
+        return _check(8, False, "cannot run the scenarios in a runner container: %s" % why)
+    from pipeline.config import Config as PConfig
+    from pipeline.runner import Runner, RunnerError
+    pc = PConfig(app=cfg, repo_dir=_cfg.IMMUNE_HOME, runtime_dir=cfg.runtime_dir, runner_prefix="immunedoctor-runner")
+    job = {"kind": "scenarios", "module": cfg.scenarios}
+    try:
+        runs = [Runner(pc).run(release, dict(job), timeout=300) for _ in range(2)]
+    except RunnerError as e:
+        return _check(8, False, "scenarios module %s did not run: %s" % (cfg.scenarios, str(e)[:300]), "none")
+    a, b = (r.get("scenarios") or [] for r in runs)
+    broken = [s["name"] + ": " + s["error"] for s in a if s.get("error")]
+    if broken:
+        return _check(8, False, "scenario(s) crash on the unpatched release: %s" % "; ".join(broken[:3]), "none",
+                      {"errors": broken[:10]})
+    if json.dumps(a, sort_keys=True, default=str) != json.dumps(b, sort_keys=True, default=str):
+        diff = next((x["name"] for x, y in zip(a, b) if x != y), "(different number of scenarios)")
+        return _check(8, False, "two runs of %s differ (first difference in %s): not deterministic" % (cfg.scenarios, diff),
+                      "none")
+    steps = [st for s in a for st in s.get("steps") or []]
+    if not steps:
+        return _check(8, False, "%s produced no step: no route is covered" % cfg.scenarios, "none")
+    routes = sorted({st.get("path") for st in steps if st.get("path")})
+    bad = sorted({"%s %s" % (st.get("path"), st.get("status")) for st in steps if (st.get("status") or 0) >= 500})
+    if bad:
+        return _check(8, False, "legitimate journeys hit server errors on the unpatched release: %s" % ", ".join(bad[:5]),
+                      "none")
+    return _check(8, True, "%s: %d scenarios, %d steps over %d paths, identical in two runs" % (
+        cfg.scenarios, len(a), len(steps), len(routes)))
+
+
 def run(project: str | None = None, only: list[int] | None = None) -> list[dict]:
-    want = set(only or range(1, 8))
+    want = set(only or range(1, 9))
     try:
         cfg = _cfg.load(project)
     except Exception as e:  # noqa: BLE001
@@ -310,6 +351,8 @@ def run(project: str | None = None, only: list[int] | None = None) -> list[dict]
             out.append(check6(cfg))
         if 7 in want:
             out.append(check7(cfg, release))
+        if 8 in want:
+            out.append(check8(cfg, release))
     finally:
         shutil.rmtree(release, ignore_errors=True)
     return out

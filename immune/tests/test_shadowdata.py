@@ -238,3 +238,84 @@ def test_builtin_victim_prod_database(tmp_path):
     assert m["seed_max_uid"] == 60 and m["seed_max_order_id"] == 240
     assert m["ownership"]["orders"]["12"] == 7
     assert set(m["canaries"]) == {"order_id", "user_id"}
+
+
+# ---------------------------------------------------------------- group-shared access (shared_via / access: members)
+GROUP_SQL = """
+CREATE TABLE crews (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+CREATE TABLE crew_members (account_id INTEGER NOT NULL, crew_id INTEGER NOT NULL, PRIMARY KEY (account_id, crew_id));
+"""
+
+
+def _with_groups(prod):
+    c = sqlite3.connect(prod)
+    c.executescript(GROUP_SQL)
+    c.executemany("INSERT INTO crews VALUES (?, ?)", [(1, "alpha"), (2, "beta"), (3, "gamma")])
+    c.executemany("INSERT INTO crew_members VALUES (?, ?)", [(u, (u % 3) + 1) for u in range(1, 31)] + [(4, 3)])
+    c.commit()
+    c.close()
+
+
+def _group_columns():
+    cols = json.loads(json.dumps(COLUMNS))
+    cols["tables"]["crews"] = {"public": True, "shared_via": {"table": "crew_members", "member": "account_id",
+                                                              "group": "crew_id"}}
+    cols["tables"]["crew_members"] = {"owner": "account_id"}
+    cols["routes"]["crew_id"] = {"table": "crews", "column": "id", "access": "members"}
+    return cols
+
+
+def test_shared_via_validation(prod):
+    _with_groups(prod)
+    schema = sd.dump_schema(prod)
+    assert sd.validate_columns(_group_columns(), schema) == []
+    bad = _group_columns()
+    bad["tables"]["crews"]["shared_via"]["member"] = "nope"
+    assert any("shared_via.member" in e for e in sd.validate_columns(bad, schema))
+    bad = _group_columns()
+    del bad["tables"]["crews"]["shared_via"]
+    assert any("access: members needs tables.crews.shared_via" in e for e in sd.validate_columns(bad, schema))
+    bad = _group_columns()
+    bad["routes"]["crew_id"]["access"] = "friends"
+    assert any("must be owner or members" in e for e in sd.validate_columns(bad, schema))
+    bad = _group_columns()
+    bad["tables"]["crews"]["shared_via"] = {"table": "missing", "member": "a", "group": "b"}
+    assert any("is not a table" in e for e in sd.validate_columns(bad, schema))
+
+
+def test_groups_in_manifest_and_sharing_file(prod, tmp_path):
+    _with_groups(prod)
+    out = str(tmp_path / "out")
+    sd.build_db(prod, _group_columns(), out, seed=1)
+    m = json.load(open(os.path.join(out, "manifest.json")))
+    assert m["group_routes"] == {"crew_id": "crews"}
+    assert m["groups"]["crews"]["3"] == sorted({u for u in range(1, 31) if (u % 3) + 1 == 3} | {4})
+    sh = json.load(open(os.path.join(out, "shadow", "sharing.json")))
+    assert sh["routes"]["crew_id"] == {"group_table": "crews", "table": "crew_members", "member": "account_id",
+                                       "group": "crew_id"}
+    # without a declared relation: no groups, no sharing file (a stale one is removed)
+    sd.build_db(prod, COLUMNS | {"tables": dict(COLUMNS["tables"], crews={"public": True},
+                                                crew_members={"owner": "account_id"})}, out, seed=1)
+    m = json.load(open(os.path.join(out, "manifest.json")))
+    assert "groups" not in m and "group_routes" not in m
+    assert not os.path.exists(os.path.join(out, "shadow", "sharing.json"))
+
+
+def test_columns_draft_proposes_membership_sharing():
+    from immune.initsteps import drafts
+    schema = {"tables": {
+        "users": {"columns": [{"name": "id", "type": "INTEGER", "pk": 1, "notnull": False},
+                              {"name": "email", "type": "TEXT", "pk": 0, "notnull": True},
+                              {"name": "password_hash", "type": "TEXT", "pk": 0, "notnull": True}],
+                  "fks": [], "pk": ["id"], "rowid_alias": "id", "without_rowid": False, "rows": 3},
+        "teams": {"columns": [{"name": "id", "type": "INTEGER", "pk": 1, "notnull": False},
+                              {"name": "name", "type": "TEXT", "pk": 0, "notnull": True}],
+                  "fks": [], "pk": ["id"], "rowid_alias": "id", "without_rowid": False, "rows": 2},
+        "memberships": {"columns": [{"name": "user_id", "type": "INTEGER", "pk": 1, "notnull": True},
+                                    {"name": "team_id", "type": "INTEGER", "pk": 2, "notnull": True}],
+                        "fks": [], "pk": ["user_id", "team_id"], "rowid_alias": None, "without_rowid": False, "rows": 3}}}
+    doc = {"paths": {"/teams/{team_id}/members": {"get": {"parameters": [{"name": "team_id", "in": "path"}]}}}}
+    d = drafts.columns_draft(schema, doc)
+    assert d["tables"]["teams"]["shared_via"] == {"table": "memberships", "member": "user_id", "group": "team_id"}
+    assert d["routes"]["team_id"]["access"] == "members"
+    assert sd.validate_columns(d, schema) == []

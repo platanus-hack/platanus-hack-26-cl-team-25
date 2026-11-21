@@ -135,6 +135,7 @@ class Config:
     autopatch: str = "merge"
     mode: str = "enforce"
     pool_size: int = 4
+    aftercheck: bool = False               # gateway: replay clean requests in a clone after prod answered
     ports: dict = field(default_factory=lambda: dict(DEFAULT_PORTS))
     immune_home: str = IMMUNE_HOME
     raw: dict = field(default_factory=dict, repr=False)
@@ -552,6 +553,10 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
     autopatch = v.enum(raw, "autopatch", "autopatch", AUTOPATCH, "merge")
     mode = v.enum(raw, "mode", "mode", MODES, "enforce")
     pool_size = v.int_(raw, "pool_size", "pool_size", 4, 0, 32)
+    aftercheck = raw.get("aftercheck", False)
+    if not isinstance(aftercheck, bool):
+        v.err("aftercheck", "must be true or false")
+        aftercheck = False
     ports = dict(DEFAULT_PORTS)
     pr = v.section(raw, "ports")
     for k, val in pr.items():
@@ -567,7 +572,7 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
     return Config(project_dir=project, config_path=path, name=name, runtime_dir=runtime_dir, app=app,
                   database=database, data=data, auth=auth, openapi=openapi, shadow=shadow,
                   tests_command=tests_command, scenarios=scenarios, repo=repo, autopatch=autopatch, mode=mode,
-                  pool_size=pool_size, ports=ports, raw=raw)
+                  pool_size=pool_size, aftercheck=aftercheck, ports=ports, raw=raw)
 
 
 # ---------------------------------------------------------------------------- process-wide instance

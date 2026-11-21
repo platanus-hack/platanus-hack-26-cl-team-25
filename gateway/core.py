@@ -41,6 +41,10 @@ SID_RE = re.compile(r"[A-Za-z0-9_\-]{16,64}")
 MAX_BODY = 10 * 1024 * 1024
 MODES = ("enforce", "observe", "passthrough")
 CLONE_WAIT_S = 0.3
+# after-check (contracts/product.md §3b): clean requests already answered by prod are replayed in a clone
+AFTER_WAIT_S = 2.0        # how long a queued after-check waits for a free clone before it is given up
+AFTER_QUEUE = 256         # pending after-checks; beyond this new ones are dropped (counted)
+AFTER_SEEN = 4096         # identical requests (method, target, body, identity) are checked once per release
 
 
 class _NoJar(http.cookiejar.CookieJar):
@@ -71,6 +75,7 @@ class Config:
     record_path: str = ""
     captive_ttl_s: float = 900.0
     mode: str = "enforce"            # enforce | observe | passthrough (initial; POST /_admin/mode changes it)
+    aftercheck: bool = False         # replay clean requests in a clone after prod has answered (enforce mode only)
     auth: dict = field(default_factory=lambda: {"kind": "immune-token"})   # the `auth` block of config.yaml
 
     @classmethod
@@ -82,6 +87,7 @@ class Config:
             auth = {"kind": "immune-token"}
         mode = g("GW_MODE", "enforce")
         return cls(mode=mode if mode in MODES else "enforce", auth=auth,
+                   aftercheck=g("GW_AFTERCHECK", "").strip().lower() in ("1", "true", "yes", "on"),
                    prod_secret=prod_secret_for(auth, env), shadow_secret=g("SHADOW_APP_SECRET", ""),
                    host=g("GW_HOST", "0.0.0.0"), data_port=int(g("GW_DATA_PORT", "8080")),
                    admin_port=int(g("GW_ADMIN_PORT", "8081")), ingest_port=int(g("GW_INGEST_PORT", "9000")),
@@ -158,6 +164,8 @@ class Gateway:
         self.recorder = Recorder(cfg.record_path)
         self.prodlog: OrderedDict = OrderedDict()
         self.rid_ctx: OrderedDict = OrderedDict()
+        self.after_q = None       # asyncio.Queue of Ctx, created in start() when cfg.aftercheck
+        self.after_seen: OrderedDict = OrderedDict()
         # upstream + drain
         self.upstream = {"addr": cfg.prod_addr, "release": cfg.prod_release}
         self.inflight = 0
@@ -181,6 +189,10 @@ class Gateway:
                                               trust_env=False, cookies=_NoJar(), follow_redirects=False)
         self.bus.start()
         self._tasks.append(asyncio.create_task(self._housekeeping()))
+        if self.cfg.aftercheck:
+            self.after_q = asyncio.Queue(maxsize=AFTER_QUEUE)
+            # one worker: the after-check never holds more than one clone, the rest stay free for detonation
+            self._tasks.append(asyncio.create_task(self._after_worker()))
 
     async def stop(self):
         for t in self._tasks:
@@ -206,6 +218,7 @@ class Gateway:
     def _new_stats(self) -> dict:
         return {"prod_requests": 0, "prod_5xx": 0, "prod_conn_errors": 0, "requests": 0,
                 "by_class": {}, "by_route": {}, "since": time.time(),
+                "aftercheck": {"queued": 0, "checked": 0, "oracle": 0, "duplicate": 0, "dropped": 0, "no_clone": 0},
                 "release": self.upstream["release"] if hasattr(self, "upstream") else "",
                 "addr": self.upstream["addr"] if hasattr(self, "upstream") else ""}
 
@@ -309,6 +322,7 @@ class Gateway:
         ctx.status = resp.status
         await self._send(send, resp, ctx.new_sid)
         self._finish(ctx)
+        self._after_enqueue(ctx)
 
     async def _read(self, scope, receive) -> Ctx:
         chunks, size = [], 0
@@ -427,6 +441,69 @@ class Gateway:
                     ctx.verdict = "no_clone"
                     ctx.would = "deny" if fail_closed else "prod"
         return await self.to_prod(ctx)
+
+    # -- after-check: the second net for what the classifier called clean
+    def _after_enqueue(self, ctx: Ctx):
+        """Queue a clean request that prod has already answered for a replay in an L1 clone. Never blocks."""
+        if self.after_q is None or self.mode != "enforce" or ctx.route != "prod" or ctx.res.cls != CLEAN \
+                or ctx.status in (502, 504):
+            return
+        st = self.stats["aftercheck"]
+        key = hash((ctx.method, ctx.raw_path, ctx.query, ctx.body, ctx.who.uid))
+        if key in self.after_seen:
+            self.after_seen.move_to_end(key)
+            st["duplicate"] += 1
+            return
+        try:
+            self.after_q.put_nowait(ctx)
+        except asyncio.QueueFull:
+            st["dropped"] += 1
+            return
+        self.after_seen[key] = True
+        while len(self.after_seen) > AFTER_SEEN:
+            self.after_seen.popitem(last=False)
+        st["queued"] += 1
+
+    async def _after_worker(self):
+        while True:
+            ctx = await self.after_q.get()
+            try:
+                await self._aftercheck(ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("after-check rid=%s: %s", ctx.rid, e)
+
+    async def _aftercheck(self, ctx: Ctx):
+        """Replay in an L1 clone. If an oracle fires there, the clone pushes the evidence as for any detonation
+        (so the incident opens as usual) and the session is captive from its next request on."""
+        st = self.stats["aftercheck"]
+        clone = await self.pool.acquire(AFTER_WAIT_S)
+        if clone is None:
+            st["no_clone"] += 1
+            return
+        try:
+            async with clone.lock:
+                up = await self.to_clone(ctx, clone, "L1")
+        except Exception as e:
+            log.warning("after-check clone %s failed: %s", clone.id, e)
+            await self.pool.retire(clone)
+            st["no_clone"] += 1
+            return
+        await self.pool.release(clone)
+        st["checked"] += 1
+        if up.verdict != wire.VERDICT_ORACLE:
+            return
+        st["oracle"] += 1
+        log.info("after-check rid=%s %s %s: oracle fired after prod answered %s", ctx.rid, ctx.method, ctx.raw_path,
+                 ctx.status)
+        self._prodlog(ctx.rid, {"forwarded": True, "status": ctx.status, "aftercheck": wire.VERDICT_ORACLE})
+        # keeps the request out of the legitimate-traffic corpus (pipeline gate `legit`)
+        self.recorder.write({"rid": ctx.rid, "ts": time.time(), "aftercheck": wire.VERDICT_ORACLE, "method": ctx.method,
+                             "path": ctx.raw_path, "query": redact_query(ctx.query, (ctx.res.sensitive or {}).get("query") or set()),
+                             "uid": ctx.who.uid, "session": ctx.session})
+        if not ctx.who.trusted:   # a trusted identity is never diverted (contract §6); the rule covers it
+            self._mark_captive(ctx, "aftercheck")
 
     # -- step 7
     async def detonate(self, ctx: Ctx) -> Upstream:
@@ -643,6 +720,7 @@ class Gateway:
                     log.warning("drain timeout; switching with %d in flight", self.inflight)
                 self.upstream = {"addr": addr, "release": release}
                 self.stats = self._new_stats()
+                self.after_seen.clear()
             finally:
                 self.gate.set()
         self.bus.publish(events.UPSTREAM_SWITCHED, {"release": release, "addr": addr})
@@ -655,6 +733,7 @@ class Gateway:
         self.enum.clear()
         self.prodlog.clear()
         self.rid_ctx.clear()
+        self.after_seen.clear()
         self.stats = self._new_stats()
         self.reload_manifest(force=True)
 

@@ -45,6 +45,9 @@ class Sidecar:
         self.lock = asyncio.Lock()
         self._http = None
         self.last_reset_ms = None
+        # judge mode (pipeline's ephemeral clones only, never fleet clones): every response also carries
+        # x-imm-trace = base64(JSON {events, sql:[{sql, params}], failed, opens, marker_owners})
+        self.judge = os.environ.get("SIDECAR_JUDGE") == "1"
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self):
@@ -52,7 +55,8 @@ class Sidecar:
         if cfg.postgres:
             await self.reset_db()
             pg = cfg.postgres
-            self.proxy = PgProxy(pg.listen_host, pg.listen_port, pg.up_host, pg.up_port, self.obs.on_statement)
+            self.proxy = PgProxy(pg.listen_host, pg.listen_port, pg.up_host, pg.up_port, self.obs.on_statement,
+                                 self.obs.on_bound if self.judge else None)
             await self.proxy.start()
         self.obs.learning = True
         if self.tracer:
@@ -226,6 +230,8 @@ class Sidecar:
         out = [(k, v) for k, v in rheaders if not k.startswith(wire.INTERNAL_PREFIX.encode())]
         out += [(b"content-length", str(len(rbody)).encode()),
                 (wire.H_VERDICT.encode(), verdict.encode()), (wire.H_EVENTS.encode(), str(len(events)).encode())]
+        if self.judge:
+            out.append((b"x-imm-trace", base64.b64encode(wire.dumps(self._trace(rec, events, rbody, uid)))))
         t_resp = t0 if tracer_dead else t_app
         # latest observation relative to the moment the app's response was complete (grace-period evidence)
         late = max(((t - t_resp) * 1000 for t in rec.times), default=float("nan"))
@@ -233,6 +239,17 @@ class Sidecar:
                  rid, method, path, mode, uid, status, verdict, [e["oracle"] for e in events],
                  (t_resp - t0) * 1000, (t1 - t0) * 1000, len(rec.statements), len(rec.obs), late)
         return status, out, rbody, mode
+
+    def _trace(self, rec, events, rbody, uid) -> dict:
+        bq = {}
+        for s, prm in rec.bound:
+            bq.setdefault(s, []).append(prm)
+        sql = [{"sql": s, "params": bq[s].pop(0) if bq.get(s) else []} for s in rec.statements]
+        owners = sorted({self.markers[m.decode()] for m in observer.MARKER_RE.findall(rbody or b"")
+                         if m.decode() in self.markers})
+        opens = sorted({o.detail["realpath"] for o in rec.obs if o.kind == "file"})
+        return {"events": events, "sql": sql[:100], "failed": [list(f) for f in rec.failed[:20]], "opens": opens,
+                "marker_owners": owners, "uid": uid}
 
     async def finish(self, mode):
         if mode == "L1" and self.cfg.postgres:

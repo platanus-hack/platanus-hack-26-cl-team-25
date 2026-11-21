@@ -22,6 +22,17 @@ Top-level keys:
 - `login_column` (the column users log in with) and `secret_column` (the password hash column), if the
   app has password login;
 - `routes`: map each OpenAPI **path parameter name** (e.g. `note_id`) to the `{table, column}` it selects;
+
+Group-shared access. Some rows are not owned by one user but shared by the members of a group (a team,
+a project, an organisation) through a membership table. Declare it only when the app's code really grants
+access that way (it checks membership before serving the group, or the feature is "list my team"):
+- on the group table: `shared_via: {table: <membership table>, member: <its user id column>, group: <its
+  column holding the group id>}` (the group table itself may still be `public: true`);
+- on the route parameter that selects the group: `access: members` (default `owner`), with `column` the
+  group table's key. Every member may then see the other members' data on requests addressed to that group.
+  A group the requester is not in is still a leak.
+Do not declare it just because a table has a `team_id`-like column: rows owned by one user stay `owner:`.
+If the draft proposes `shared_via` and the code shows no membership-based access for that route, remove it.
 - `why`: a mapping `"table.column": "one-line justification"` for every private/secret column and
   `"table": "..."` for every public table.
 
@@ -38,8 +49,11 @@ tables:
   posts: {owner: author_id, private: [title, body]}
   comments: {owner: {via: post_id, table: posts}, private: [text]}
   categories: {public: true}
+  groups: {public: true, shared_via: {table: group_members, member: user_id, group: group_id}}
+  group_members: {owner: user_id}
 routes:
   post_id: {table: posts, column: id}
+  group_id: {table: groups, column: id, access: members}
 why:
   users.email: personal contact data
   categories: shared reference data shown to everyone

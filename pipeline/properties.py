@@ -109,6 +109,10 @@ def sqli(v, inc, poc, base_dir, patched_dir):
                        "serves the request; the fix must keep the feature working" % (where, SQL_BENIGN[0], b1["status"]))
     if structure(b2) != s0:
         return False, "%s: the query structure differs between two benign values (%r, %r)" % (where, *SQL_BENIGN)
+    if not roundtrips(b1, SQL_BENIGN[0]):
+        # every check below would compare statements that never saw the input (e.g. only the auth lookup ran)
+        return False, ("%s: a benign value (%r) never reaches an executed statement (status %d, %d statement(s)); "
+                       "the endpoint must still use the parameter in its query" % (where, SQL_BENIGN[0], b1["status"], len(s0)))
     fails = []
     for val in SQL_META:
         r = by["meta:" + val]
@@ -251,11 +255,109 @@ def idor_baseline(v, inc, poc, base_dir) -> dict:
     return out
 
 
+def _anon(base, param, value, tpl):
+    a = dict(reqs.set_value(base, param, value, tpl))
+    a["headers"] = reqs.clean_headers(a.get("headers") or {}, drop_auth=True)
+    a["uid"] = None
+    return a
+
+
+def idor_group(v, inc, poc, base_dir, patched_dir, gtable, where):
+    """A members-scoped route (group-shared access, manifest groups/group_routes): every member of the
+    group reads it exactly as before (2xx, same bytes, no oracle), a seed user outside the group and a new
+    user get 403/404 with no oracle event, the admin and the anonymous caller are unchanged."""
+    m = v.manifest(base_dir)
+    param, tpl = inc["param"], inc["route"]
+    groups = (m.get("groups") or {}).get(gtable) or {}
+    admin_id = (m.get("admin") or {}).get("id")
+    legit = [u["id"] for u in m.get("legit_users") or []]
+    seed_max = int(m.get("seed_max_uid") or 0)
+    stranger = seed_max + 1000
+    everyone = sorted({u for ms in groups.values() for u in ms if isinstance(u, int) and u <= seed_max} | set(legit))
+    base = template_request(inc, poc)
+    plan = []
+    for gid in sorted(groups, key=lambda g: (len(g), g)):
+        members = [u for u in groups[gid] if u != admin_id]
+        member = next((u for u in legit if u in members), members[0] if members else None)
+        outsider = next((u for u in legit + everyone if u not in groups[gid] and u != admin_id), None)
+        if member is None or outsider is None:
+            continue
+        plan.append((gid, member, outsider, set(groups[gid])))
+        if len(plan) >= 4:
+            break
+    if len(plan) < 2:
+        return False, "%s: fewer than 2 groups with a member and a non-member in the manifest; cannot build the matrix" % where
+
+    def seqs_for(roles):
+        out = []
+        for gid, member, outsider, _ms in plan:
+            rq = reqs.set_value(base, param, gid, tpl)
+            who = {"member": member, "outsider": outsider, "new": stranger, "admin": admin_id}
+            for role in roles:
+                if role == "anon":
+                    out.append({"name": "anon:%s:-" % gid, "requests": [_anon(base, param, gid, tpl)]})
+                elif who.get(role) is not None:
+                    out.append({"name": "%s:%s:%s" % (role, gid, who[role]),
+                                "requests": [_as(rq, who[role], "admin" if role == "admin" else "user")]})
+        return out
+    before = {s["name"]: s["runs"][0][-1] for s in
+              v.run(base_dir, {"kind": "harness", "sequences": seqs_for(("member", "admin", "anon"))})["sequences"]}
+    usable = [p for p in plan if 200 <= before["member:%s:%s" % (p[0], p[1])]["status"] < 300
+              and before["member:%s:%s" % (p[0], p[1])]["verdict"] != "oracle"]
+    if len(usable) < 2:
+        return False, ("%s: on the unpatched release fewer than 2 groups answer their own member with 2xx and no "
+                       "oracle (%s); cannot build the matrix" % (where, ", ".join(
+                           "%s=%s -> %s %s" % (param["name"], p[0], before["member:%s:%s" % (p[0], p[1])]["status"],
+                                               before["member:%s:%s" % (p[0], p[1])]["verdict"]) for p in plan[:3])))
+    plan = usable
+    after = v.run(patched_dir, {"kind": "harness", "sequences": seqs_for(("member", "outsider", "new", "admin", "anon"))})
+    members_of = {str(p[0]): p[3] for p in plan}
+    fails, n_member, n_deny = [], 0, 0
+    for s in after["sequences"]:
+        r = s["runs"][0][-1]
+        role, gid, uid = s["name"].split(":")
+        if role in ("admin", "anon"):
+            b = before.get(s["name"])
+            if b is not None and (r["status"], r["sha"]) != (b["status"], b["sha"]):
+                fails.append("%s reading %s=%s changed (status %s -> %s%s)" % (
+                    "admin" if role == "admin" else "anonymous request", param["name"], gid, b["status"], r["status"],
+                    ", body differs" if r["status"] == b["status"] else ""))
+            continue
+        foreign = [o for o in r["marker_owners"] if str(o) != uid and (role != "member" or o not in members_of[gid])]
+        if role == "member":
+            b = before[s["name"]]
+            if not 200 <= r["status"] < 300:
+                fails.append("member %s of %s=%s gets %d instead of 2xx" % (uid, param["name"], gid, r["status"]))
+            elif r["verdict"] == "oracle" or foreign:
+                fails.append("member %s of %s=%s receives data of user(s) outside the group %s" % (uid, param["name"],
+                                                                                                    gid, foreign))
+            elif r["sha"] != b["sha"]:
+                fails.append("member %s of %s=%s no longer gets the same response as before" % (uid, param["name"], gid))
+            else:
+                n_member += 1
+        else:
+            who = "seed user outside the group" if role == "outsider" else "new user"
+            if r["status"] not in (403, 404):
+                fails.append("%s %s reading %s=%s gets %d (want 403/404)" % (who, uid, param["name"], gid, r["status"]))
+            elif foreign or r["verdict"] == "oracle":
+                fails.append("%s %s reading %s=%s still receives the members' data" % (who, uid, param["name"], gid))
+            else:
+                n_deny += 1
+    if fails:
+        return False, "%s: %s" % (where, "; ".join(fails[:4]) + (" (+%d more)" % (len(fails) - 4) if len(fails) > 4 else ""))
+    return True, ("%s: members-scoped matrix over %d groups: %d member reads unchanged (2xx, same bytes, no oracle), "
+                  "%d non-member reads (seed and new users) get 403/404 with no oracle; admin and anonymous unchanged"
+                  % (where, len(plan), n_member, n_deny))
+
+
 def idor(v, inc, poc, base_dir, patched_dir):
     param, tpl = inc.get("param"), inc.get("route")
     if not param:
         return False, "cannot check: the incident has no resource parameter"
     where = "%s %s param %s" % (inc["method"], inc["route"], param["name"])
+    gtable = (v.manifest(base_dir).get("group_routes") or {}).get(param.get("name"))
+    if gtable and param.get("in") == "path" and ("{%s}" % param["name"]) in (tpl or ""):
+        return idor_group(v, inc, poc, base_dir, patched_dir, gtable, where)
     bl = idor_baseline(v, inc, poc, base_dir)
     m = bl["manifest"]
     admin_id = (m.get("admin") or {}).get("id")

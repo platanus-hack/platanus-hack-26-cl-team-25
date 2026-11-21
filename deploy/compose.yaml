@@ -32,6 +32,7 @@ services:
       MANIFEST_PATH: /runtime/data/manifest.json
       RECORD_PATH: /runtime/recordings/requests.jsonl
       GW_MODE: "${IMMUNE_MODE}"
+      GW_AFTERCHECK: "${IMMUNE_AFTERCHECK:-0}"
       IMMUNE_AUTH: "${IMMUNE_AUTH}"
     volumes:
       - "${IMMUNE_HOME}:/opt/immune:ro"
