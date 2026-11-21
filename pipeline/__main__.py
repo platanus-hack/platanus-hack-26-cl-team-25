@@ -41,8 +41,10 @@ def build(cfg: Config, patcher=None) -> Pipeline:
                          cfg.release_dir("t0"))
     if os.environ.get("PIPELINE_APP") == "external":     # app outside the in-process harness (any language)
         from .external import ExternalPipeline
+        from .extfix import load_target
+        target = load_target(os.environ["EXTERNAL_TARGET"]) if os.environ.get("EXTERNAL_TARGET") else None
         return ExternalPipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local,
-                                repro_url=os.environ["REPRO_URL"])
+                                repro_url=os.environ["REPRO_URL"], target=target)
     return Pipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local)
 
 

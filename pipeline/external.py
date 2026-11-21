@@ -15,14 +15,16 @@ import httpx
 from immune_contracts import events as E, wire
 
 from . import poc as pocmod, reqs, rules
+from .extfix import ExtFix
 from .orchestrator import Closed, Pipeline
 
 HOP = {"host", "content-length", "connection", "transfer-encoding"}
 
 
 class ExternalPipeline(Pipeline):
-    def __init__(self, *a, repro_url: str, runs: int = 3, **kw):
+    def __init__(self, *a, repro_url: str, runs: int = 3, target: dict | None = None, **kw):
         super().__init__(*a, **kw)
+        self.target = target
         self.repro_url = repro_url.rstrip("/")
         self.runs = runs
 
@@ -80,7 +82,21 @@ class ExternalPipeline(Pipeline):
         self.note(inc, "rule %s posted (%s %s)" % (rule["id"], rule["scope"], rule.get("param")))
         self.state.save()
 
-        # 3. patch stage for this runtime: not built yet
-        raise Closed("rule_only", "contained by rule %s; the patch stage for this runtime is not built yet"
-                     % rule["id"])
+        # 3. patch: LLM fix -> CI in a sandbox -> PR -> merge -> blue/green -> verify (pipeline/extfix.py)
+        if not self.target:
+            raise Closed("rule_only", "contained by rule %s; no patch target configured (EXTERNAL_TARGET)"
+                         % rule["id"])
+        fx = ExtFix(self.target, self.cfg.run_id, lambda t, d: self.publish(t, d, inc), self.note,
+                    self.cfg.gateway_admin_url, self.cfg.admin_token, self.cfg.gateway_url,
+                    max_attempts=self.cfg.max_attempts, patcher_timeout_s=self.cfg.patcher_timeout_s)
+        out = fx.run(inc)
+        inc["fix"] = {k: v for k, v in out.items() if k != "outcome"}
+        if out["outcome"] == "patched":
+            inc["t"]["verified"] = time.time()
+            try:
+                self.gw.delete_rule(rule["id"])
+                self.note(inc, "rule %s removed: the fix is live" % rule["id"])
+            except Exception as e:  # noqa: BLE001
+                self.note(inc, "could not remove rule %s: %s" % (rule["id"], e))
+        raise Closed(out["outcome"], out["reason"])
 
