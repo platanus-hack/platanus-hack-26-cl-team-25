@@ -1,6 +1,6 @@
-# Handoff — Sistema inmunológico autónomo (team-25)
+# Handoff — Winnie Pooh, sistema inmunológico autónomo (team-25)
 
-Estado al 2026-11-21. Todo el código está en `main` (commit `196058f`).
+Estado al 2026-11-21. Todo el código está en `main` (commit `0fcc328`).
 
 ## 1. Qué es
 
