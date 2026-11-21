@@ -1,15 +1,17 @@
-"""Clone pool state machine.
+"""Clone pool and captive sessions (contracts/README.md §6 step 8, v1.1: lazy binding).
 
-States: free -> busy (one L1 detonation) -> free | captive(session)
-        captive -> retired (evicted / idle TTL / reset)
-A clone is used by one request at a time (per-clone asyncio.Lock); captive
-sessions are therefore serialised on their clone. Retired clones are never used
-again: fleet destroys and replaces them, then PUTs the new set.
+Clone states: free -> busy (one request) -> free | captive (bound to a session) -> retired.
+Captive sessions exist independently of clones: a session confirmed by an L1
+detonation is captive but holds no clone until its next request, which binds
+one. A clone is used by one request at a time (per-clone asyncio.Lock), so a
+bound session is serialised on its clone. Retired clones are never reused:
+fleet destroys and replaces them, then PUTs the new set.
 """
 from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 FREE, BUSY, CAPTIVE, RETIRED = "free", "busy", "captive", "retired"
@@ -23,7 +25,7 @@ class Clone:
     release: str = ""
     state: str = FREE
     session: str | None = None
-    since: float | None = None        # capture time
+    since: float | None = None        # bind time
     last_used: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -32,11 +34,22 @@ class Clone:
                 "addr": self.addr, "since": self.since}
 
 
+@dataclass
+class Captive:
+    session: str
+    since: float
+    last_used: float
+    clone: str | None = None          # bound clone id, None until bound
+    bound_since: float | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)   # serialises binding for this session
+
+
 class Pool:
-    def __init__(self, idle_ttl_s: float = 900.0, on_release=None):
+    def __init__(self, idle_ttl_s: float = 900.0, on_release=None, max_sessions: int = 50000):
         self.clones: dict[str, Clone] = {}
-        self.sessions: dict[str, str] = {}       # session -> clone id
+        self.captive: OrderedDict[str, Captive] = OrderedDict()
         self.idle_ttl_s = idle_ttl_s
+        self.max_sessions = max_sessions
         self.on_release = on_release or (lambda session, clone, reason: None)
         self._cond: asyncio.Condition | None = None
 
@@ -52,7 +65,8 @@ class Pool:
 
     # ---------------------------------------------------------- registration
     async def set_clones(self, specs: list[dict]) -> None:
-        """Full set of registered clones. Unknown ids are added as free; missing ids are forgotten."""
+        """Full set of registered clones. New ids join as free; missing ids are forgotten
+        and the sessions bound to them are released (reason clone_gone)."""
         new: dict[str, Clone] = {}
         for s in specs:
             cid = str(s["id"])
@@ -63,33 +77,42 @@ class Pool:
                 new[cid] = old
             else:
                 if old is not None:
-                    self._drop(old, "patched")
-                new[cid] = Clone(id=cid, addr=str(s["addr"]), key=str(s.get("key", "")), release=str(s.get("release", "") or ""))
+                    self._gone(old)
+                new[cid] = Clone(id=cid, addr=str(s["addr"]), key=str(s.get("key", "")),
+                                 release=str(s.get("release", "") or ""))
         for cid, old in self.clones.items():
             if cid not in new:
-                self._drop(old, "patched")
+                self._gone(old)
         self.clones = new
         await self._notify()
 
-    def _drop(self, clone: Clone, reason: str):
+    def _gone(self, clone: Clone):
         if clone.session is not None:
-            self.sessions.pop(clone.session, None)
-            self.on_release(clone.session, clone.id, reason)
-            clone.session = None
+            self.captive.pop(clone.session, None)
+            self.on_release(clone.session, clone.id, "clone_gone")
+        clone.session = None
+        clone.state = RETIRED
+
+    def _unbind(self, clone: Clone):
+        """Retire a clone; its session (if any) stays captive but unbound."""
+        if clone.session is not None:
+            cap = self.captive.get(clone.session)
+            if cap is not None and cap.clone == clone.id:
+                cap.clone, cap.bound_since = None, None
+        clone.session = None
         clone.state = RETIRED
 
     # ---------------------------------------------------------- queries
     def get(self, cid: str) -> Clone | None:
         return self.clones.get(cid)
 
-    def captive_clone(self, session: str | None) -> Clone | None:
-        if not session:
-            return None
-        cid = self.sessions.get(session)
-        c = self.clones.get(cid) if cid else None
-        if c is None or c.state != CAPTIVE or c.session != session:
-            if cid is not None:
-                self.sessions.pop(session, None)
+    def captive_session(self, session: str | None) -> Captive | None:
+        return self.captive.get(session) if session else None
+
+    def bound_clone(self, cap: Captive) -> Clone | None:
+        c = self.clones.get(cap.clone) if cap.clone else None
+        if c is None or c.state != CAPTIVE or c.session != cap.session:
+            cap.clone, cap.bound_since = None, None
             return None
         return c
 
@@ -97,10 +120,20 @@ class Pool:
         return [c.public() for c in self.clones.values()]
 
     def captives(self) -> list[dict]:
-        return [{"session": c.session, "clone": c.id, "since": c.since}
-                for c in self.clones.values() if c.state == CAPTIVE]
+        out = []
+        for cap in self.captive.values():
+            self.bound_clone(cap)
+            out.append({"session": cap.session, "clone": cap.clone, "since": cap.since})
+        return out
 
-    # ---------------------------------------------------------- transitions
+    def counts(self) -> dict:
+        out = {FREE: 0, BUSY: 0, CAPTIVE: 0, RETIRED: 0}
+        for c in self.clones.values():
+            out[c.state] = out.get(c.state, 0) + 1
+        out["sessions"] = len(self.captive)
+        return out
+
+    # ---------------------------------------------------------- clone transitions
     def _take_free(self) -> Clone | None:
         free = [c for c in self.clones.values() if c.state == FREE and not c.lock.locked()]
         if not free:
@@ -131,57 +164,78 @@ class Pool:
                     return self._take_free()
 
     async def release(self, clone: Clone) -> None:
-        """busy -> free (after an L1 detonation; the wrapper already reset it)."""
+        """busy -> free (after an L1 request; the wrapper already reset it)."""
         if self.clones.get(clone.id) is clone and clone.state == BUSY:
             clone.state = FREE
         await self._notify()
 
-    async def retire(self, clone: Clone, reason: str = "evicted") -> None:
+    async def retire(self, clone: Clone) -> None:
+        """Any -> retired (clone failure / eviction). A bound session stays captive, unbound."""
         if self.clones.get(clone.id) is clone:
-            self._drop(clone, reason)
+            self._unbind(clone)
         await self._notify()
 
-    def capture(self, clone: Clone, session: str) -> bool:
-        """busy -> captive(session)."""
-        if self.clones.get(clone.id) is not clone or clone.state not in (BUSY, FREE):
-            return False
-        clone.state = CAPTIVE
-        clone.session = session
-        clone.since = clone.last_used = time.time()
-        self.sessions[session] = clone.id
-        return True
-
-    def touch(self, clone: Clone) -> None:
-        clone.last_used = time.time()
-
     async def evict_oldest(self) -> Clone | None:
-        caps = [c for c in self.clones.values() if c.state == CAPTIVE]
-        if not caps:
+        """Retire the clone of the oldest clone-bound captive (fleet replaces it)."""
+        bound = [c for c in self.clones.values() if c.state == CAPTIVE]
+        if not bound:
             return None
-        oldest = min(caps, key=lambda c: c.since or 0)
-        await self.retire(oldest, "evicted")
+        oldest = min(bound, key=lambda c: c.since or 0)
+        await self.retire(oldest)
         return oldest
 
-    async def expire_idle(self, now: float | None = None) -> list[Clone]:
+    # ---------------------------------------------------------- captive sessions
+    def mark_captive(self, session: str) -> tuple[Captive, bool]:
+        """-> (captive, created). Idempotent."""
+        cap = self.captive.get(session)
+        if cap is not None:
+            return cap, False
+        now = time.time()
+        cap = self.captive[session] = Captive(session=session, since=now, last_used=now)
+        while len(self.captive) > self.max_sessions:
+            # drop the oldest unbound session (bound ones are limited by the pool size anyway)
+            victim = next((s for s, c in self.captive.items() if c.clone is None and s != session), None)
+            if victim is None:
+                break
+            self.captive.pop(victim)
+            self.on_release(victim, None, "evicted")
+        return cap, True
+
+    def bind(self, clone: Clone, cap: Captive) -> bool:
+        """busy -> captive, bound to cap.session."""
+        if self.clones.get(clone.id) is not clone or clone.state not in (BUSY, FREE):
+            return False
+        now = time.time()
+        clone.state, clone.session, clone.since, clone.last_used = CAPTIVE, cap.session, now, now
+        cap.clone, cap.bound_since = clone.id, now
+        return True
+
+    def touch(self, cap: Captive, clone: Clone | None = None) -> None:
+        cap.last_used = time.time()
+        if clone is not None:
+            clone.last_used = cap.last_used
+
+    async def expire_idle(self, now: float | None = None) -> list[str]:
         now = time.time() if now is None else now
         out = []
-        for c in list(self.clones.values()):
-            if c.state == CAPTIVE and not c.lock.locked() and now - c.last_used > self.idle_ttl_s:
-                self._drop(c, "ttl")
-                out.append(c)
+        for s, cap in list(self.captive.items()):
+            c = self.bound_clone(cap)
+            if now - cap.last_used <= self.idle_ttl_s or cap.lock.locked() or (c is not None and c.lock.locked()):
+                continue
+            self.captive.pop(s, None)
+            if c is not None:
+                c.session, c.state = None, RETIRED
+            self.on_release(s, c.id if c else None, "ttl")
+            out.append(s)
         if out:
             await self._notify()
         return out
 
-    async def release_all_sessions(self, reason: str = "evicted") -> None:
-        for c in list(self.clones.values()):
-            if c.state == CAPTIVE:
-                self._drop(c, reason)
-        self.sessions.clear()
+    async def release_all_sessions(self, reason: str = "reset") -> None:
+        for s, cap in list(self.captive.items()):
+            c = self.bound_clone(cap)
+            if c is not None:
+                c.session, c.state = None, RETIRED
+            self.on_release(s, c.id if c else None, reason)
+        self.captive.clear()
         await self._notify()
-
-    def counts(self) -> dict:
-        out = {FREE: 0, BUSY: 0, CAPTIVE: 0, RETIRED: 0}
-        for c in self.clones.values():
-            out[c.state] = out.get(c.state, 0) + 1
-        return out

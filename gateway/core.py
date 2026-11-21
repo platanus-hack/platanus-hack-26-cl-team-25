@@ -307,16 +307,16 @@ class Gateway:
             ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, None)
             return await self.to_prod(ctx)
 
-        # 3. captive session -> its L2 clone (never for a trusted identity)
+        # 3. captive session -> its (lazily bound) L2 clone; never for a trusted identity
         if not ctx.who.trusted:
-            clone = self.pool.captive_clone(ctx.session)
-            if clone is None and ctx.who.uid is not None:
-                clone = self.pool.captive_clone(ctx.cookie_session)
-            if clone is not None:
+            cap = self.pool.captive_session(ctx.session)
+            if cap is None and ctx.who.uid is not None:
+                cap = self.pool.captive_session(ctx.cookie_session)
+            if cap is not None:
                 ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, None)
                 ctx.res.cls, ctx.res.reasons = CAPTIVE, ["captive"] + ctx.res.reasons
                 self._publish_classified(ctx)
-                return await self.captive(ctx, clone)
+                return await self.captive(ctx, cap)
 
         # 4. L0 scanner paths (only if the app does not define the route)
         if l0.is_scanner_path(ctx.raw_path) and self.spec.match(ctx.method, ctx.raw_path)[0] is None:
@@ -337,9 +337,10 @@ class Gateway:
 
     # -- step 7
     async def detonate(self, ctx: Ctx) -> Upstream:
-        fail_closed = bool(ctx.res.rule_hit)
+        fail_closed = bool(ctx.res.rule_hit) or _high_signal(ctx.res.reasons)
         clone = await self.pool.acquire(CLONE_WAIT_S)
         if clone is None:
+            await self._evict_oldest(ctx)
             ctx.verdict = "no_clone"
             return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
         try:
@@ -347,63 +348,71 @@ class Gateway:
                 up = await self.to_clone(ctx, clone, "L1")
         except Exception as e:
             log.warning("clone %s failed: %s", clone.id, e)
-            await self.pool.retire(clone, "evicted")
+            await self.pool.retire(clone)
             ctx.verdict = "no_clone"
             return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
         ctx.verdict = up.verdict
+        # L1: the wrapper already reset the clone, whatever the verdict
+        await self.pool.release(clone)
         if up.verdict == wire.VERDICT_ORACLE:
             if ctx.who.trusted:
-                await self.pool.release(clone)
                 return self.deny(ctx)
-            self._capture(ctx, clone, "oracle")
+            self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
             ctx.route = "shadow_l1"
             return up
-        await self.pool.release(clone)
         if up.verdict == wire.VERDICT_CLEAN:
             return await self.to_prod(ctx)
-        return self.deny(ctx) if fail_closed else await self.to_prod(ctx)   # inconclusive / unknown
+        return self.deny(ctx) if ctx.res.rule_hit else await self.to_prod(ctx)   # inconclusive / unknown
 
-    # -- step 8, evidence without detonation
+    # -- step 8, evidence without detonation: mark captive, bind now, replay in L2
     async def evidence(self, ctx: Ctx) -> Upstream:
         if ctx.who.trusted:
             return self.deny(ctx)
-        clone = await self.pool.acquire(CLONE_WAIT_S)
-        if clone is None and await self.pool.evict_oldest() is not None:
-            clone = await self.pool.acquire(CLONE_WAIT_S)
-        if clone is None:
-            ctx.verdict = "no_clone"
-            return self.deny(ctx)
-        try:
-            async with clone.lock:
-                up = await self.to_clone(ctx, clone, "L2")
-        except Exception as e:
-            log.warning("clone %s failed: %s", clone.id, e)
-            await self.pool.retire(clone, "evicted")
-            return self.deny(ctx)
-        ctx.verdict = up.verdict
-        self._capture(ctx, clone, ctx.res.reasons[0] if ctx.res.reasons else "evidence")
-        ctx.route = "shadow_l2"
-        return up
+        cap = self._mark_captive(ctx, ctx.res.reasons[0] if ctx.res.reasons else "evidence")
+        return await self.captive(ctx, cap)
 
-    async def captive(self, ctx: Ctx, clone: Clone) -> Upstream:
+    async def captive(self, ctx: Ctx, cap) -> Upstream:
+        """Serve a captive session from its bound clone, binding one first if needed. Never prod."""
         ctx.route = "shadow_l2"
+        async with cap.lock:
+            clone = self.pool.bound_clone(cap)
+            if clone is None:
+                clone = await self.pool.acquire(CLONE_WAIT_S)
+                if clone is None and await self._evict_oldest(ctx) is not None:
+                    clone = await self.pool.acquire(CLONE_WAIT_S)
+                if clone is None or not self.pool.bind(clone, cap):
+                    if clone is not None:
+                        await self.pool.release(clone)
+                    ctx.verdict = "no_clone"
+                    return self.deny(ctx)
+                self.bus.publish(events.SESSION_CAPTURED, {"session": cap.session, "clone": clone.id, "reason": "bound"},
+                                 rid=ctx.rid)
         try:
             async with clone.lock:
-                if clone.session not in (ctx.session, ctx.cookie_session) or clone.state != "captive":
+                if clone.session != cap.session or clone.state != "captive":
                     return self.deny(ctx)
-                self.pool.touch(clone)
+                self.pool.touch(cap, clone)
                 up = await self.to_clone(ctx, clone, "L2")
-                self.pool.touch(clone)
+                self.pool.touch(cap, clone)
         except Exception as e:
             log.warning("captive clone %s failed: %s", clone.id, e)
+            await self.pool.retire(clone)
             return self.deny(ctx)
         ctx.verdict = up.verdict
         return up
 
-    def _capture(self, ctx: Ctx, clone: Clone, reason: str):
-        if self.pool.capture(clone, ctx.session):
-            self.bus.publish(events.SESSION_CAPTURED, {"session": ctx.session, "clone": clone.id, "reason": reason},
+    def _mark_captive(self, ctx: Ctx, reason: str):
+        cap, created = self.pool.mark_captive(ctx.session)
+        if created:
+            self.bus.publish(events.SESSION_CAPTURED, {"session": ctx.session, "clone": None, "reason": reason},
                              rid=ctx.rid)
+        return cap
+
+    async def _evict_oldest(self, ctx: Ctx):
+        clone = await self.pool.evict_oldest()
+        if clone is not None:
+            log.info("evicted clone %s (rid=%s)", clone.id, ctx.rid)
+        return clone
 
     def deny(self, ctx: Ctx | None = None) -> Upstream:
         if ctx is not None:
@@ -529,7 +538,7 @@ class Gateway:
         self.bus.publish(events.UPSTREAM_SWITCHED, {"release": release, "addr": addr})
 
     async def reset(self):
-        await self.pool.release_all_sessions("evicted")
+        await self.pool.release_all_sessions("reset")
         for rid in list(self.rules):
             self.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "reset"})
         self.rules.clear()
@@ -688,6 +697,11 @@ class Gateway:
             return JSONResponse({"ok": True})
 
         return Starlette(routes=[Route("/_clone/evidence", evidence, methods=["POST"])])
+
+
+def _high_signal(reasons) -> bool:
+    """Schema/grammar violation or duplicated parameter (contract §6 step 7)."""
+    return any(r.startswith(("schema:", "grammar:", "dup_query:")) for r in reasons)
 
 
 def _cookie(header: str, name: str) -> str | None:
