@@ -39,10 +39,11 @@ def build(cfg: Config, patcher=None) -> Pipeline:
     def local():
         return LocalRepo(os.environ.get("REPO_TARGET_DIR") or os.path.join(cfg.runtime_dir, "repo"), cfg.run_id,
                          cfg.release_dir("t0"), paths=cfg.project.app.release_paths, t0_tag=cfg.project.repo.t0_tag)
-    if os.environ.get("PIPELINE_APP") == "external":     # app outside the in-process harness (any language)
+    if os.environ.get("PIPELINE_APP") == "external" or cfg.project.app.runtime == "generic":
+        # app outside the in-process harness (any language): pipeline/external.py
         from .external import ExternalPipeline
         return ExternalPipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local,
-                                repro_url=os.environ["REPRO_URL"])
+                                repro_url=os.environ.get("REPRO_URL", ""))
     return Pipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local)
 
 

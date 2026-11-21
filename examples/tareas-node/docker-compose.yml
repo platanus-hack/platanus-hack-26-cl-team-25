@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tareas
+      POSTGRES_USER: tareas
+      POSTGRES_PASSWORD: tareas
+    volumes:
+      - tareas-db:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+  app:
+    build: .
+    depends_on: [db]
+    environment:
+      DATABASE_URL: postgres://tareas:tareas@db:5432/tareas
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+
+volumes:
+  tareas-db:

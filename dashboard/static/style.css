@@ -99,3 +99,8 @@ a { color: var(--blue); }
   .score { grid-template-columns: repeat(3, 1fr); } .score .big .num { font-size: 64px; }
 }
 @media (max-width: 700px) { .gates { grid-template-columns: repeat(2, 1fr); } .score { grid-template-columns: 1fr 1fr; } }
+/* class self-audit: incidents found in the shadow without any request through the gateway */
+.audit-line { margin: 0 0 12px; padding: 8px 12px; border: 1px dashed #7aa2ff; border-radius: 6px; color: #b9ccff; font-size: 15px; }
+.card.audit { border-style: dashed; border-left-style: solid; }
+.badge.audit, .card .badge.audit { background: #7aa2ff; color: #0a1430; text-transform: none; letter-spacing: 0; }
+.origin a { color: #b9ccff; }

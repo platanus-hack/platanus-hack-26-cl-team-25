@@ -69,8 +69,9 @@
 
   function buildCard(inc) {
     var status = S.status(inc);
-    var card = el('article', 'card');
+    var card = el('article', 'card' + (inc.origin === 'audit' ? ' audit' : ''));
     card.setAttribute('data-status', status);
+    card.id = 'card-' + String(inc.id);
     var labels = { open: 'abierta', contained: 'contenida por regla', cured: 'curada por parche' };
 
     var head = el('div', 'card-head');
@@ -79,6 +80,18 @@
     add(head, el('div', 'card-title', title), el('span', 'badge', failed ? 'requiere revisión' : labels[status]));
     card.appendChild(head);
     card.appendChild(el('div', 'kv', inc.id + (inc.hits > 1 ? '   (' + inc.hits + ' disparos del oraculo)' : '')));
+    if (inc.origin === 'audit') {
+      var org = el('div', 'kv origin');
+      org.appendChild(el('span', 'badge audit', 'hallado por auditoría'));
+      if (inc.parent) {
+        org.appendChild(el('span', 'k', '  a partir de '));
+        var pa = el('a', null, String(inc.parent));
+        pa.href = '#card-' + encodeURIComponent(String(inc.parent));
+        org.appendChild(pa);
+        org.appendChild(el('span', 'k', ': ningun request de este tipo paso por el gateway'));
+      }
+      card.appendChild(org);
+    }
 
     var times = el('div', 'times');
     var timings = [['Tiempo a parche', S.timeToPatch(inc)]];
@@ -118,12 +131,17 @@
       if (ev0.detail) s2.appendChild(el('div', 'kv', 'detalle: ' + clip(json(ev0.detail), 700)));
       card.appendChild(s2);
       prev = o.ts;
-    } else if (inc.opened) {
-      var s0 = section(inc.fuxa ? 'Evidencia' : '1. Incidente abierto', inc.opened, null);
-      s0.appendChild(el('div', 'kv', (inc.route || '') + (inc.sink ? '  ' + inc.sink.file + ':' + inc.sink.line : '')));
+    } else if (inc.opened || inc.t.found) {
+      var first = inc.origin === 'audit' ? (inc.t.found || inc.opened) : inc.opened;
+      var heading = inc.fuxa ? 'Evidencia' : '1. Incidente abierto';
+      if (inc.origin === 'audit') heading = '1. Hallado por auditoría (en la sombra)';
+      var s0 = section(heading, first, null);
+      s0.appendChild(el('div', 'kv', (inc.method ? inc.method + ' ' : '') + (inc.route || '') + (inc.sink && inc.sink.file ? '  ' + inc.sink.file + ':' + inc.sink.line : '')));
       if (inc.fuxa) s0.appendChild(el('div', 'kv', inc.fuxa.synthetic ? 'Simulación' : 'Observado por Inmune'));
+      if (inc.request) s0.appendChild(el('div', 'req', requestText({ data: { request: inc.request } })));
+      if (!inc.opened) s0.appendChild(el('div', 'kv', 'en cola: espera su turno en el pipeline'));
       card.appendChild(s0);
-      prev = inc.opened;
+      prev = first;
     }
 
     if (inc.rule) {
@@ -198,12 +216,16 @@
     $('sc-open').textContent = s.open; $('sc-contained').textContent = s.contained; $('sc-cured').textContent = s.cured;
     $('sc-seen').textContent = s.seen; $('sc-prod').textContent = s.prod; $('sc-det').textContent = s.detonated;
     $('sc-cap').textContent = s.captive;
+    $('sc-audit').textContent = s.audit;
+    var line = S.auditLine(st), al = $('audit-line');
+    al.textContent = line || '';
+    al.style.display = line ? '' : 'none';
     $('sc-clones').textContent = s.free == null ? '-' : s.free + ' / ' + s.busy;
   }
 
   function renderIncidents() {
     var host = $('incidents');
-    var ids = st.order.filter(function (id) { var i = st.incidents[id]; return i.opened || i.oracles.length; }).reverse();
+    var ids = st.order.filter(function (id) { return S.visible(st.incidents[id]); }).reverse();
     var empty = $('inc-empty');
     if (empty) empty.style.display = ids.length ? 'none' : '';
     var prevNode = null;

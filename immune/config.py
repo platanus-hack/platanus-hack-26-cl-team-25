@@ -111,6 +111,14 @@ class ShadowConfig:
 
 
 @dataclass
+class AuditConfig:
+    """Class self-audit after a closed incident (pipeline/audit.py): budget per audit."""
+    enabled: bool = True                   # default: true for python-asgi, false for generic (judge triples are slow)
+    max_jobs: int = 40                     # judge jobs (one per candidate operation x parameter)
+    max_seconds: int = 120
+
+
+@dataclass
 class RepoConfig:
     target: str = "local"
     github: str = ""
@@ -135,6 +143,8 @@ class Config:
     autopatch: str = "merge"
     mode: str = "enforce"
     pool_size: int = 4
+    aftercheck: bool = False               # gateway: replay clean requests in a clone after prod answered
+    audit: AuditConfig = field(default_factory=AuditConfig)
     ports: dict = field(default_factory=lambda: dict(DEFAULT_PORTS))
     immune_home: str = IMMUNE_HOME
     raw: dict = field(default_factory=dict, repr=False)
@@ -552,6 +562,19 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
     autopatch = v.enum(raw, "autopatch", "autopatch", AUTOPATCH, "merge")
     mode = v.enum(raw, "mode", "mode", MODES, "enforce")
     pool_size = v.int_(raw, "pool_size", "pool_size", 4, 0, 32)
+    aftercheck = raw.get("aftercheck", False)
+    if not isinstance(aftercheck, bool):
+        v.err("aftercheck", "must be true or false")
+        aftercheck = False
+    au = v.section(raw, "audit")
+    audit = AuditConfig(enabled=app.runtime == "python-asgi",
+                        max_jobs=v.int_(au, "max_jobs", "audit.max_jobs", 40, 0, 1000),
+                        max_seconds=v.int_(au, "max_seconds", "audit.max_seconds", 120, 0, 3600))
+    if "enabled" in au:
+        if isinstance(au["enabled"], bool):
+            audit.enabled = au["enabled"]
+        else:
+            v.err("audit.enabled", "must be true or false")
     ports = dict(DEFAULT_PORTS)
     pr = v.section(raw, "ports")
     for k, val in pr.items():
@@ -567,7 +590,7 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
     return Config(project_dir=project, config_path=path, name=name, runtime_dir=runtime_dir, app=app,
                   database=database, data=data, auth=auth, openapi=openapi, shadow=shadow,
                   tests_command=tests_command, scenarios=scenarios, repo=repo, autopatch=autopatch, mode=mode,
-                  pool_size=pool_size, ports=ports, raw=raw)
+                  pool_size=pool_size, aftercheck=aftercheck, audit=audit, ports=ports, raw=raw)
 
 
 # ---------------------------------------------------------------------------- process-wide instance

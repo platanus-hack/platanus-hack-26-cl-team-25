@@ -282,3 +282,31 @@ def test_verify_swaps_a_canary_path_value():
     assert _off_canary(inc, "/api/orders/5", m) == ("/api/orders/5", False)
     assert _off_canary(dict(inc, param={"in": "query", "name": "q"}), "/api/orders/12", m) == ("/api/orders/12", False)
     assert _off_canary(inc, "/api/orders/12", {}) == ("/api/orders/12", False)
+
+
+def test_recorded_requests_exclude_what_the_aftercheck_flagged(tmp_path):
+    """A request recorded as clean and later found to be an attack by the gateway's after-check is not legit traffic."""
+    from pipeline.gates import Validator
+    c = icfg.load(project(tmp_path))
+    rec = tmp_path / "requests.jsonl"
+    clean = {"method": "GET", "class": "clean", "route": "prod", "status": 200}
+    rows = [
+        dict(clean, path="/api/items", query="q=bad", uid=3),
+        dict(clean, path="/api/items", query="q=ok", uid=3),
+        {"rid": "r1", "aftercheck": "oracle", "method": "GET", "path": "/api/items", "query": "q=bad", "uid": 3},
+        dict(clean, path="/api/items", query="q=bad", uid=3),      # repeated before the session was captured
+        dict(clean, path="/api/items", query="q=bad", uid=4),      # another identity: not flagged
+    ]
+    rec.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    v = Validator(_Cfg(c, str(rec)), runner=_Runner(lambda r, j: pytest.fail("not used")))
+    assert [(r["query"], r.get("uid")) for r in v.recorded_requests()] == [("q=ok", 3), ("q=bad", 4)]
+
+
+def test_audit_block(tmp_path):
+    c = icfg.load(project(tmp_path))
+    assert (c.audit.enabled, c.audit.max_jobs, c.audit.max_seconds) == (True, 40, 120)   # python-asgi default
+    c = icfg.load(project(tmp_path, MIN + "audit: {enabled: false, max_jobs: 5, max_seconds: 30}\n"))
+    assert (c.audit.enabled, c.audit.max_jobs, c.audit.max_seconds) == (False, 5, 30)
+    msg = errors(tmp_path, MIN + "audit: {enabled: maybe, max_jobs: -1}\n")
+    assert "audit.enabled" in msg and "audit.max_jobs" in msg
+    assert icfg.load(ROOT).audit.enabled is True

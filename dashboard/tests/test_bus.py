@@ -38,6 +38,17 @@ def test_validation(tmp_path):
     assert c.post("/events", json={"type": "pool.state", "data": "str"}, headers=H).status_code == 400
 
 
+def test_pipeline_audit_events_accepted(tmp_path):
+    from pipeline import bus as pbus
+    c = client(tmp_path)
+    for t, data in ((pbus.AUDIT_STARTED, {"incident": "i1", "vuln_class": "sqli", "candidates": 3}),
+                    (pbus.AUDIT_FINDING, {"incident": "i2", "parent": "i1", "route": "/r", "param": {"in": "query", "name": "q"}}),
+                    (pbus.AUDIT_DONE, {"incident": "i1", "checked": 3, "findings": 1, "seconds": 1.5})):
+        e = pbus.make(t, data, run="r", incident=data["incident"])
+        assert c.post("/events", json=e, headers=H).status_code == 200, t
+    assert [e["type"] for e in c.get("/events", params={"type": "audit."}).json()["events"]] == list(pbus.EXTRA_TYPES)
+
+
 def test_seq_monotonic_and_batch(tmp_path):
     c = client(tmp_path)
     r = c.post("/events", json=[ev(), ev(), ev()], headers=H).json()

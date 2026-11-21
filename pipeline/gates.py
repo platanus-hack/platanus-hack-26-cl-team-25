@@ -64,8 +64,10 @@ class Validator:
         return res
 
     # ------------------------------------------------------------ reproduction (before any patch)
-    def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None) -> dict:
-        """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}"""
+    def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None,
+                  corpus: list | None = None) -> dict:
+        """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}
+        `corpus`: [(value, request)] from the class corpus (pipeline/corpus.py), counted like variants."""
         manifest = None
         try:
             manifest = self.manifest(base_dir)
@@ -77,6 +79,12 @@ class Validator:
             nv = pocmod.normalise_variant(v, base)
             if nv:
                 variants.append(("p%d:%s" % (i, (nv.get("query") or nv["path"])[:40]), nv))
+        have = {json.dumps(r, sort_keys=True) for _n, r in variants} | {json.dumps(base, sort_keys=True)}
+        for val, r in corpus or []:
+            k = json.dumps(r, sort_keys=True)
+            if k not in have:
+                have.add(k)
+                variants.append(("c:%s" % str(val)[:40], r))
         seqs = [{"name": "poc", "requests": poc["requests"], "repeat": 3}]
         seqs += [{"name": "v:" + n, "requests": poc["requests"][:-1] + [r]} for n, r in variants]
         res = self.run(base_dir, {"kind": "harness", "state_b64": poc.get("state_b64"), "sequences": seqs})
@@ -157,13 +165,18 @@ class Validator:
                 lines = f.read().decode("utf-8", "replace").splitlines()
         except OSError:
             return []
-        seen, out = set(), []
-        for line in reversed(lines):
+        recs = []
+        for line in lines:
             try:
                 r = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(r, dict) or r.get("method") != "GET" or r.get("class") != "clean" \
+            if isinstance(r, dict):
+                recs.append(r)
+        # requests the gateway's after-check found to be attacks were recorded as clean first: never legitimate
+        seen, out = {(r.get("path"), r.get("query") or "", r.get("uid")) for r in recs if r.get("aftercheck") == "oracle"}, []
+        for r in reversed(recs):
+            if "aftercheck" in r or r.get("method") != "GET" or r.get("class") != "clean" \
                     or r.get("route") != "prod" or r.get("status") != 200:
                 continue
             key = (r.get("path"), r.get("query") or "", r.get("uid"))
@@ -253,6 +266,11 @@ class Validator:
             cover["%s %s" % (m, tpl)] = n
             if not n:
                 uncovered.append("%s %s" % (m, tpl))
+        if uncovered and before.get("partial"):
+            # generated journeys (GET routes only): missing coverage caps autopatch, it does not reject the patch
+            ctx.setdefault("caps", []).append("legit: no coverage of %s" % ", ".join(uncovered))
+            return False, ("no coverage: %d scenarios, %d steps identical before and after, none covers %s; "
+                           "autopatch capped at pr%s" % (len(b), len(steps), ", ".join(uncovered), note)), True
         if uncovered:
             return False, "no legit scenario covers the patched endpoint(s) %s: not deployable%s" % (", ".join(uncovered), note)
         return True, ("%d scenarios, %d steps identical before and after; patched endpoint coverage: %s%s" % (

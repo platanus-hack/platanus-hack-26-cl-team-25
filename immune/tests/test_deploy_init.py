@@ -123,7 +123,7 @@ def test_init_no_llm_on_builtin_app(tmp_path):
         assert os.path.exists(os.path.join(proj, ".immune", rel)), rel
     oa = yaml.safe_load(open(os.path.join(proj, ".immune", "openapi.yaml")))
     assert oa["paths"]["/api/orders/{order_id}"]["get"]["x-owner-scoped"] is True
-    assert "7/7 checks pass" in text
+    assert "8/8 checks pass" in text
     c = sqlite3.connect(os.path.join(proj, "data", "app.db"))
     assert c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 60     # prod untouched
     c.close()

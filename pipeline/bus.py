@@ -13,8 +13,19 @@ from immune_contracts import events as E
 
 log = logging.getLogger("pipeline.bus")
 
+# class self-audit (pipeline/audit.py). Not yet in immune_contracts/events.py: the pipeline builds their
+# envelope itself, and the dashboard bus accepts them (dashboard/server.py EXTRA_TYPES).
+AUDIT_STARTED = "audit.started"     # data: {incident, vuln_class, candidates}   incident = the closed one audited from
+AUDIT_FINDING = "audit.finding"     # data: {incident, parent, route, param}     incident = the new one (origin audit)
+AUDIT_DONE = "audit.done"           # data: {incident, checked, findings, seconds}
+EXTRA_TYPES = (AUDIT_STARTED, AUDIT_FINDING, AUDIT_DONE)
+TYPES = tuple(E.TYPES) + tuple(t for t in EXTRA_TYPES if t not in E.TYPES)
+
 # data fields of every event the pipeline publishes (immune_contracts/events.py, verbatim)
 FIELDS = {
+    AUDIT_STARTED: {"incident", "vuln_class", "candidates"},
+    AUDIT_FINDING: {"incident", "parent", "route", "param"},
+    AUDIT_DONE: {"incident", "checked", "findings", "seconds"},
     E.INCIDENT_OPENED: {"incident", "vuln_class", "method", "route", "param", "sink", "evidence_rid", "request"},
     E.POC_READY: {"incident", "reproducible", "runs", "poc"},
     E.PATCH_ATTEMPT: {"incident", "attempt", "source"},
@@ -27,9 +38,20 @@ FIELDS = {
 }
 # optional fields added by contracts/product.md §3 (pr_open / autopatch_off, a skipped tests gate)
 OPTIONAL = {
+    E.INCIDENT_OPENED: {"origin", "parent"},      # origin: live | audit; parent: the incident whose audit found it
     E.INCIDENT_CLOSED: {"outcome_detail"},
     E.GATE_RESULT: {"skipped"},
 }
+
+
+def make(type_: str, data: dict, *, run: str = "", rid: str | None = None, incident: str | None = None) -> dict:
+    """Event envelope (immune_contracts/events.py), also for the pipeline's audit.* types."""
+    if type_ in E.TYPES:
+        return E.make(type_, "pipeline", data, run=run, rid=rid, incident=incident)
+    if type_ not in EXTRA_TYPES:
+        raise ValueError("unknown event type %r" % type_)
+    return {"type": type_, "ts": time.time(), "run": run, "src": "pipeline", "rid": rid, "incident": incident,
+            "data": data}
 
 
 class Publisher:
@@ -48,7 +70,7 @@ class Publisher:
         want = FIELDS.get(type_)
         if want is not None and not (want <= set(data) <= want | OPTIONAL.get(type_, set())):
             raise ValueError("%s data fields %s != contract %s" % (type_, sorted(data), sorted(want)))
-        ev = E.make(type_, "pipeline", data, run=self.run, rid=rid, incident=incident)
+        ev = make(type_, data, run=self.run, rid=rid, incident=incident)
         with self._lock:
             self.sent.append(ev)
             if self.log_path:

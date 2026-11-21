@@ -28,9 +28,16 @@ verifies that no sampled real private/secret value survives anywhere in the shad
       orders: {owner: user_id, private: [note]}
       order_items: {owner: {via: order_id, table: orders}}     # owner through a foreign key
       products: {public: true}
+      teams: {public: true, shared_via: {table: memberships, member: user_id, group: team_id}}
     routes:
       order_id: {table: orders, column: id}
+      team_id: {table: teams, column: id, access: members}   # every member of the team may read it
     why: {"users.email": "...", ...}  # optional justifications (report only)
+
+Group-shared access (``shared_via`` + ``access: members``): the manifest gains ``groups``
+({group table: {group id: [member uids]}}) and ``group_routes`` ({path param: group table}), and
+``shadow/sharing.json`` tells the owner oracle that, on a request addressing group G through that path
+parameter, a member of G may see the data of the other members of G. Without it nothing changes.
 """
 from __future__ import annotations
 
@@ -55,6 +62,7 @@ HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 CANARY_GAP = 100000          # canary ids = max id + CANARY_GAP + k: far from ids prod will hand out soon
 LEGIT_COUNT = 8
 SAMPLE = 200
+SHARING_FILE = "sharing.json"   # shadow/sharing.json: group-shared access for the owner oracle
 
 # Synthetic vocabulary: deliberately unusual, so it never collides with real data.
 FIRST = ["Aurelio", "Brisa", "Casimiro", "Dafne", "Eulalio", "Fermina", "Gaspar", "Hortensia", "Ildefonso",
@@ -176,9 +184,11 @@ def validate_columns(cols: dict, schema: dict) -> list[str]:
             errs.append("tables.%s: must be a mapping" % name)
             continue
         colnames = [c["name"] for c in tables[name]["columns"]]
-        unknown = set(spec) - {"owner", "private", "secret", "public", "why"}
+        unknown = set(spec) - {"owner", "private", "secret", "public", "why", "shared_via"}
         if unknown:
             errs.append("tables.%s: unknown keys %s" % (name, sorted(unknown)))
+        if "shared_via" in spec:
+            errs += _validate_shared_via(name, spec["shared_via"], tables)
         if spec.get("public"):
             if spec.get("private") or spec.get("secret"):
                 errs.append("tables.%s: public: true cannot also list private/secret columns" % name)
@@ -240,7 +250,71 @@ def validate_columns(cols: dict, schema: dict) -> list[str]:
             continue
         if m.get("column") not in [c["name"] for c in tables[m["table"]]["columns"]]:
             errs.append("routes.%s: column %r is not a column of %s" % (p, m.get("column"), m["table"]))
+        unknown = set(m) - {"table", "column", "access"}
+        if unknown:
+            errs.append("routes.%s: unknown keys %s" % (p, sorted(unknown)))
+        acc = m.get("access", "owner")
+        if acc not in ("owner", "members"):
+            errs.append("routes.%s.access: must be owner or members (got %r)" % (p, acc))
+        elif acc == "members":
+            sv = (t.get(m["table"]) or {}).get("shared_via") if isinstance(t.get(m["table"]), dict) else None
+            if not isinstance(sv, dict):
+                errs.append("routes.%s.access: members needs tables.%s.shared_via (the membership relation)"
+                            % (p, m["table"]))
+            elif m.get("column") != (tables[m["table"]]["rowid_alias"] or (tables[m["table"]]["pk"] or [None])[0]):
+                errs.append("routes.%s: access members selects a group by its key; column must be the key of %s"
+                            % (p, m["table"]))
     return errs
+
+
+def _validate_shared_via(name: str, sv, tables: dict) -> list[str]:
+    """tables.<group table>.shared_via: {table: <membership table>, member: <user id column>, group: <column
+    holding the id of a row of <group table>>}: every member of a group may see the group's rows and the
+    other members' data addressed through that group (contracts/product.md §4, group-shared access)."""
+    errs = []
+    if not isinstance(sv, dict) or set(sv) - {"table", "member", "group"} or not all(
+            isinstance(sv.get(k), str) for k in ("table", "member", "group")):
+        return ["tables.%s.shared_via: must be {table: <membership table>, member: <user id column>, group: <column>}"
+                % name]
+    mt = sv["table"]
+    if mt not in tables:
+        return ["tables.%s.shared_via.table: %r is not a table" % (name, mt)]
+    cols = [c["name"] for c in tables[mt]["columns"]]
+    for k in ("member", "group"):
+        if sv[k] not in cols:
+            errs.append("tables.%s.shared_via.%s: %r is not a column of %s (columns: %s)"
+                        % (name, k, sv[k], mt, ", ".join(cols)))
+    if sv["member"] == sv["group"]:
+        errs.append("tables.%s.shared_via: member and group must be different columns" % name)
+    if mt == name:
+        errs.append("tables.%s.shared_via.table: the membership table must be another table" % name)
+    return errs
+
+
+def sharing_spec(cols: dict, schema: dict) -> dict:
+    """{path param: {"group_table", "table", "member", "group"}} for routes with access: members."""
+    out = {}
+    t = cols.get("tables") or {}
+    for p, m in (cols.get("routes") or {}).items():
+        if not isinstance(m, dict) or m.get("access") != "members":
+            continue
+        sv = (t.get(m.get("table")) or {}).get("shared_via")
+        if isinstance(sv, dict):
+            out[str(p)] = {"group_table": m["table"], "table": sv["table"], "member": sv["member"],
+                           "group": sv["group"]}
+    return out
+
+
+def group_members(conn, spec: dict) -> dict:
+    """{group id (str): sorted member uids} for one sharing spec."""
+    out = {}
+    for g, u in conn.execute("SELECT %s, %s FROM %s" % (_q(spec["group"]), _q(spec["member"]), _q(spec["table"]))):
+        if g is None or u is None:
+            continue
+        out.setdefault(str(_as_uid(g)), set()).add(_as_uid(u))
+    def order(x):
+        return (isinstance(x, str), x if isinstance(x, int) else 0, str(x))
+    return {k: sorted(v, key=order) for k, v in sorted(out.items(), key=lambda kv: (len(kv[0]), kv[0]))}
 
 
 def warnings_for(cols: dict, schema: dict) -> list[str]:
@@ -722,6 +796,11 @@ def build_db(prod_db: str, columns, out_dir: str, *, seed: int = 1, admin_values
             "canary_rows": canary_rows,
             "ownership": ownership,
         }
+        sharing = sharing_spec(cols, schema)
+        if sharing:
+            # group-shared access: who belongs to which group (pipeline properties gate, gateway canaries)
+            manifest["groups"] = {s["group_table"]: group_members(dst, s) for s in sharing.values()}
+            manifest["group_routes"] = {p: s["group_table"] for p, s in sharing.items()}
         for t in owned_tables:
             info = schema["tables"][t]
             if t != ut and info["rowid_alias"]:
@@ -742,6 +821,12 @@ def build_db(prod_db: str, columns, out_dir: str, *, seed: int = 1, admin_values
     _write_json(os.path.join(out_dir, "manifest.json"), manifest)
     _write_json(os.path.join(out_dir, "markers.json"), inv)
     _write_json(os.path.join(shadow_dir, "markers.json"), inv)
+    # the relation the owner oracle consults (next to the seed, so clones and runners see it under /seed)
+    sharing_path = os.path.join(shadow_dir, SHARING_FILE)
+    if sharing:
+        _write_json(sharing_path, {"version": 1, "routes": sharing})
+    elif os.path.exists(sharing_path):
+        os.remove(sharing_path)
     if insert_canaries:
         _insert_prod_canaries(prod_db, seed_path, cols, schema, canary_uids, canary_rows)
     leaks = leak_check(prod_db, seed_path, cols, sample=sample, seed=seed)

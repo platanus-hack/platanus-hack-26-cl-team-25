@@ -1,0 +1,12 @@
+users_table: users
+user_id_column: id
+role_column: role
+login_column: email
+secret_column: password_hash
+admin_values: [admin]
+tables:
+  users:    {owner: id, private: [email, name], secret: [password_hash]}
+  sessions: {owner: user_id, secret: [token_hash]}
+  tasks:    {owner: user_id, private: [title, notes]}
+routes:
+  task_id: {table: tasks, column: id}

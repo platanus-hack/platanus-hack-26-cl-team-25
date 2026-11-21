@@ -1,0 +1,14 @@
+{
+  "name": "tareas",
+  "version": "1.4.2",
+  "private": true,
+  "description": "Gestor de tareas personales (API HTTP)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "db:seed": "node db/seed.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "pg": "8.13.1" }
+}

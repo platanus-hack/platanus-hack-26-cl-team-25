@@ -83,6 +83,8 @@ def _seed(seed: int, job: dict | None = None) -> dict:
         _copy_db(os.path.join(sp["dir"], "seed.db"), p["shadow"])
         _copy_db(os.path.join(sp["dir"], "seed.db"), p["prod"])
         shutil.copyfile(os.path.join(sp["dir"], "markers.json"), p["markers"])
+        if os.path.isfile(os.path.join(sp["dir"], "sharing.json")):   # next to shadow.db: the harness finds it
+            shutil.copyfile(os.path.join(sp["dir"], "sharing.json"), os.path.join(d, "sharing.json"))
         shutil.copyfile(sp.get("manifest") or os.path.join(os.path.dirname(sp["dir"]), "manifest.json"), p["manifest"])
     else:
         raise RuntimeError("no data.seed_command and no shadow seed available to the runner")
@@ -243,9 +245,25 @@ def _token(uid, role):
     return _profile().mint_token(dict(os.environ), int(uid), role or "user")
 
 
+def _ensure_user(uid, role):
+    """The identity must exist in the database, as in the harness (shadow.db.ensure_user): an app with
+    server-side sessions rejects a token for a user row that is missing, and every request would then
+    be a 401 that never reaches the code under test."""
+    fn = getattr(_profile(), "ensure_user", None)
+    if not callable(fn):
+        return
+    conn = sqlite3.connect(os.environ[_db_env()])   # recorders are inactive outside a request
+    try:
+        fn(conn, int(uid), role or "user")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _send_plain(client, rq):
     hdrs = {k: v for k, v in (rq.get("headers") or {}).items() if k.lower() not in ("host", "content-length")}
     if rq.get("uid") is not None:
+        _ensure_user(rq["uid"], rq.get("role"))
         hdrs["authorization"] = "Bearer " + _token(rq["uid"], rq.get("role"))
     url = rq.get("path", "/") + (("?" + rq["query"]) if rq.get("query") else "")
     rec = {"sql": [], "opens": []}
@@ -329,7 +347,8 @@ def job_pytest(job: dict) -> dict:
     except subprocess.TimeoutExpired as e:
         out, code = (e.stdout or "") if isinstance(e.stdout, str) else "", -9
     lines = [l for l in out.strip().splitlines() if l.strip()]
-    summary = lines[-1] if lines else "no output"
+    counts = [l for l in lines if re.search(r"\b\d+ (passed|failed|errors?)\b|\bno tests ran\b", l)]
+    summary = (counts or lines or ["no output"])[-1]
     failed = [l for l in lines if l.startswith("FAILED ") or l.startswith("ERROR ")]
     return {"ok": code == 0, "code": code, "summary": summary.strip("= "), "failed": failed[:20],
             "tail": "\n".join(lines[-40:]), "seconds": round(time.time() - t0, 1)}
@@ -375,7 +394,7 @@ def job_scenarios(job: dict) -> dict:
             out.append({"name": name, "error": "%s: %s" % (type(e).__name__, _short(str(e), 300))})
         finally:
             shutil.rmtree(os.path.dirname(work), ignore_errors=True)
-    return {"module": used, "note": note, "scenarios": out}
+    return {"module": used, "note": note, "scenarios": out, "partial": bool(getattr(mod, "PARTIAL_COVERAGE", False))}
 
 
 def _norm_body(body: bytes):

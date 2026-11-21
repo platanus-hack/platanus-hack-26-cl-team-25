@@ -43,8 +43,8 @@ def test_doctor_failure_is_fed_back_to_the_owning_step(tmp_path):
     assert steps.count("profile") == 2 and steps.count("columns") == 1 and steps.count("marks") == 1, steps
     second = [p for s, p in calls if s == "profile"][1]
     assert "check 2 (profile identity) FAILED" in second and "CHECKS-" in second
-    assert "doctor round 1: 6/7 checks pass; failing: 2(profile)" in text
-    assert "doctor round 2: 7/7 checks pass" in text
+    assert "doctor round 1: 7/8 checks pass; failing: 2(profile)" in text
+    assert "doctor round 2: 8/8 checks pass" in text
     assert lines[-1].startswith("READY: ")
 
 
@@ -65,7 +65,7 @@ def test_live_init_on_builtin_app_unknown(tmp_path):
     print(text)
     assert rc == 0, text
     assert len(init.llm_calls) >= 3 and all(c["ok"] for c in init.llm_calls)
-    assert "7/7 checks pass" in text
+    assert "8/8 checks pass" in text
     reqs, exp = journeys.victim_requests(journeys.manifest(proj))
     rows = journeys.evaluate(journeys.run(proj, reqs), exp)
     for r in rows:

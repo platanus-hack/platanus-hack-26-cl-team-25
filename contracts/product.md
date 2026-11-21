@@ -54,6 +54,7 @@ repo:
 autopatch: merge                  # off | pr | merge   (pr: open the PR and stop; merge: also merge and deploy)
 mode: enforce                     # observe | enforce
 pool_size: 4
+aftercheck: false                 # true: second net for requests classified clean (§3b)
 ```
 
 Loader: `immune.config.load(project_dir) -> Config` (dataclass, validated, absolute paths resolved). **Every component gets its app facts from this object** — no `victim` literals outside `victim/`, the root `.immune/config.yaml` and tests.
@@ -66,6 +67,24 @@ Loader: `immune.config.load(project_dir) -> Config` (dataclass, validated, absol
 - **`autopatch: pr`**: the pipeline stops after the gates and the PR; closes the incident as `rule_only` with `outcome_detail: "pr_open"`; the rule stays.
 - Policy gate: allowed edit area = `app.source_dirs`.
 - Stack frames: paths relative to the release root (`/app`), only frames under `app.release_paths`.
+
+## 3b. After-check (`aftercheck: true`, env `GW_AFTERCHECK=1`)
+
+A second net for what the classifier calls clean. Off by default; enforce mode only.
+
+- The request goes to prod and the client gets prod's answer with no added latency. **The first request is not stopped.**
+- After the response is sent, the gateway replays the same request in an L1 clone (one worker, so at most one clone is
+  busy with after-checks). The oracles that judge it are the clone's: nothing is added to the prod process.
+- If an oracle fires: the clone pushes evidence as for any detonation (`oracle.fired`, so the incident, rule and fix
+  follow as usual); the session is captive from its next request (`session.captured`, reason `aftercheck`), unless
+  the identity is trusted; `/_admin/prodlog` gains `"aftercheck": "oracle"`; and a line
+  `{"rid", "aftercheck": "oracle", "method", "path", "query", "uid", "session"}` is appended to the recording, which
+  removes that path + query + uid from the legitimate-traffic corpus of gate `legit`.
+- Budget: identical requests (method, target, body, uid) are checked once per release (LRU of 4096); at most 256
+  pending, beyond that new ones are dropped; a check that finds no free clone within 2 s is given up. Counters in
+  `/_admin/stats` → `aftercheck: {queued, checked, oracle, duplicate, dropped, no_clone}`.
+- Limits: side effects of the first request on prod are not undone; a request that depends on objects created after
+  the seed may not reproduce in the clone; under load, coverage is whatever the budget allows.
 
 ## 4. Shadow data without a seed command
 
@@ -144,3 +163,17 @@ database: {kind: postgres, url_env: DATABASE_URL}
 ## 7. Rules for work packages
 
 Same as `contracts/README.md` §10, plus: the existing acceptance and unit suites must keep passing; the built-in demo (`immune up` in this repo) must behave exactly as `deploy/demo.sh` does today, including the three live remediation flows.
+
+## 8. Self-audit and corpus ("memory")
+
+Config block `audit: {enabled: true, max_jobs: 40, max_seconds: 120}` (default on for `python-asgi`, off for `generic`).
+When an incident of class C closes, the pipeline runs the regression battery of class C (the inputs of the `properties` gate plus the corpus) against every other compatible operation × parameter of the OpenAPI document, on the current release, in the isolated judge only. Each oracle hit opens an incident with `origin: audit` and `parent`, which follows the normal flow. One audit per class per release. Events: `audit.started`, `audit.finding`, `audit.done`.
+Corpus: `<runtime>/corpus/<class>.jsonl`, confirmed parameter values only, deduplicated, 500 per class; kept across `reset`.
+
+## 9. Group-shared access
+
+`columns.yaml`: `tables.<t>.shared_via: {table, member, group}` and `routes.<param>.access: owner|members`. The manifest carries `groups` and `group_routes`; `shadow/sharing.json` sits next to the seed. The owner oracle does not fire for markers of members of the addressed group when the requester belongs to it. `immune init` also generates `.immune/scenarios.py` (legitimate GET journeys) and `doctor` check 8 verifies it is deterministic.
+
+## 10. Generic runtime as built
+
+Per clone: app container (project image, `--cap-drop ALL`), private Postgres, and the observer (`immune-sidecar:1`) sharing the app's network and PID namespaces with `SYS_PTRACE` as its only capability. Extra config keys: `app.build`, `app.workdir`, `app.bind_env`, `app.warmup_paths`, `data.prod_url_env`, `data.demo_postgres`. `pre_state_b64` is null for Postgres.

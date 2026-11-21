@@ -22,7 +22,9 @@ class DeployBody(BaseModel):
 def create_app(cfg: Config | None = None, fleet: Fleet | None = None) -> FastAPI:
     logging.basicConfig(level=logging.INFO)
     cfg = cfg or Config.from_env()
-    fleet = fleet or Fleet(cfg)
+    if fleet is None:
+        from .generic import make_fleet   # app.runtime generic -> GenericFleet (fleet/generic.py)
+        fleet = make_fleet(cfg)
     app = FastAPI(title="fleet")
     app.state.fleet = fleet
 

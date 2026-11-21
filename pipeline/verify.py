@@ -3,6 +3,8 @@
 1. runner: the regression case (PoC + counted variants) fires no oracle on the deployed release;
 2. gateway: the same request, sent from a fresh session, is classified, detonated if suspect, and
    FORWARDED TO PROD (route "prod", prodlog forwarded=true) rather than diverted to a clone or denied.
+   The fresh identity is minted (immune-token, jwt-hs256) or, with auth.kind introspect (opaque server-side
+   sessions), registered through the app's own register/login routes found in the OpenAPI.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 
 import httpx
@@ -29,6 +32,102 @@ def in_runner(validator, poc: dict, repro: dict, release_dir: str):
     return True, "the PoC and %d variant(s) fire no oracle on the deployed release" % (len(seqs) - 1)
 
 
+REGISTER_RE = re.compile(r"/(register|signup|sign-up|sign_up|join)/?$", re.I)
+LOGIN_RE = re.compile(r"/(login|signin|sign-in|sign_in|token|session|sessions)/?$", re.I)
+
+
+def _json_body_schema(spec: dict, op: dict) -> dict:
+    from . import openapi
+    media = ((op.get("requestBody") or {}).get("content") or {}).get("application/json") or {}
+    return openapi.resolve(spec, media.get("schema") or {})
+
+
+def _fill(schema: dict, tag: str) -> dict | None:
+    """Values for every required property (and the usual login fields) of a register/login body."""
+    out = {}
+    props = schema.get("properties") or {}
+    for name, p in props.items():
+        t = p.get("type") or next((a.get("type") for a in p.get("anyOf") or [] if a.get("type") != "null"), "string")
+        n = name.lower()
+        if t != "string":
+            if name in (schema.get("required") or []):
+                return None
+            continue
+        if "mail" in n:
+            out[name] = "immune-verify-%s@verify.example.com" % tag
+        elif "pass" in n:
+            out[name] = "Verify-%s-Pw9" % tag
+        elif n in ("username", "user", "login", "handle", "nick", "nickname"):
+            out[name] = "immune_verify_%s" % tag
+        elif name in (schema.get("required") or []) or "name" in n:
+            out[name] = "Immune Verify %s" % tag
+    return out
+
+
+def _token_in(body) -> str | None:
+    if isinstance(body, dict):
+        for k in ("token", "access_token", "accessToken", "jwt", "id_token", "session", "session_token"):
+            if isinstance(body.get(k), str) and body[k]:
+                return body[k]
+        for v in body.values():
+            t = _token_in(v) if isinstance(v, dict) else None
+            if t:
+                return t
+    return None
+
+
+def register_fresh(cfg, spec: dict | None = None):
+    """A brand-new account through the app's own register route (found in the OpenAPI), then its login
+    route, sent through the gateway like any client: -> (authorization header, uid, why).
+    The new uid is above seed_max_uid, so it has the trust class of a freshly registered attacker."""
+    from . import openapi
+    proj = getattr(cfg, "project", None)
+    auth = proj.auth if proj is not None else None
+    try:
+        spec = spec if spec is not None else openapi.load(cfg.openapi_path)
+    except Exception as e:  # noqa: BLE001
+        return None, None, "cannot read the OpenAPI to find a register route: %s" % e
+    ops = [(m, tpl, op) for m, tpl, op in openapi.operations(spec) if m == "POST" and "{" not in tpl]
+    reg = next(((tpl, op) for m, tpl, op in ops if REGISTER_RE.search(tpl)), None)
+    login = next(((tpl, op) for m, tpl, op in ops if LOGIN_RE.search(tpl)), None)
+    if reg is None:
+        return None, None, "no register route (POST .../register|signup) in the OpenAPI: cannot open a fresh identity"
+    tag = "%08x" % random.getrandbits(32)
+    body = _fill(_json_body_schema(spec, reg[1]), tag)
+    if not body:
+        return None, None, "register route %s has a body the pipeline cannot fill" % reg[0]
+    base = cfg.gateway_url.rstrip("/")
+    try:
+        with httpx.Client(timeout=cfg.http_timeout_s * 3) as c:
+            r = c.post(base + reg[0], json=body)
+            if r.status_code >= 300:
+                return None, None, "register %s answered %d" % (reg[0], r.status_code)
+            tok = _token_in(r.json() if "json" in r.headers.get("content-type", "") else {})
+            if not tok and login is not None:
+                lb = _fill(_json_body_schema(spec, login[1]), tag) or {}
+                lb = {k: body.get(k, v) for k, v in lb.items()}
+                r2 = c.post(base + login[0], json=lb)
+                if r2.status_code >= 300:
+                    return None, None, "login %s with the fresh account answered %d" % (login[0], r2.status_code)
+                tok = _token_in(r2.json() if "json" in r2.headers.get("content-type", "") else {})
+            if not tok:
+                return None, None, "neither %s nor a login route returned a token" % reg[0]
+            hdr = "Bearer " + tok
+            uid = None
+            if auth is not None and auth.kind == "introspect" and auth.path:
+                me = c.get(base + auth.path, headers={"authorization": hdr})
+                if me.status_code == 200:
+                    try:
+                        uid = int(me.json().get(auth.uid_field or "id"))
+                    except (TypeError, ValueError, AttributeError):
+                        uid = None
+            if uid is None:
+                return None, None, "the fresh account's token is not recognised by %s" % (auth.path if auth else "?")
+            return hdr, uid, ""
+    except httpx.HTTPError as e:
+        return None, None, "registering a fresh account through the gateway failed: %s" % e
+
+
 def _identity(cfg, ev: dict, manifest: dict | None):
     """Authorization header for a fresh session with the same trust class as the attacker."""
     uid = ev.get("uid")
@@ -38,11 +137,21 @@ def _identity(cfg, ev: dict, manifest: dict | None):
     proj = getattr(cfg, "project", None)
     auth = proj.auth if proj is not None else None
     kind = auth.kind if auth is not None else "immune-token"
-    if kind in ("introspect", "none"):
-        return None, None, "auth.kind %s: the pipeline cannot mint a fresh identity of the same trust class" % kind
+    seed_max = int((manifest or {}).get("seed_max_uid") or 0)
+    if kind == "introspect":
+        if seed_max and int(uid) <= seed_max:
+            return None, None, ("auth.kind introspect: the attacker was a seeded (trusted) user; the pipeline cannot "
+                                "open a fresh session of that trust class")
+        hdr, fresh, why = register_fresh(cfg)
+        if why:
+            return None, None, why
+        if seed_max and fresh <= seed_max:
+            return None, None, "the freshly registered uid %d is not above seed_max_uid %d" % (fresh, seed_max)
+        return hdr, "uid:%d" % fresh, ""
+    if kind == "none":
+        return None, None, "auth.kind none: the pipeline cannot mint a fresh identity of the same trust class"
     if not cfg.prod_app_secret:
         return None, None, "prod secret not available: cannot open a fresh identified session"
-    seed_max = int((manifest or {}).get("seed_max_uid") or 0)
     fresh = uid if (seed_max and uid <= seed_max) else (max(seed_max, int(uid)) + random.randint(5000, 50000))
     tok = Authenticator(auth.to_dict() if auth is not None else None, cfg.prod_app_secret).mint(
         int(fresh), ev.get("role") or "user")

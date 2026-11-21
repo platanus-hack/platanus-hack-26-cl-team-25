@@ -74,10 +74,19 @@ button{font:inherit;cursor:pointer}
 .btn .dot{width:11px;height:11px;border-radius:50%;flex:none}
 .btn[aria-pressed="true"]{border-color:var(--fg)}
 .d-ok{background:var(--ok)} .d-warn{background:var(--warn)} .d-bad{background:var(--danger)}
+.screen{display:flex;flex-direction:column;gap:10px;min-width:0}
+.cap{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap}
+.cap strong{font-family:var(--display);font-size:1.2rem}
+.cap .mono{color:var(--muted);font-size:.85rem}
+.segs{display:flex;gap:4px;margin-left:auto}
+.segs i{width:34px;height:5px;border-radius:3px;background:var(--line)}
+.segs i.done{background:var(--muted)}
+.segs i.now{background:var(--accent)}
+.sub{min-height:3.2em;font-size:1.08rem;max-width:none}
 .stage{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:20px;align-items:start}
 @media (max-width:980px){.stage{grid-template-columns:minmax(0,1fr)}}
 .canvas{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow-x:auto;min-width:0}
-.canvas svg{display:block;width:100%;min-width:780px;height:auto}
+.canvas svg{display:block;width:100%;min-width:720px;height:auto}
 .side{display:flex;flex-direction:column;gap:14px;min-width:0}
 .panel{background:var(--sunk);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:8px}
 .panel h3{font-size:.8rem;font-family:var(--mono);font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
@@ -90,7 +99,7 @@ button{font:inherit;cursor:pointer}
 
 svg text{font-family:var(--body);fill:var(--fg)}
 .edge{fill:none;stroke:var(--line);stroke-width:2}
-.edge.on{stroke:var(--fg);stroke-width:3}
+.edge.async{stroke-dasharray:7 5}
 .elabel{font-size:13px;fill:var(--muted);font-family:var(--mono)}
 .node rect,.node polygon{fill:var(--surface);stroke:var(--fg);stroke-width:1.6}
 .node{cursor:pointer}
@@ -99,9 +108,14 @@ svg text{font-family:var(--body);fill:var(--fg)}
 .node.q polygon{fill:var(--sunk)}
 .node.prod rect{fill:var(--ok-soft);stroke:var(--ok)}
 .node.hp rect{fill:var(--warn-soft);stroke:var(--warn)}
-.node.on rect,.node.on polygon{stroke-width:3.4;stroke:var(--accent)}
 .node.sel rect,.node.sel polygon{stroke-dasharray:5 3}
 #pk{stroke:var(--surface);stroke-width:2.5}
+#halo{opacity:.28;stroke:none}
+#trail circle{stroke:none}
+#ring{fill:none;stroke:var(--fg);stroke-width:2;opacity:0;transform-box:fill-box;transform-origin:center}
+#ring.go{animation:ring .7s ease-out}
+@keyframes ring{from{opacity:.9;transform:scale(.6)}to{opacity:0;transform:scale(2.8)}}
+@media (prefers-reduced-motion: reduce){#ring.go{animation:none}}
 .pk-ok{fill:var(--ok)} .pk-warn{fill:var(--warn)} .pk-bad{fill:var(--danger)} .pk-inc{fill:var(--accent)}
 #captive circle{fill:var(--danger);stroke:var(--surface);stroke-width:2}
 #captive text{font-size:11.5px;fill:var(--danger);font-family:var(--mono)}
@@ -173,20 +187,27 @@ footer li{overflow-wrap:anywhere}
   <div class="head">
     <span class="eyebrow">Arquitectura</span>
     <h2>Todo request pasa por un reverse proxy. Lo dudoso se ejecuta primero en un señuelo.</h2>
-    <p>Elegí un request y seguí su recorrido. Tocá cualquier nodo para ver qué hace.</p>
+    <p>Los cuatro casos se reproducen solos, uno tras otro. Tocá un botón para saltar a ese caso, o un nodo para ver qué hace.</p>
   </div>
   <div class="controls" role="group" aria-label="Tipo de request">
     <button class="btn" id="b-legit" data-sc="legit" aria-pressed="false"><span class="dot d-ok"></span>Request legítimo</button>
     <button class="btn" id="b-odd" data-sc="odd" aria-pressed="false"><span class="dot d-warn"></span>Raro pero inofensivo</button>
     <button class="btn" id="b-atk" data-sc="atk" aria-pressed="false"><span class="dot d-bad"></span>Ataque</button>
+    <button class="btn" id="b-late" data-sc="late" aria-pressed="false"><span class="dot d-bad"></span>Ataque que pasa el filtro</button>
+    <button class="btn" id="b-auto" aria-pressed="true">Pausar</button>
   </div>
   <div class="stage">
-    <div class="canvas"><svg id="flow" viewBox="0 0 1060 640" role="img" aria-label="Flujo de un request: reverse proxy, decisión de sospecha, honeypot, decisión de ataque, fix proxy, replay, validador, parche y despliegue blue/green">
+    <div class="screen">
+    <div class="cap"><span class="mono" id="cap-n">4 casos</span><strong id="cap-t">Un caso tras otro</strong><span class="segs" id="segs"><i></i><i></i><i></i><i></i></span></div>
+    <div class="canvas"><svg id="flow" viewBox="0 0 1060 640" role="img" aria-label="Flujo de un request: reverse proxy, decisión de sospecha, honeypot, decisión de ataque, fix proxy, replay, validador, parche y despliegue blue/green. Una línea punteada lleva una copia de cada request limpio desde producción al honeypot después de responder">
       <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow"/></marker></defs>
       <g id="edges"></g><g id="nodes"></g>
       <g id="captive" hidden><circle cx="368" cy="182" r="8"/><text x="356" y="186" text-anchor="end">atacante retenido</text></g>
-      <circle id="pk" r="10" cx="90" cy="80" class="pk-ok" hidden/>
+      <circle id="ring" r="12" cx="155" cy="80"/>
+      <g id="pkg" class="pk-ok" hidden><g id="trail"></g><circle id="halo" r="18" cx="155" cy="80"/><circle id="pk" r="9" cx="155" cy="80"/></g>
     </svg></div>
+    <p class="sub" id="sub" aria-live="polite">La reproducción empieza cuando el diagrama está en pantalla.</p>
+    </div>
     <div class="side">
       <div class="panel"><h3>Recorrido</h3>
         <ol id="log"><li><b>–</b><span>Elegí un tipo de request arriba.</span></li></ol>
@@ -254,12 +275,14 @@ footer li{overflow-wrap:anywhere}
     <div><h3>Verificado</h3><ul>
       <li>Ciclo completo en vivo para SQL injection: regla a los 15 s; parche, validación y despliegue en 60 s.</li>
       <li>Detección y desvío al señuelo de tres clases: SQL injection, path traversal e IDOR.</li>
+      <li>Segunda red: un IDOR desde una cuenta confiable, que el filtro deja pasar, dispara el oráculo en el señuelo después de la respuesta. Probado con la app real hasta ese disparo.</li>
       <li>Las validaciones rechazan 15 parches inadecuados y aceptan 7 correctos en el autotest.</li>
       <li>Sobre Apache 2.4.49 real: el parche propuesto cumple 21 de 21 propiedades, igual que el oficial de la 2.4.50.</li>
     </ul></div>
     <div><h3>Límites</h3><ul>
       <li>El sistema aprende solo de lo que sus oráculos ven. Fallas de lógica de negocio y ataques de segundo orden no disparan ninguno.</li>
       <li>La detonación agrega latencia a los requests dudosos.</li>
+      <li>La segunda red no frena la primera respuesta: corta la campaña, no la primera fuga.</li>
       <li>Los tiempos se midieron una sola vez, en una máquina sin otra carga.</li>
       <li>El caso de Apache es un defecto público: demuestra el mecanismo, no un descubrimiento a ciegas.</li>
     </ul></div>
@@ -306,7 +329,7 @@ var N={
  prod:{x:915,y:80,w:190,h:64,t:"App de producción",u:"datos reales",cls:"prod",
   d:"La aplicación real con los datos reales. Solo recibe lo que salió limpio o lo que se probó en el señuelo sin disparar nada."},
  hp:{x:460,y:225,w:180,h:60,t:"Honeypot",u:"misma app, datos sintéticos",cls:"hp",
-  d:"Un clon de la app real, con el mismo código y datos sintéticos, instrumentado con oráculos. El request dudoso se ejecuta acá primero. Los clones están precalentados: nada arranca en el camino crítico."},
+  d:"Un clon de la app real, con el mismo código y datos sintéticos, instrumentado con oráculos. El request dudoso se ejecuta acá primero. Los clones están precalentados: nada arranca en el camino crítico. También es la segunda red: lo que el filtro dejó pasar a producción se repite acá después de responder (línea punteada)."},
  atk:{x:460,y:370,q:1,t:"¿Es un ataque?",
   d:"Lo responden oráculos mecánicos con sí o no: la consulta SQL cambió de estructura, se abrió un archivo fuera de la raíz, apareció un proceso hijo, hubo una conexión saliente no declarada, o alguien leyó una fila canario que no es suya."},
  fix:{x:460,y:515,w:160,h:56,t:"Fix proxy",u:"regla en segundos",
@@ -332,11 +355,12 @@ var E={
  e9:{p:[[720,515],[754,515]]},
  e10:{p:[[884,515],[965,515],[965,407]],l:"Sí",lx:896,ly:505},
  e11:{p:[[965,335],[965,114]],l:"deploy",lx:975,ly:230},
- e12:{p:[[820,557],[820,586]],l:"No",lx:830,ly:576}
+ e12:{p:[[820,557],[820,586]],l:"No",lx:830,ly:576},
+ e13:{p:[[832,112],[832,225],[552,225]],l:"copia, después de responder",lx:566,ly:215,a:1}
 };
 var gE=$("edges"),gN=$("nodes");
 Object.keys(E).forEach(function(k){var e=E[k];
-  e.el=el("polyline",{points:e.p.map(function(q){return q.join(",")}).join(" "),"class":"edge","marker-end":"url(#ah)"});
+  e.el=el("polyline",{points:e.p.map(function(q){return q.join(",")}).join(" "),"class":"edge"+(e.a?" async":""),"marker-end":"url(#ah)"});
   gE.appendChild(e.el);
   if(e.l)gE.appendChild(el("text",{x:e.lx,y:e.ly,"class":"elabel"},e.l));
 });
@@ -378,36 +402,63 @@ var SC={
   {e:"e9",n:"vul",log:"El oráculo dispara de nuevo: producción es vulnerable."},
   {e:"e10",n:"patch",log:"El modelo propone un diff. Pasa las cinco validaciones."},
   {e:"e11",n:"prod",log:"Despliegue blue/green. Medido de punta a punta: ~60 s."}],
-  out:"Producción nunca recibió el ataque y ya no tiene el bug.",ok:1}
+  out:"Producción nunca recibió el ataque y ya no tiene el bug.",ok:1},
+ late:{cls:"pk-bad",req:"GET /api/orders/1 (cuenta real, pedido ajeno)",steps:[
+  {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
+  {e:"e2",n:"sus",log:"Cuenta confiable, ruta conocida, id válido: nada raro en la forma."},
+  {e:"e3",n:"prod",log:"Producción responde con datos reales. Esta primera respuesta no se frena.",cls:"pk-inc"},
+  {e:"e13",n:"hp",log:"Segunda red: después de responder, una copia del request se ejecuta en el honeypot."},
+  {e:"e5",n:"atk",log:"Oráculo de dueño: leyó un pedido que no es suyo. Ataque confirmado."},
+  {e:"e7",n:"fix",log:"Regla en el proxy para esa ruta y parámetro."},
+  {e:"e8",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
+  {e:"e9",n:"vul",log:"El oráculo dispara de nuevo: producción es vulnerable."},
+  {e:"e10",n:"patch",log:"El modelo propone un diff. Pasa las cinco validaciones."},
+  {e:"e11",n:"prod",log:"Despliegue blue/green."}],
+  out:"El primer request pasó; el segundo ya no. El bug se cura igual.",ok:1}
 };
-var pk=$("pk"),log=$("log"),run=0;
+var pk=$("pk"),pkg=$("pkg"),halo=$("halo"),ring=$("ring"),log=$("log"),run=0,hist=[],tr=[],cur=[155,80];
+for(var ti=0;ti<6;ti++){var tc=el("circle",{r:8-ti,cx:155,cy:80,opacity:(0.42-ti*0.06).toFixed(2)});$("trail").appendChild(tc);tr.push(tc)}
+function pos(x,y){cur=[x,y];pk.setAttribute("cx",x);pk.setAttribute("cy",y);halo.setAttribute("cx",x);halo.setAttribute("cy",y);
+  hist.unshift(cur);if(hist.length>30)hist.length=30;
+  tr.forEach(function(c,i){var h=hist[(i+1)*4]||hist[hist.length-1];c.setAttribute("cx",h[0]);c.setAttribute("cy",h[1])})}
+function settle(){hist=[];pos(cur[0],cur[1])}
+function pulse(){ring.setAttribute("cx",cur[0]);ring.setAttribute("cy",cur[1]);ring.classList.remove("go");ring.getBoundingClientRect();ring.classList.add("go")}
 var still=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;
 function sleep(ms){return new Promise(function(r){setTimeout(r,still?0:ms)})}
 function move(pts){return new Promise(function(res){
   var last=pts[pts.length-1];
-  if(still){pk.setAttribute("cx",last[0]);pk.setAttribute("cy",last[1]);return res()}
+  if(still){pos(last[0],last[1]);settle();return res()}
   var seg=[],tot=0;for(var i=1;i<pts.length;i++){var d=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);seg.push(d);tot+=d}
-  var dur=Math.max(450,tot/0.42),t0=null;
-  function f(ts){if(t0==null)t0=ts;var k=Math.min(1,(ts-t0)/dur),d=k*tot,i=0;
+  var dur=Math.max(650,tot/0.34),t0=null;hist=[];pos(pts[0][0],pts[0][1]);
+  function f(ts){if(t0==null)t0=ts;var k=Math.min(1,(ts-t0)/dur),ek=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2,d=ek*tot,i=0;
     while(i<seg.length-1&&d>seg[i]){d-=seg[i];i++}
     var r=seg[i]?d/seg[i]:1;
-    pk.setAttribute("cx",pts[i][0]+(pts[i+1][0]-pts[i][0])*r);pk.setAttribute("cy",pts[i][1]+(pts[i+1][1]-pts[i][1])*r);
-    if(k<1)requestAnimationFrame(f);else res()}
+    pos(pts[i][0]+(pts[i+1][0]-pts[i][0])*r,pts[i][1]+(pts[i+1][1]-pts[i][1])*r);
+    if(k<1)requestAnimationFrame(f);else{settle();res()}}
   requestAnimationFrame(f)})}
 function addLog(i,txt){var li=document.createElement("li"),b=document.createElement("b"),s=document.createElement("span");b.textContent=i;s.textContent=txt;li.appendChild(b);li.appendChild(s);log.appendChild(li)}
 function reset(){Object.keys(E).forEach(function(k){E[k].el.classList.remove("on")});Object.keys(N).forEach(function(k){N[k].el.classList.remove("on")});
-  $("captive").hidden=true;log.textContent="";$("outcome").textContent="";$("outcome").className=""}
-async function play(key){var id=++run,s=SC[key];reset();
-  document.querySelectorAll(".btn").forEach(function(b){b.setAttribute("aria-pressed",b.dataset.sc===key?"true":"false")});
-  pk.setAttribute("class",s.cls);pk.setAttribute("cx",90);pk.setAttribute("cy",80);pk.hidden=false;
-  N.req.el.classList.add("on");addLog("0",s.req);await sleep(500);
-  for(var i=0;i<s.steps.length;i++){var st=s.steps[i];if(id!==run)return;
-    await move(E[st.e].p);if(id!==run)return;
-    E[st.e].el.classList.add("on");N[st.n].el.classList.add("on");addLog(i+1,st.log);
-    if(st.captive)$("captive").hidden=false;if(st.cls)pk.setAttribute("class",st.cls);
-    await sleep(750)}
-  if(id!==run)return;$("outcome").textContent=s.out;$("outcome").className=s.ok?"ok":"bad"}
-document.querySelectorAll(".btn").forEach(function(b){b.addEventListener("click",function(){play(b.dataset.sc)})});
+  $("captive").setAttribute("hidden","");log.textContent="";$("outcome").textContent="";$("outcome").className=""}
+var ORDER=["legit","odd","atk","late"],NAMES={legit:"Request legítimo",odd:"Raro pero inofensivo",atk:"Ataque",late:"Ataque que pasa el filtro"},auto=!still,busy=false,idx=0;
+async function loop(i){while(true){idx=i;busy=true;var ok=await play(ORDER[i]);if(!ok)return;busy=false;if(!auto)return;
+  var r=run;await sleep(2200);if(r!==run||!auto||busy)return;i=(i+1)%ORDER.length}}
+async function play(key){var id=++run,s=SC[key],ci=ORDER.indexOf(key);reset();
+  $("cap-n").textContent="Caso "+(ci+1)+" de "+ORDER.length;$("cap-t").textContent=NAMES[key];$("sub").textContent=s.req;
+  [].forEach.call($("segs").children,function(sg,j){sg.className=j<ci?"done":j===ci?"now":""});
+  document.querySelectorAll(".btn[data-sc]").forEach(function(b){b.setAttribute("aria-pressed",b.dataset.sc===key?"true":"false")});
+  pkg.setAttribute("class",s.cls);hist=[];pos(155,80);pkg.removeAttribute("hidden");
+  pulse();addLog("0",s.req);await sleep(900);
+  for(var i=0;i<s.steps.length;i++){var st=s.steps[i];if(id!==run)return false;
+    await move(E[st.e].p);if(id!==run)return false;
+    pulse();addLog(i+1,st.log);$("sub").textContent=st.log;
+    if(st.captive)$("captive").removeAttribute("hidden");if(st.cls)pkg.setAttribute("class",st.cls);
+    await sleep(1300)}
+  if(id!==run)return false;$("outcome").textContent=s.out;$("outcome").className=s.ok?"ok":"bad";$("sub").textContent=s.out;return true}
+document.querySelectorAll(".btn[data-sc]").forEach(function(b){b.addEventListener("click",function(){loop(ORDER.indexOf(b.dataset.sc))})});
+function setAuto(v){auto=v;$("b-auto").textContent=v?"Pausar":"Reproducir";$("b-auto").setAttribute("aria-pressed",v?"true":"false")}
+setAuto(auto);
+$("b-auto").addEventListener("click",function(){setAuto(!auto);if(auto&&!busy)loop(run?(idx+1)%ORDER.length:0)});
+if(auto){if("IntersectionObserver" in window){var io=new IntersectionObserver(function(en){if(en[0].isIntersecting){io.disconnect();if(auto&&!run)loop(0)}},{threshold:.35});io.observe($("flow"))}else loop(0)}
 
 /* ---------- Chile ---------- */
 var P=[
@@ -430,12 +481,12 @@ pick(P[st]?st:0);
 
 /* ---------- navegación ---------- */
 var ids=["problema","arquitectura","caso","chile","estado"],links=[].slice.call(document.querySelectorAll("#nav a"));
-function cur(){var c=0;ids.forEach(function(id,i){if($(id).getBoundingClientRect().top<140)c=i});return c}
-function mark(){var c=cur();links.forEach(function(a,i){a.setAttribute("aria-current",i===c?"true":"false")})}
+function curSec(){var c=0;ids.forEach(function(id,i){if($(id).getBoundingClientRect().top<140)c=i});return c}
+function mark(){var c=curSec();links.forEach(function(a,i){a.setAttribute("aria-current",i===c?"true":"false")})}
 addEventListener("scroll",mark,{passive:true});mark();
 addEventListener("keydown",function(ev){
   if(ev.target.closest&&ev.target.closest("button,.node,a,input"))return;
-  var c=cur();
+  var c=curSec();
   if(ev.key==="ArrowRight"||ev.key==="PageDown"){ev.preventDefault();$(ids[Math.min(ids.length-1,c+1)]).scrollIntoView({behavior:still?"auto":"smooth"})}
   if(ev.key==="ArrowLeft"||ev.key==="PageUp"){ev.preventDefault();$(ids[Math.max(0,c-1)]).scrollIntoView({behavior:still?"auto":"smooth"})}
 });

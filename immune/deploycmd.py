@@ -62,7 +62,7 @@ def compose_override(cfg, det: dict) -> tuple[dict, str | None, str]:
                             OPENAPI_PATH="/project/.immune/%s" % os.path.relpath(cfg.openapi, os.path.join(project, ".immune")),
                             MANIFEST_PATH="%s/data/manifest.json" % rt,
                             RECORD_PATH="%s/recordings/requests.jsonl" % rt,
-                            GW_DATA_PORT=str(GATEWAY_PORT)),
+                            GW_DATA_PORT=str(GATEWAY_PORT), GW_AFTERCHECK="1" if cfg.aftercheck else "0"),
         "env_file": [os.path.join(project, ".immune", "deploy", "immune.env")],
         "volumes": vols,
         "networks": {"immune_prodnet": {"aliases": ["gateway"]}, "immune_clonenet": {"aliases": ["gateway"]},

@@ -39,43 +39,46 @@ Encuadre acordado para el pitch: **arquitectura de referencia open source con im
 
 ## 4. Cómo correrlo
 
-Requisitos ya instalados en la VM: Docker, `.venv/` con dependencias fijadas, imagen `immune-base:1`.
+Requisitos en la VM: Docker, `.venv/`, imágenes `immune-base:1`, `immune-sidecar:1`, `immune-cbuild:1`. `install.sh` los prepara en una máquina nueva (no probado en limpio).
 
 ```bash
-deploy/demo.sh reset     # vuelve todo a t0 y levanta el sistema completo
-deploy/demo.sh status
-deploy/demo.sh down
+bin/immune reset                         # demo incorporado (app Tienda): vuelve a t0 y levanta todo
+bin/immune status | down
+bin/immune init --project DIR --yes      # adapta el sistema a otra app (FastAPI + SQLite), ~45 s, 3 llamadas al LLM
+bin/immune up   --project DIR            # levanta el stack para esa app
+python -m immune.metrics --bus http://127.0.0.1:8090   # tiempos por incidente
+python -m pipeline.selftest              # autotest de las validaciones
+python -m anticipate run apache-httpd-2.4.49
 ```
 
-- Dashboard: `http://127.0.0.1:8090` (solo local; para verlo desde afuera hace falta un túnel SSH).
-- Tráfico legítimo: `.venv/bin/python -m sim.legit --base http://127.0.0.1:8080 --duration 60`
-- Autotest de las validaciones: `.venv/bin/python -m pipeline.selftest`
-- Tests: `.venv/bin/pytest acceptance victim/tests shadow/tests gateway/tests pipeline/tests sim/tests dashboard/tests -q`
-- Logs de procesos del host: `runtime/logs/`.
+- Puertos por defecto: gateway 8080, admin 8081, dashboard 8090, fleet 8070 (configurables en `.immune/config.yaml`). Todo en `127.0.0.1`.
+- Toda la configuración de una app vive en `<proyecto>/.immune/` (contrato: `contracts/product.md`).
+- Tests: `.venv/bin/pytest acceptance victim/tests shadow/tests gateway/tests pipeline/tests patcher/tests sim/tests dashboard/tests anticipate/tests fleet/tests immune/tests sidecar/tests -q -m "not live" -p no:cacheprovider` (463 pasan).
+- El LLM usa el login de Claude Code de la máquina.
 
-El LLM se usa con el login de Claude Code de la máquina. El proxy del hackathon está configurado en `.claude/settings.local.json` (no está en git; cada integrante pone su propio token).
+## 5. Qué está verificado (corrido por el orquestador, 2026-11-21)
 
-## 5. Qué está verificado
-
-| Cosa | Estado |
+| Cosa | Resultado |
 |---|---|
-| Tests de aceptación: víctima 13, oráculos 18, gateway 26 | Pasan |
-| Autotest de validaciones: rechaza 15 parches inadecuados y acepta 7 correctos | Pasa |
-| Detección en vivo de las tres clases (SQLi, path traversal, IDOR) con desvío a la sombra | Verificado una vez |
-| Ciclo completo en vivo para **SQLi**: regla a los 15 s, parche del LLM, 5 puertas, deploy y verificación en 60 s | Verificado una vez |
-| Tráfico legítimo de 20 s contra el sistema: cero violaciones | Verificado por el agente constructor |
+| Suites completas + autotest de validaciones | 463 pasan; rechaza 15 parches inadecuados, acepta 7 |
+| **Tiempo de identificado a parche en producción**, app Tienda, 7 defectos × 3 rondas, de a uno | **21/21 parchados, mediana 24,9 s** (mín 22,2, máx 31,0). Regla a los 1,9 s. Datos: `docs/demo/metricas-tiempo-a-parche.json` |
+| `immune init` + `up` sobre `examples/notas` (app FastAPI ajena, sesiones opacas) | init READY en 47 s; sus 4 defectos parchados solos (22–63 s a producción) |
+| Runtime genérico sobre `examples/tareas-node` (Node + Postgres, observador externo) | Stack arriba en 11 s; SQLi parchado en 37 s. Traversal e IDOR: detectados, regla y PR abierto, sin merge por falta de tráfico legítimo grabado que cubra la ruta (comportamiento diseñado). El agente constructor reportó los tres parchados con tráfico previo |
+| **Memoria inmunológica**: solo 3 peticiones enviadas, una por clase | Los 7 defectos parchados; 4 hallados por auditoría propia sin que nadie los ejerciera. 23,7 s de mediana a producción |
+| Anticipación sobre Apache 2.4.49 | Parche sugerido equivalente al oficial en 21/21 vectores |
 
 ## 6. Qué NO está verificado ni hecho
 
-- Ciclo completo en vivo para **traversal e IDOR**.
-- **Pull requests en GitHub**: el código existe (`REPO_TARGET=scratch|official`) pero solo se probó con `gh` simulado. Hoy corre en modo `local`.
+- **Pull requests en GitHub**: solo con `gh` simulado. Corre en modo `local`.
 - **Dashboard**: nunca se vio en un navegador.
 - **Rollback** de un deploy roto y reintento del parche con feedback real: sin probar en vivo.
-- **Bot atacante** en bucle para el demo: no existe. Los siete requests de prueba están en `victim/VULNS.md`.
-- Revisión independiente de `shadow/`, `gateway/` y `pipeline/`, y pasada de equipo rojo.
-- Vulnerabilidad ciega (un bug que ningún constructor vio).
-- Memoria inmunológica y aprendizaje (§9d del plan): solo diseño.
-- Producto (`immune init`, otros lenguajes): solo diseño.
+- **Atacante simulado en bucle** para el demo: no existe; las peticiones de prueba están en `victim/VULNS.md`.
+- **`immune deploy`** sobre infraestructura real: solo simulacro. Hoy `immune up` corre prod por su cuenta desde releases; falta definir el modo "gateway delante del servicio existente del cliente".
+- **`install.sh`** en una máquina limpia.
+- **`immune init` para apps genéricas** (Node, etc.): el perfil de `tareas-node` está escrito a mano.
+- Runtime genérico: solo Postgres; lenguajes compilados no probados en el juez; chequeos de política sobre código no Python son léxicos.
+- Revisión independiente, equipo rojo y vulnerabilidad ciega.
+
 
 ## 7. Decisiones tomadas
 

@@ -28,6 +28,7 @@ class Record:
         self.failed: list[tuple[str, str]] = []
         self.obs: list = []                 # strace observations
         self.times: list[float] = []        # arrival time of each observation (perf_counter)
+        self.bound: list[tuple[str, list]] = []  # judge mode: (statement, bound params) of executed Executes
 
 
 class Observer:
@@ -65,6 +66,11 @@ class Observer:
                 rec.statements.append(sql)
             else:
                 rec.failed.append((sql, error or ""))
+
+    def on_bound(self, sql: str, params: list):
+        with self.lock:
+            if self.current is not None:
+                self.current.bound.append((sql, list(params or [])))
 
     def begin(self) -> Record:
         with self.lock:

@@ -10,6 +10,7 @@
   function newState() {
     return {
       incidents: {}, order: [], pendingOracles: [], rules: {}, deploys: [],
+      audits: {}, auditOrder: [],
       attacks: {}, attackOrder: [],
       ticker: [], tickerByRid: {},
       counters: { prod: 0, detonated: 0, deny: 0, total: 0 },
@@ -22,7 +23,7 @@
     if (!inc) {
       inc = st.incidents[id] = {
         id: id, rev: 0, opened: null, vuln_class: null, route: null, param: null, sink: null,
-        oracles: [], hits: 0, rule: null, ruleExpired: null, poc: null,
+        oracles: [], hits: 0, rule: null, ruleExpired: null, poc: null, origin: 'live', parent: null, request: null,
         attempts: [], pr: null, merged: null, deploy: null, verify: null, closed: null, t: {}
       };
       st.order.push(id);
@@ -90,7 +91,7 @@
   function reduce(st, ev, seq) {
     var d = ev.data || {};
     var ts = typeof ev.ts === 'number' ? ev.ts : 0;
-    var inc, a, i, id;
+    var inc, a, i, id, au;
     st.events++;
     if (typeof seq === 'number') st.lastSeq = seq;
     if (ts > st.lastTs) st.lastTs = ts;
@@ -154,6 +155,9 @@
         inc.opened = ts; inc.t.opened = ts;
         inc.vuln_class = d.vuln_class; inc.route = d.route; inc.param = d.param; inc.sink = d.sink || null;
         inc.fuxa = d.fuxa || null;
+        inc.method = typeof d.method === 'string' ? d.method : null;
+        inc.request = d.request && typeof d.request === 'object' ? d.request : null;
+        if (d.origin === 'audit') { inc.origin = 'audit'; inc.parent = typeof d.parent === 'string' ? d.parent : inc.parent; }
         var keep = [];
         for (i = 0; i < st.pendingOracles.length; i++) {
           if (oracleMatchesSink(st.pendingOracles[i].data, inc.sink)) attachOracle(inc, st.pendingOracles[i]);
@@ -225,6 +229,31 @@
         inc.closed = { ts: ts, outcome: d.outcome, seconds_to_rule: d.seconds_to_rule, seconds_to_patch: d.seconds_to_patch };
         inc.t.closed = ts; touch(inc);
         break;
+      case 'audit.started':
+        if (!id) break;
+        au = auditOf(st, id, ts);
+        au.vuln_class = d.vuln_class || au.vuln_class; au.candidates = typeof d.candidates === 'number' ? d.candidates : null;
+        au.started = ts;
+        break;
+      case 'audit.finding':
+        if (!id) break;
+        inc = ensure(st, id, ts);
+        inc.origin = 'audit';
+        if (typeof d.parent === 'string') inc.parent = d.parent;
+        if (!inc.route && typeof d.route === 'string') inc.route = d.route;
+        if (!inc.param && d.param && typeof d.param === 'object') inc.param = d.param;
+        inc.t.found = ts;
+        if (inc.parent) {
+          au = auditOf(st, inc.parent, ts);
+          if (au.found.indexOf(id) < 0) au.found.push(id);
+        }
+        touch(inc);
+        break;
+      case 'audit.done':
+        if (!id) break;
+        au = auditOf(st, id, ts);
+        au.done = { ts: ts, checked: d.checked, findings: d.findings, seconds: d.seconds };
+        break;
       case 'attack.attempt':
         var v = String(d.vuln);
         if (!st.attacks[v]) { st.attacks[v] = []; st.attackOrder.push(v); }
@@ -239,6 +268,32 @@
     }
     return st;
   }
+
+  function auditOf(st, id, ts) {
+    var au = st.audits[id];
+    if (!au) {
+      au = st.audits[id] = { incident: id, vuln_class: null, candidates: null, started: ts, done: null, found: [] };
+      st.auditOrder.push(id);
+    }
+    return au;
+  }
+
+  /* one line about the most recent class self-audit, or null */
+  function auditLine(st) {
+    if (!st.auditOrder.length) return null;
+    var au = st.audits[st.auditOrder[st.auditOrder.length - 1]];
+    var head = 'Auditoria de clase ' + (au.vuln_class || '?') + ' tras ' + au.incident + ': ';
+    var n = au.candidates == null ? '?' : au.candidates;
+    if (!au.done) {
+      return head + n + ' candidatos, en curso' + (au.found.length ? ' (' + au.found.length + ' hallazgo' + (au.found.length === 1 ? '' : 's') + ')' : '') + '...';
+    }
+    var f = typeof au.done.findings === 'number' ? au.done.findings : au.found.length;
+    return head + (au.done.checked == null ? '?' : au.done.checked) + ' de ' + n + ' candidatos revisados, ' + f +
+      ' hallazgo' + (f === 1 ? '' : 's') + (typeof au.done.seconds === 'number' ? ' en ' + au.done.seconds.toFixed(1) + ' s' : '') +
+      (st.auditOrder.length > 1 ? '  (' + st.auditOrder.length + ' auditorias)' : '');
+  }
+
+  function visible(inc) { return !!(inc.opened || inc.oracles.length || inc.origin === 'audit'); }
 
   function findDeployTarget(st, release) {
     var cand = null;
@@ -272,7 +327,7 @@
   }
 
   function t0(inc) {
-    var c = [inc.t.oracle, inc.t.opened, inc.t.seen].filter(function (x) { return typeof x === 'number' && x > 0; });
+    var c = [inc.t.oracle, inc.t.found, inc.t.opened, inc.t.seen].filter(function (x) { return typeof x === 'number' && x > 0; });
     return c.length ? Math.min.apply(null, c) : null;
   }
 
@@ -292,12 +347,12 @@
   /* ordered milestones with seconds since the previous one */
   function milestones(inc) {
     var defs = [
-      ['oracle', 'Ataque detectado'], ['rule', 'Regla activa'], ['patchStart', 'Parche propuesto'],
+      ['oracle', inc.origin === 'audit' ? 'Hallado por auditoria' : 'Ataque detectado'], ['rule', 'Regla activa'], ['patchStart', 'Parche propuesto'],
       ['pr', 'PR abierto'], ['merged', 'PR fusionado'], ['deploy', 'Deploy'], ['verify', 'Verificado']
     ];
     var out = [], prev = null;
     for (var i = 0; i < defs.length; i++) {
-      var ts = defs[i][0] === 'oracle' ? (inc.t.oracle != null ? inc.t.oracle : inc.t.opened) : inc.t[defs[i][0]];
+      var ts = defs[i][0] === 'oracle' ? (inc.t.oracle != null ? inc.t.oracle : (inc.t.found != null ? inc.t.found : inc.t.opened)) : inc.t[defs[i][0]];
       if (typeof ts !== 'number' || ts <= 0) continue;
       out.push({ key: defs[i][0], label: defs[i][1], ts: ts, delta: prev == null ? 0 : Math.max(0, ts - prev) });
       prev = ts;
@@ -306,11 +361,12 @@
   }
 
   function scoreboard(st) {
-    var s = { seen: 0, open: 0, contained: 0, cured: 0 };
+    var s = { seen: 0, open: 0, contained: 0, cured: 0, audit: 0 };
     for (var i = 0; i < st.order.length; i++) {
       var inc = st.incidents[st.order[i]];
-      if (!inc.opened && !inc.oracles.length) continue;
+      if (!visible(inc)) continue;
       s.seen++; s[status(inc)]++;
+      if (inc.origin === 'audit') s.audit = (s.audit || 0) + 1;
     }
     s.prod = st.counters.prod; s.detonated = st.counters.detonated; s.deny = st.counters.deny; s.total = st.counters.total;
     s.captive = Object.keys(st.sessions).length;
@@ -336,7 +392,8 @@
   var api = {
     GATES: GATES, newState: newState, reduce: reduce, status: status, scoreboard: scoreboard,
     milestones: milestones, timeToRule: timeToRule, timeToPatch: timeToPatch, t0: t0,
-    attackKind: attackKind, decodeB64: decodeB64, isGithubUrl: isGithubUrl, attemptStatus: attemptStatus
+    attackKind: attackKind, decodeB64: decodeB64, isGithubUrl: isGithubUrl, attemptStatus: attemptStatus,
+    auditLine: auditLine, visible: visible
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ImmuneState = api;

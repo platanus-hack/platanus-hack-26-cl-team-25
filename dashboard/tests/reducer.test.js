@@ -102,6 +102,37 @@ assert.strictEqual(S.isGithubUrl('https://github.com/a/b'), true);
 assert.strictEqual(S.isGithubUrl('javascript:alert(1)'), false);
 assert.strictEqual(S.isGithubUrl('https://github.com.evil.io/x'), false);
 
+// --- class self-audit: audit.started / audit.finding / audit.done, origin audit linked to its parent
+let s4 = S.newState();
+S.reduce(s4, mk('incident.opened', { incident: 'p1', vuln_class: 'sqli', method: 'GET', route: '/api/products', param: { in: 'query', name: 'q' }, sink, origin: 'live' }, { incident: 'p1' }));
+assert.strictEqual(S.auditLine(s4), null);
+S.reduce(s4, mk('incident.closed', { incident: 'p1', outcome: 'patched', seconds_to_rule: 1, seconds_to_patch: 20 }, { incident: 'p1' }));
+S.reduce(s4, mk('audit.started', { incident: 'p1', vuln_class: 'sqli', candidates: 8 }, { incident: 'p1' }));
+assert.ok(/sqli/.test(S.auditLine(s4)) && /8 candidatos, en curso/.test(S.auditLine(s4)));
+S.reduce(s4, mk('audit.finding', { incident: 'a1', parent: 'p1', route: '/api/login', param: { in: 'json', name: '<b>email</b>' } }, { incident: 'a1' }));
+let a1 = s4.incidents.a1;
+assert.strictEqual(a1.origin, 'audit'); assert.strictEqual(a1.parent, 'p1');
+assert.strictEqual(S.visible(a1), true);                      // shown (queued) before incident.opened
+assert.strictEqual(S.status(a1), 'open');
+assert.ok(/1 hallazgo/.test(S.auditLine(s4)));
+S.reduce(s4, mk('audit.done', { incident: 'p1', checked: 8, findings: 1, seconds: 5.25 }, { incident: 'p1' }));
+assert.strictEqual(S.auditLine(s4), 'Auditoria de clase sqli tras p1: 8 de 8 candidatos revisados, 1 hallazgo en 5.3 s');
+S.reduce(s4, mk('incident.opened', { incident: 'a1', vuln_class: 'sqli', method: 'POST', route: '/api/login', param: { in: 'json', name: 'email' }, sink: { file: 'victim/app/db.py', line: 25 }, origin: 'audit', parent: 'p1', request: { method: 'POST', path: '/api/login', query: '', body_b64: b64('{"email":"x\' --"}') } }, { incident: 'a1' }));
+assert.strictEqual(a1.origin, 'audit'); assert.strictEqual(a1.parent, 'p1'); assert.strictEqual(a1.method, 'POST');
+assert.strictEqual(S.milestones(a1)[0].label, 'Hallado por auditoria');
+assert.strictEqual(S.milestones(a1)[0].ts, a1.t.found);   // t0 = the finding, not the queue exit
+assert.ok(S.t0(a1) === a1.t.found);
+S.reduce(s4, mk('rule.active', { id: 'ra', incident: 'a1', route: '/api/login' }));
+S.reduce(s4, mk('incident.closed', { incident: 'a1', outcome: 'patched', seconds_to_rule: 2, seconds_to_patch: 30 }, { incident: 'a1' }));
+{ const b = S.scoreboard(s4); assert.deepStrictEqual([b.seen, b.cured, b.audit], [2, 2, 1]); }
+assert.strictEqual(s4.incidents.p1.origin, 'live');
+// a live incident.opened without origin stays live; garbage in audit events does not throw
+S.reduce(s4, mk('incident.opened', { incident: 'p2', vuln_class: 'idor', route: '/x' }, { incident: 'p2' }));
+assert.strictEqual(s4.incidents.p2.origin, 'live');
+S.reduce(s4, { type: 'audit.finding', data: {} }); S.reduce(s4, { type: 'audit.done' });
+S.reduce(s4, mk('audit.started', { incident: 'p2', vuln_class: 'idor', candidates: 'many' }, { incident: 'p2' }));
+assert.ok(/idor tras p2: \? candidatos/.test(S.auditLine(s4)));
+
 // --- external file: replay the scripted demo and check the end state
 if (process.argv[2]) {
   const evs = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));

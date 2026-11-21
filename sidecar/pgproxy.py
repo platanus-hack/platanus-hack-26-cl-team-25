@@ -116,8 +116,9 @@ class StatementTracker:
     ``on_result(sql, ok, error, via)`` is called once per finished statement.
     """
 
-    def __init__(self, on_result):
+    def __init__(self, on_result, on_bound=None):
         self.on_result = on_result
+        self.on_bound = on_bound           # optional (sql, params) for every successful Execute (judge mode)
         self.stmts: dict[str, str] = {}    # prepared statement name -> text
         self.portals: dict[str, str] = {}  # portal name -> text
         self.queue: deque = deque()        # items: ["Q", sql, completes, error] | ["E", sql] | ["S"]
@@ -140,9 +141,11 @@ class StatementTracker:
             portal, pos = _cstr(p, 0)
             stmt, pos = _cstr(p, pos)
             self.portals[portal] = self.stmts.get(stmt, "")
+            if self.on_bound is not None:
+                self.params[portal] = bind_params(p, pos)
         elif t == "E":
             portal, _ = _cstr(p, 0)
-            self.queue.append(["E", self.portals.get(portal, "")])
+            self.queue.append(["E", self.portals.get(portal, ""), self.params.get(portal)])
         elif t == "S":
             self.queue.append(["S"])
         elif t == "C":  # Close statement/portal
@@ -163,6 +166,8 @@ class StatementTracker:
             elif head[0] == "E":
                 self.queue.popleft()
                 self.on_result(head[1], True, None, "extended")
+                if self.on_bound is not None:
+                    self.on_bound(head[1], head[2] or [])
         elif t == "E":  # ErrorResponse
             err = error_fields(p)
             msg = f"{err.get('C', '')} {err.get('M', '')}".strip()
@@ -198,13 +203,35 @@ class StatementTracker:
                     self.queue.popleft()
 
 
+def bind_params(p: bytes, pos: int) -> list:
+    """Parameter values of a Bind message body after the portal and statement names (text format decoded,
+    binary format as None). Only used in judge mode; never part of the statement text."""
+    try:
+        (nf,) = struct.unpack("!H", p[pos:pos + 2]); pos += 2
+        fmts = list(struct.unpack("!%dH" % nf, p[pos:pos + 2 * nf])); pos += 2 * nf
+        (n,) = struct.unpack("!H", p[pos:pos + 2]); pos += 2
+        out = []
+        for i in range(n):
+            (ln,) = struct.unpack("!i", p[pos:pos + 4]); pos += 4
+            if ln < 0:
+                out.append(None)
+                continue
+            raw = p[pos:pos + ln]; pos += ln
+            fmt = fmts[i] if len(fmts) > 1 else (fmts[0] if fmts else 0)
+            out.append(raw.decode("utf-8", "replace") if fmt == 0 else None)
+        return out
+    except (struct.error, IndexError):
+        return []
+
+
 class PgProxy:
     """Listens on ``listen`` and forwards to ``upstream``. ``sink(sql, ok, error, via)`` gets every statement."""
 
-    def __init__(self, listen_host: str, listen_port: int, up_host: str, up_port: int, sink):
+    def __init__(self, listen_host: str, listen_port: int, up_host: str, up_port: int, sink, bound_sink=None):
         self.listen_host, self.listen_port = listen_host, listen_port
         self.up_host, self.up_port = up_host, up_port
         self.sink = sink
+        self.bound_sink = bound_sink
         self.server = None
         self.ready = asyncio.Event()  # cleared during a database reset: new connections wait
         self.ready.set()
@@ -245,7 +272,7 @@ class PgProxy:
         sr = sw = None
         try:
             fr = FrontendReader()
-            tracker = StatementTracker(self.sink)
+            tracker = StatementTracker(self.sink, self.bound_sink)
             # handle SSL/GSS negotiation locally, before connecting upstream
             first = []
             while not first:

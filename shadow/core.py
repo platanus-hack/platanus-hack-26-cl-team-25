@@ -132,6 +132,8 @@ class Engine:
             log.warning("load_markers failed (%r): owner oracle disabled", e)
             self.markers = {}
         self.public = [p for p in self.profile.public_paths()]
+        self.sharing = load_sharing(os.environ.get("SHADOW_SHARING_PATH")
+                                    or (os.path.join(os.path.dirname(seed_db), "sharing.json") if seed_db else ""))
         self.lifespan = Lifespan(self.app)
         self._constants = None
         self._const_mods = -1
@@ -363,10 +365,36 @@ class Engine:
         events = sqltaint.check(rec.statements, ins, self.constants())
         events += rec.events  # file / proc / net, collected live
         last_stack = rec.statements[-1][1] if rec.statements else []
-        events += self.owner_events(path, rheaders, rbody, uid, role, bool(events), last_stack)
+        events += self.owner_events(path, rheaders, rbody, uid, role, bool(events), last_stack, path_params)
         return events
 
-    def owner_events(self, path, rheaders, rbody, uid, role, other_fired, stack=()):
+    def co_members(self, path_params, uid) -> set:
+        """Group-shared access (shadow/sharing.json): the members of every group this request addresses
+        through a members-scoped path parameter, provided the requester is one of them. Read from the
+        clone's own database, so it follows L2 changes. Empty without a declared relation."""
+        if not self.sharing or uid is None or not path_params:
+            return set()
+        out = set()
+        for name, spec in self.sharing.items():
+            if name not in path_params:
+                continue
+            val = str(path_params[name])
+            try:
+                conn = db.ORIG_CONNECT(self.db_path, timeout=10)
+                try:
+                    rows = conn.execute('SELECT "%s" FROM "%s" WHERE "%s" = ?' % (
+                        spec["member"], spec["table"], spec["group"]), (int(val) if val.isdigit() else val,)).fetchall()
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001 - never exempt on error
+                log.warning("sharing lookup %s=%s failed: %r", name, val, e)
+                continue
+            members = {_as_int(r[0]) for r in rows}
+            if uid in members:
+                out |= members
+        return out
+
+    def owner_events(self, path, rheaders, rbody, uid, role, other_fired, stack=(), path_params=None):
         """Cross-owner data in the response.
 
         Fires for every distinct marker owner != requester (anonymous counts as
@@ -388,12 +416,38 @@ class Engine:
             o = self.markers.get(m.decode())
             if o is not None and o != uid:
                 owners.add(o)
+        if owners and not other_fired:
+            owners -= self.co_members(path_params, uid)
         if not owners:
             return []
         if self.is_public(path) and not (other_fired or len(owners) >= 2):
             return []
         return [{"oracle": "owner", "detail": {"marker_owner": o, "requester": uid}, "stack": list(stack)}
                 for o in sorted(owners)[:MAX_OWNER_EVENTS]]
+
+
+def _as_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def load_sharing(path: str) -> dict:
+    """{path param: {"table", "member", "group"}} from sharing.json (written by immune.shadowdata); {} if absent."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+        out = {}
+        for name, s in ((doc or {}).get("routes") or {}).items():
+            if all(isinstance(s.get(k), str) and s[k].replace("_", "").isalnum() for k in ("table", "member", "group")):
+                out[str(name)] = {k: s[k] for k in ("table", "member", "group")}
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("sharing file %s unreadable (%r): no group-shared access", path, e)
+        return {}
 
 
 def _decoded_body(rheaders, body: bytes) -> bytes:
