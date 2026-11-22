@@ -254,6 +254,8 @@ Every private value in the shadow database embeds its owner's marker: `MK` follo
 | `legit_users`, `admin` | credentials of seeded users | scenarios, `sim/legit.py`, class audit |
 | `seed_max_<table>_id` | integer | scenarios (for the demo: `seed_max_order_id`) |
 
+Each event: `{"oracle": kind, "detail": {...}, "stack": [{"file": "<path relative to the release>", "line": n, "func": "..."}]}` with only frames inside the victim package. Out-of-process oracles (`sidecar/`) fill `stack` when a frame source is configured (native `strace -k` frames resolved with `addr2line`, the servlet entry point of a Java app, PHP Xdebug traces: `sidecar/README.md` *Where in the app's code*); without one it is `[]`. `detail` for `sql`: `{statement, input, param}`; `file`: `{path, realpath}`; `owner`: `{marker_owner, requester}`.
+
 `<runtime>/data/markers.json` maps each marker to its owner uid: `{"MK4F7Q2ZP0XA": 3, ...}`.
 The gateway reloads the manifest when the file's modification time changes.
 

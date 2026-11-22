@@ -22,7 +22,7 @@ from immune_contracts import wire
 
 from . import config as cfgmod
 from . import constants as constmod
-from . import http1, identity, mysqlclient, observer, pgclient, phptrace, sqllog
+from . import http1, identity, mysqlclient, nativestack, observer, pgclient, phptrace, sqllog
 from .learn import H_LEARN, learn_message
 from .mysqlproxy import MysqlProxy, written_tables
 from .pgproxy import PgProxy
@@ -32,18 +32,27 @@ log = logging.getLogger("sidecar")
 WARMUP_MISSING = "/__sidecar_warmup__/missing"
 
 
+def _frame_limit(native_stack) -> int:
+    return int((native_stack or {}).get("frame_limit") or 48) if isinstance(native_stack, dict) else 48
+
+
 class Sidecar:
     def __init__(self, cfg: cfgmod.Config):
         self.cfg = cfg
         self.env = dict(os.environ)
         self.file_markers = observer.load_file_markers(cfg.markers_path)   # planted secrets: marker -> file
-        self.obs = observer.from_config(cfg, self.file_markers)
+        # native call stacks for file/proc/net evidence (strace -k + addr2line); the app's filesystem is seen
+        # through the tracer's root (attach: /proc/<pid>/root)
+        self.stacker = nativestack.Stacker.from_config(cfg.native_stack,
+                                                       root=lambda: self.tracer.root_dir() if self.tracer else "/")
+        self.obs = observer.from_config(cfg, self.file_markers, stacker=self.stacker)
         self.ident = identity.Identity(identity.load_profile(cfg.profile), cfg.identity_command)
         self.markers = self.ident.markers(self.env, cfg.markers_path)
         self.public = self.ident.public_paths(cfg.public_paths)
         self.tracer = Tracer(self.obs.on_obs, mode=cfg.mode, command=cfg.command, anchor=cfg.target_pid,
                              container=cfg.container, image=cfg.tracer_image, label=cfg.tracer_label,
-                             attempts=bool(self.obs.protected), on_attach=self._reattached) \
+                             attempts=bool(self.obs.protected), on_attach=self._reattached,
+                             stack=_frame_limit(cfg.native_stack) if self.stacker else 0) \
             if cfg.trace else None
         self.sqllog = sqllog.LogFollower(cfg.sql_log_cmd, cfg.sql_dialect, self.obs.on_statement) \
             if cfg.sql_log_cmd else None

@@ -1,2 +1,3 @@
 FROM immune-base:1
-RUN apt-get update && apt-get install -y --no-install-recommends strace procps && rm -rf /var/lib/apt/lists/*
+# binutils: addr2line turns the native call stacks strace -k prints into file:line (sidecar/nativestack.py)
+RUN apt-get update && apt-get install -y --no-install-recommends strace procps binutils && rm -rf /var/lib/apt/lists/*

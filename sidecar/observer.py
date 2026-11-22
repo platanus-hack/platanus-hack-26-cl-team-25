@@ -59,7 +59,8 @@ def obs_key(o) -> tuple:
 
 class Observer:
     def __init__(self, allowed_roots, dns_fires: bool = True, protected=(), exec_allow=(), net_allow=(),
-                 learn_background: bool = False, quiet_s: float = 1.0):
+                 learn_background: bool = False, quiet_s: float = 1.0, stacker=None):
+        self.stacker = stacker                  # native call stacks of the syscalls (sidecar/nativestack.py), or None
         self.protected = [p for p in protected if p]
         self.exec_allow, self.net_globs = list(exec_allow or []), list(net_allow or [])
         self.learn_background, self.quiet_s = learn_background, quiet_s
@@ -144,11 +145,14 @@ class Observer:
         events, seen = [], set()
         execed = {o.pid for o in rec.obs if o.kind == "exec"}
 
-        def add(kind, detail):
+        def add(kind, detail, o=None):
             key = (kind, repr(sorted(detail.items())))
             if key not in seen:
                 seen.add(key)
-                events.append({"oracle": kind, "detail": detail, "stack": []})
+                # where in the app's code: the frames strace -k printed under this syscall (read now: the lines
+                # arrive after the syscall line, and the event is built after the grace period)
+                stack = self.stacker(o.frames) if (self.stacker and o is not None and o.frames) else []
+                events.append({"oracle": kind, "detail": detail, "stack": stack})
 
         for o in rec.obs:
             d = o.detail
@@ -158,17 +162,17 @@ class Observer:
                 if d.get("result") and not self.protected:
                     continue  # a failed open only matters for a protected path
                 if not self.path_allowed(d["realpath"]):
-                    add("file", {k: d[k] for k in ("path", "realpath", "result") if k in d})
+                    add("file", {k: d[k] for k in ("path", "realpath", "result") if k in d}, o)
             elif o.kind == "exec":
                 if not _match(d["path"], self.exec_allow):
-                    add("proc", {"path": d["path"], "argv": d["argv"]})
+                    add("proc", {"path": d["path"], "argv": d["argv"]}, o)
             elif o.kind == "fork":
                 if d["child"] not in execed:  # fork without exec (exec'd children are reported by execve)
-                    add("proc", {"syscall": d["syscall"], "child": d["child"]})
+                    add("proc", {"syscall": d["syscall"], "child": d["child"]}, o)
             elif o.kind == "net":
                 if self.net_fires(d):
                     add("net", {"family": d["family"], "address": d["address"], "port": d["port"],
-                                "syscall": d["syscall"]})
+                                "syscall": d["syscall"]}, o)
         return events
 
     def net_fires(self, d) -> bool:
@@ -292,15 +296,17 @@ def marker_events(file_markers: dict, headers: dict, body: bytes, system: list[d
         hit = by_path.get(e["detail"].get("realpath")) if e["oracle"] == "file" else None
         if hit and not e["detail"].get("result"):
             hit["detail"]["observed"] = "response+syscall"
+            if e.get("stack") and not hit["stack"]:
+                hit["stack"] = e["stack"]       # the open the response leaked came from this code path
         else:
             rest.append(e)
     return list(by_path.values()) + rest
 
 
-def from_config(cfg, file_markers: dict | None = None, extra_allow=()) -> "Observer":
+def from_config(cfg, file_markers: dict | None = None, extra_allow=(), stacker=None) -> "Observer":
     """The observer a config describes; paths of file markers are protected."""
     protected = list(cfg.protected_paths or [])
     protected += sorted({i["path"] for i in (file_markers or {}).values()} - set(protected))
     protected = [p for p in protected if p not in set(extra_allow)]
     return Observer(cfg.allowed_file_roots, protected=protected, exec_allow=cfg.exec_allow,
-                    net_allow=cfg.net_allow, learn_background=cfg.learn_background)
+                    net_allow=cfg.net_allow, learn_background=cfg.learn_background, stacker=stacker)
