@@ -21,7 +21,8 @@ from immune_contracts import wire
 
 from . import config as cfgmod
 from . import constants as constmod
-from . import http1, identity, observer, pgclient
+from . import http1, identity, observer, pgclient, sqllog
+from .learn import H_LEARN, learn_message
 from .pgproxy import PgProxy
 from .tracer import Tracer
 
@@ -33,12 +34,20 @@ class Sidecar:
     def __init__(self, cfg: cfgmod.Config):
         self.cfg = cfg
         self.env = dict(os.environ)
-        self.obs = observer.Observer(cfg.allowed_file_roots)
+        self.file_markers = observer.load_file_markers(cfg.markers_path)   # planted secrets: marker -> file
+        self.obs = observer.from_config(cfg, self.file_markers)
         self.ident = identity.Identity(identity.load_profile(cfg.profile), cfg.identity_command)
         self.markers = self.ident.markers(self.env, cfg.markers_path)
         self.public = self.ident.public_paths(cfg.public_paths)
-        self.tracer = Tracer(self.obs.on_obs, mode=cfg.mode, command=cfg.command, anchor=cfg.target_pid) \
+        self.tracer = Tracer(self.obs.on_obs, mode=cfg.mode, command=cfg.command, anchor=cfg.target_pid,
+                             container=cfg.container, image=cfg.tracer_image, label=cfg.tracer_label,
+                             attempts=bool(self.obs.protected), on_attach=self._reattached) \
             if cfg.trace else None
+        self.sqllog = sqllog.LogFollower(cfg.sql_log_cmd, cfg.sql_dialect, self.obs.on_statement) \
+            if cfg.sql_log_cmd else None
+        self.baseline = sqllog.Baseline(cfg.sql_baseline or "")
+        self.warming = False
+        self.loop = None
         self.proxy = None
         self.admin = None
         self.constants = None
@@ -58,18 +67,13 @@ class Sidecar:
             self.proxy = PgProxy(pg.listen_host, pg.listen_port, pg.up_host, pg.up_port, self.obs.on_statement,
                                  self.obs.on_bound if self.judge else None)
             await self.proxy.start()
+        self.loop = asyncio.get_running_loop()
+        if self.sqllog:
+            self.sqllog.start()
         self.obs.learning = True
         if self.tracer:
             await asyncio.to_thread(self.tracer.start)
-        await self._wait_health()
-        for _ in range(max(1, int(cfg.warmup_rounds))):
-            for p in [cfg.health, *cfg.warmup_paths, WARMUP_MISSING]:
-                try:
-                    await http1.request(cfg.app_host, cfg.app_port, "GET", p, [(b"host", b"localhost")], b"", 10)
-                except Exception as e:
-                    log.info("warm-up %s: %r", p, e)
-        await asyncio.sleep(max(cfg.grace_ms, 50) / 1000)
-        self.obs.learning = False
+        await self._warmup()
         root = self.tracer.root_dir() if self.tracer else "/"
         exes = [f"/proc/{p}/exe" for p in self.tracer.app_pids_now()] if self.tracer else []
         self.constants = await asyncio.to_thread(constmod.scan, root, cfg.source_dirs, exes,
@@ -81,7 +85,41 @@ class Sidecar:
                  len(self.obs.file_allow), len(self.obs.net_allow), len(self.markers),
                  len(self.constants.strings), self.last_reset_ms or 0)
 
+    async def _warmup(self):
+        cfg = self.cfg
+        await self._wait_health()
+        self.obs.paused = False
+        self.obs.learning = True
+        for _ in range(max(1, int(cfg.warmup_rounds))):
+            for p in [cfg.health, *cfg.warmup_paths, WARMUP_MISSING]:
+                try:
+                    await http1.request(cfg.app_host, cfg.app_port, "GET", p, [(b"host", b"localhost")], b"", 10)
+                except Exception as e:
+                    log.info("warm-up %s: %r", p, e)
+        await asyncio.sleep(max(cfg.grace_ms, 50) / 1000)
+        self.obs.learning = False
+
+    def _reattached(self):
+        """Tracer thread, docker mode: the app container was replaced. Its start-up must not be judged:
+        fail closed until the warm-up has run again."""
+        self.warming = True
+        self.obs.paused = True      # what it reads while starting (its own config) is neither a finding nor "normal"
+        asyncio.run_coroutine_threadsafe(self._rewarm(), self.loop)
+
+    async def _rewarm(self):
+        async with self.lock:
+            try:
+                await self._warmup()
+                log.info("warm-up after re-attach done: allowlist=%d files", len(self.obs.file_allow))
+            except Exception:
+                log.exception("warm-up after re-attach failed")
+            finally:
+                self.obs.learning = False
+                self.warming = False
+
     async def stop(self):
+        if self.sqllog:
+            self.sqllog.stop()
         if self.proxy:
             await self.proxy.stop()
         if self.admin:
@@ -163,6 +201,10 @@ class Sidecar:
                 client.append((kl.encode("latin-1"), v))
         rid = imm.get(wire.H_RID, "")
         mode = "L2" if imm.get(wire.H_MODE, "L1").upper() == "L2" else "L1"
+        target = raw_path + (b"?" + query_string if query_string else b"")
+        # learn mode: a legitimate request replayed by `python -m sidecar.learn`, signed with the clone key
+        learn = imm.get(wire.H_MODE, "").lower() == "learn" and wire.check(
+            cfg.clone_key, learn_message(method, target), imm.get(H_LEARN, ""))
         client_h = _hdict(client)
         uid = role = None
         app_headers = list(client)
@@ -182,9 +224,11 @@ class Sidecar:
         else:
             uid, role = self.ident.identify(self.env, client_h)
 
-        target = raw_path + (b"?" + query_string if query_string else b"")
         t0 = time.perf_counter()
-        if self.tracer and not self.tracer.alive():
+        if self.sqllog:
+            self.sqllog.flush()     # a statement still being assembled belongs to no request
+        self.baseline.add(sqllog.fingerprint(s, cfg.sql_dialect) for s in self.obs.take_background_sql())
+        if self.tracer and (self.warming or not self.tracer.alive()):
             # fail closed: without the tracer we cannot judge
             status, rheaders, rbody, rec = 503, [(b"content-type", b"text/plain")], b"sidecar tracer is not running", None
             self.obs.begin(); rec = self.obs.end()
@@ -201,14 +245,33 @@ class Sidecar:
                 status, rheaders, rbody = 502, [(b"content-type", b"text/plain")], b"Bad Gateway"
             t_app = time.perf_counter()
             await asyncio.sleep(cfg.grace_ms / 1000)
+            if self.sqllog:
+                self.sqllog.flush()
             rec = self.obs.end()
         t1 = time.perf_counter()
 
         query = query_string.decode("latin-1")
         rh = _hdict(rheaders)
-        events = observer.sql_events(rec.statements, observer.extract_inputs(path, query, client_h, body),
-                                     self.constants)
-        events += self.obs.system_events(rec)
+        failed = [s for s, _ in rec.failed]
+        if learn:
+            n = self.baseline.add((sqllog.fingerprint(s, cfg.sql_dialect) for s in rec.statements),
+                                  from_request=True)
+            out = [(k, v) for k, v in rheaders if not k.startswith(wire.INTERNAL_PREFIX.encode())]
+            out += [(b"content-length", str(len(rbody)).encode()), (wire.H_VERDICT.encode(), b"clean"),
+                    (wire.H_EVENTS.encode(), b"0"), (b"x-imm-learnt", str(n).encode())]
+            log.info("rid=%s learn %s %s -> %s: %d new structure(s)", rid, method, path, status, n)
+            return status, out, rbody, mode
+        # the database log cannot tell a failed statement from an executed one reliably (error-based
+        # injection fails on purpose), so with that source failed statements are checked too
+        tainted = rec.statements + (failed if self.sqllog else [])
+        events = observer.sql_events(tainted, observer.extract_inputs(path, query, client_h, body), self.constants)
+        if cfg.sql_dialect == "mysql" or not (self.constants and self.constants.strings):
+            # without the app's own string constants a one-token match cannot be told from an identifier or
+            # keyword the app wrote itself (input "name" in "SELECT name"): only multi-token matches count
+            events = [e for e in events if e["detail"]["reason"] != "token"]
+        events += sqllog.structure_events(self.baseline, rec.statements + failed, cfg.sql_dialect,
+                                          skip={e["detail"]["statement"] for e in events})
+        events += observer.marker_events(self.file_markers, rh, rbody, self.obs.system_events(rec))
         events += observer.owner_events(self.markers, self.public, path, rh, rbody, uid, role, bool(events))
         if events:
             verdict = wire.VERDICT_ORACLE

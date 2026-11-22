@@ -149,8 +149,9 @@ def test_not_reproducible(env, events):
     a = p.enqueue(events["sqli"])
     p.step()
     inc = p.state.incident(a)
-    assert inc["outcome"] == "not_reproducible" and "1/3" in inc["reason"]
-    assert env["gw"].rules == {} and not stub_patcher.calls
+    # it fired once: contained by the rule and escalated, but no automatic fix without a reliable PoC
+    assert (inc["outcome"], inc["outcome_detail"]) == ("rule_only", "escalated") and "1/3" in inc["reason"]
+    assert len(env["gw"].rules) == 1 and not stub_patcher.calls
 
 
 def test_feedback_loop_then_rule_only(env, events):
@@ -399,3 +400,27 @@ def test_rule_of_an_unpatched_incident_is_renewed_and_restored(env, events):
     assert q.state.incident(other)["outcome"] == "patched"
     n = len(env["gw"].rules)
     assert q.keep_rules() <= 1 and len(env["gw"].rules) == n and q.state.incident(other)["rule"]["id"] not in env["gw"].rules
+
+
+@pytest.mark.parametrize("verdicts,outcome,detail", [
+    (["oracle", "clean", "oracle"], "rule_only", "escalated"),      # non-deterministic: contained, a person decides
+    (["clean", "clean", "clean"], "rule_only", "escalated"),        # it did fire once on the live request
+    (["oracle", "oracle", "oracle"], "rule_only", None),            # reliable PoC: goes on (no patch target here)
+])
+def test_external_replay_below_3_of_3_keeps_the_rule_and_escalates(env, events, verdicts, outcome, detail):
+    from pipeline.external import ExternalPipeline
+    cfg = env["cfg"]
+    p = ExternalPipeline(cfg, State(os.path.join(cfg.state_dir, "state.json")),
+                         Publisher(cfg.bus_url, cfg.bus_token, cfg.run_id), GatewayAdmin(cfg.gateway_admin_url, "at"),
+                         Fleet(cfg.fleet_url, "at"), None, validator=ScriptedValidator(), patcher=stub_patcher,
+                         repro_url="http://sidecar:1")
+    p.audit_settings = lambda: (False, 40, 120)
+    it = iter(verdicts)
+    p.replay = lambda req, tag: next(it)
+    a = p.enqueue(events["traversal"])
+    p.step()
+    inc = p.state.incident(a)
+    assert (inc["outcome"], inc["outcome_detail"]) == (outcome, detail), inc["reason"]
+    assert len(env["gw"].rules) == 1
+    if detail:
+        assert "%d/3" % verdicts.count("oracle") in inc["reason"] and "needs a person" in inc["reason"]

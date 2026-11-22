@@ -236,7 +236,7 @@ Retries after transient failures, rule renewal and deploys across a fleet restar
 
 Trigger: `oracle.fired` events on the bus. Per incident (dedupe key: oracle kind + route + param + sink file:line):
 
-1. Build the PoC (`contracts/schemas/poc.schema.json`), confirm it reproduces 3/3 in the runner (harness, container `--network none`).
+1. Build the PoC (`contracts/schemas/poc.schema.json`), confirm it reproduces 3/3 in the runner (harness, container `--network none`). Below 3/3: post the rule anyway, skip the fix, close `rule_only` / `outcome_detail: escalated`.
 2. Rule: derive it from the evidence, `POST /_admin/rules`.
 3. Patch: `patcher.propose(release_dir, evidence, feedback) -> unified diff`. Up to 3 attempts, feeding back gate output.
 4. Gates, in order, each published as `gate.result`: `policy`, `properties`, `poc`, `tests`, `legit` (`docs/plan-construccion.md` §4).

@@ -6,7 +6,9 @@ Two modes:
   triples (app image + Postgres + observer; `pipeline/generic.py`) and the language-neutral patch
   generator `pipeline/generic_patch.py`.
 - reproduction only (REPRO_URL set, e.g. labs/grafana-cve-2021-43798): oracle.fired -> incident -> PoC
-  reproduced 3/3 against a reserved shadow clone through its sidecar -> containment rule -> `rule_only`.
+  replayed 3 times against a reserved shadow clone through its sidecar. 3/3: containment rule -> patch
+  (pipeline/extfix.py). Less (0/3 included, it did fire once): containment rule, no automatic fix, closed
+  `rule_only` / `escalated` for a person (Pipeline.escalate).
 
 Selected with PIPELINE_APP=external, or automatically for app.runtime generic (pipeline/__main__.py).
 """
@@ -86,8 +88,7 @@ class ExternalPipeline(Pipeline):
         self.publish(E.POC_READY, {"incident": iid, "reproducible": rep["reproducible"], "runs": hits, "poc": p}, inc)
         self.state.save()
         if not rep["reproducible"]:
-            raise Closed("not_reproducible", "the PoC fired the %s oracle in %d/%d runs on the shadow clone"
-                         % (p["expect"]["oracle"], hits, self.runs))
+            self.escalate(inc, p, hits, self.runs)
         self.note(inc, "PoC reproduces %d/%d on the shadow clone" % (hits, self.runs))
 
         # 2. containment rule (built-in derivation; the LLM patcher is Python-only for now)
