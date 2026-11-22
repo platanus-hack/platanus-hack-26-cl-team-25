@@ -783,9 +783,17 @@
      event store: a different one means the bus was cleared or replaced while we were away. */
   var es = null, gen = null, retryMs = 1000, retryTimer = 0, lastBeat = 0;
   var SILENCE_MS = 40000;   // the server sends a heartbeat every 15 s
+  var sseFails = 0, polling = false, pollTimer = 0, dataTimer = 0;   // SSE health / proxy-tunnel fallback
+
+  function gotStreamData() { sseFails = 0; lastBeat = Date.now(); if (dataTimer) { clearTimeout(dataTimer); dataTimer = 0; } }
 
   function reconnectSoon() {
     if (es) { es.close(); es = null; }
+    if (dataTimer) { clearTimeout(dataTimer); dataTimer = 0; }
+    // SSE can be silently buffered or cut by a reverse proxy / tunnel (e.g. cloudflared on /events/stream):
+    // after a couple of connects that deliver nothing, fall back to short-polling GET /events, which any proxy
+    // forwards fine. Once in polling we stay there for the session.
+    if (++sseFails >= 2) { startPolling(); return; }
     setConn(false, 'Reconectando');
     clearTimeout(retryTimer);
     retryTimer = setTimeout(connect, retryMs);
@@ -793,16 +801,19 @@
   }
 
   function connect() {
+    if (polling) return;
     clearTimeout(retryTimer);
     if (es) es.close();
     var src;
     try { src = es = new EventSource('/events/stream?since=' + st.lastSeq); } catch (e) { es = null; reconnectSoon(); return; }
     lastBeat = Date.now();
+    if (dataTimer) clearTimeout(dataTimer);
+    dataTimer = setTimeout(function () { if (src === es) reconnectSoon(); }, 8000);   // connected but no data = buffered
     src.onopen = function () { if (src !== es) return; lastBeat = Date.now(); retryMs = 1000; setConn(true); };
     src.onerror = function () { if (src === es) reconnectSoon(); };
     src.onmessage = function (m) {
       if (src !== es) return;
-      lastBeat = Date.now();
+      gotStreamData();
       var ev;
       try { ev = JSON.parse(m.data); } catch (e) { return; }
       if (!ev || typeof ev !== 'object') return;
@@ -810,10 +821,10 @@
       try { S.reduce(st, ev, ev.seq); } catch (e) { /* never let one bad event stop the stream */ }
       schedule();
     };
-    src.addEventListener('hb', function () { if (src === es) lastBeat = Date.now(); });
+    src.addEventListener('hb', function () { if (src === es) gotStreamData(); });
     src.addEventListener('hello', function (m) {
       if (src !== es) return;
-      lastBeat = Date.now();
+      gotStreamData();
       var h;
       try { h = JSON.parse(m.data); } catch (e) { return; }
       if (!h || typeof h.gen !== 'string') return;
@@ -826,10 +837,44 @@
     src.addEventListener('reset', function () { if (src === es) resetState(); });
   }
 
+  /* Fallback: short-poll GET /events?since=<lastSeq> on a timer. Survives proxies/tunnels that break SSE. */
+  function startPolling() {
+    if (polling) return;
+    polling = true;
+    if (es) { es.close(); es = null; }
+    if (dataTimer) { clearTimeout(dataTimer); dataTimer = 0; }
+    clearTimeout(retryTimer);
+    pollOnce();
+  }
+  function pollOnce() {
+    if (!polling) return;
+    fetch('/events?since=' + st.lastSeq + '&limit=5000', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+      .then(function (d) {
+        if (d && typeof d.next === 'number' && d.next < st.lastSeq) resetState();   // store was cleared/replaced
+        var evs = d && d.events;
+        if (evs && evs.length) {
+          for (var i = 0; i < evs.length; i++) {
+            var ev = evs[i];
+            if (!ev || typeof ev !== 'object') continue;
+            if (typeof ev.seq === 'number' && ev.seq <= st.lastSeq) continue;
+            try { S.reduce(st, ev, ev.seq); } catch (e) { /* skip a bad event */ }
+          }
+          schedule();
+        }
+        setConn(true); lastBeat = Date.now();
+      })
+      .catch(function () { setConn(false, 'Reconectando'); })
+      .then(function () { if (polling) pollTimer = setTimeout(pollOnce, 1500); });
+  }
+
   setInterval(function () {
     if (es && Date.now() - lastBeat > SILENCE_MS) reconnectSoon();
   }, 5000);
-  window.addEventListener('online', function () { if (!es || es.readyState !== 1) { retryMs = 1000; reconnectSoon(); } });
+  window.addEventListener('online', function () {
+    if (polling) return;
+    if (!es || es.readyState !== 1) { retryMs = 1000; reconnectSoon(); }
+  });
 
   render();
   connect();
