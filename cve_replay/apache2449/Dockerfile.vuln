@@ -1,0 +1,12 @@
+# Apache httpd 2.4.49 — vulnerable to CVE-2021-41773 (path traversal), with strace for the file oracle.
+FROM httpd:2.4.49
+RUN set -eux; \
+    printf 'deb http://archive.debian.org/debian buster main\ndeb http://archive.debian.org/debian-security buster/updates main\n' > /etc/apt/sources.list; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends strace; \
+    rm -rf /var/lib/apt/lists/*
+COPY httpd.conf /usr/local/apache2/conf/httpd.conf
+COPY entrypoint-strace.sh /entrypoint-strace.sh
+RUN chmod +x /entrypoint-strace.sh
+
+CMD ["/entrypoint-strace.sh"]
