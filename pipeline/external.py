@@ -14,6 +14,9 @@ Selected with PIPELINE_APP=external, or automatically for app.runtime generic (p
 """
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
 import time
 import uuid
 
@@ -22,6 +25,7 @@ import httpx
 from immune_contracts import events as E, wire
 
 from . import poc as pocmod, reqs, rules
+from .config import REPO_ROOT
 from .extfix import ExtFix
 from .orchestrator import Closed, Pipeline
 
@@ -98,15 +102,22 @@ class ExternalPipeline(Pipeline):
         self.note(inc, "rule %s posted (%s %s)" % (rule["id"], rule["scope"], rule.get("param")))
         self.state.save()
 
-        # 3. patch: LLM fix -> CI in a sandbox -> PR -> merge -> blue/green -> verify (pipeline/extfix.py)
+        # 3. patch. The generic 5-gate flow (extfix) is Python-only; a non-Python app (e.g. the ScadaBR Java
+        # lab) can instead name an external patch command (EXTERNAL_PATCH_CMD) that builds, verifies and
+        # deploys its own fix and publishes its own patch/gate/deploy events. Either path: a verified fix
+        # removes the rule; a failure leaves the rule in place and closes rule_only.
         if not self.target:
-            raise Closed("rule_only", "contained by rule %s; no patch target configured (EXTERNAL_TARGET)"
-                         % rule["id"])
-        fx = ExtFix(self.target, self.cfg.run_id, lambda t, d: self.publish(t, d, inc), self.note,
-                    self.cfg.gateway_admin_url, self.cfg.admin_token, self.cfg.gateway_url,
-                    max_attempts=self.cfg.max_attempts, patcher_timeout_s=self.cfg.patcher_timeout_s)
-        out = fx.run(inc)
-        inc["fix"] = {k: v for k, v in out.items() if k != "outcome"}
+            cmd = os.environ.get("EXTERNAL_PATCH_CMD", "").strip()
+            if not cmd:
+                raise Closed("rule_only", "contained by rule %s; no patch target configured "
+                             "(EXTERNAL_TARGET / EXTERNAL_PATCH_CMD)" % rule["id"])
+            out = self._run_patch_cmd(cmd, inc)
+        else:
+            fx = ExtFix(self.target, self.cfg.run_id, lambda t, d: self.publish(t, d, inc), self.note,
+                        self.cfg.gateway_admin_url, self.cfg.admin_token, self.cfg.gateway_url,
+                        max_attempts=self.cfg.max_attempts, patcher_timeout_s=self.cfg.patcher_timeout_s)
+            out = fx.run(inc)
+            inc["fix"] = {k: v for k, v in out.items() if k != "outcome"}
         if out["outcome"] == "patched":
             inc["t"]["verified"] = time.time()
             try:
@@ -115,4 +126,26 @@ class ExternalPipeline(Pipeline):
             except Exception as e:  # noqa: BLE001
                 self.note(inc, "could not remove rule %s: %s" % (rule["id"], e))
         raise Closed(out["outcome"], out["reason"])
+
+    def _run_patch_cmd(self, cmd: str, inc) -> dict:
+        """Run an external patch command (e.g. the ScadaBR lab's Java build+verify). It is given the live
+        incident and run id and publishes its own patch/gate/deploy events to the bus; we read only its exit
+        code. 0 -> patched (and we then remove the rule); non-zero -> the rule stays and we close rule_only."""
+        argv = shlex.split(cmd) + ["--incident", inc["incident"], "--run", self.cfg.run_id]
+        self.note(inc, "external patch command: %s" % " ".join(argv))
+        t = time.time()
+        try:
+            r = subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True,
+                               timeout=self.cfg.patcher_timeout_s + self.cfg.deploy_timeout_s)
+        except subprocess.TimeoutExpired:
+            return {"outcome": "rule_only", "reason": "external patch command timed out; the rule stays active"}
+        except OSError as e:
+            return {"outcome": "rule_only", "reason": "external patch command could not start (%s); rule stays" % e}
+        inc["t"]["patch_s"] = round(time.time() - t, 2)
+        tail = (r.stderr or r.stdout or "").strip()[-600:]
+        inc["fix"] = {"cmd": " ".join(argv), "code": r.returncode, "out": tail}
+        if r.returncode == 0:
+            return {"outcome": "patched", "reason": "external patch verified and deployed"}
+        return {"outcome": "rule_only",
+                "reason": "external patch did not verify (exit %d); the rule stays active" % r.returncode}
 
