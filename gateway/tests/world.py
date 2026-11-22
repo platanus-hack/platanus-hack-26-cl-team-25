@@ -112,9 +112,10 @@ def stop(w):
         s.stop()
 
 
-def records(w):
-    for _ in range(40):
-        if w.record.exists() and w.record.read_text().strip():
+def records(w, n=1):
+    """The recording, once it holds at least n lines (the gateway writes a line after it answers)."""
+    for _ in range(100):
+        if w.record.exists() and len([l for l in w.record.read_text().splitlines() if l.strip()]) >= n:
             break
         time.sleep(0.05)
     return [json.loads(l) for l in w.record.read_text().splitlines() if l.strip()]

@@ -76,7 +76,7 @@ flowchart LR
 | Instrumentación en proceso | `shadow/` | dentro de cada clon de una app Python ASGI | Oráculos y veredicto |
 | Observador externo | `sidecar/` | `python -m sidecar`: contenedor junto a cada clon de una app con `app.runtime: generic` (modo `attach`); proceso del host en los laboratorios (modo `docker`) | Oráculos desde fuera del proceso: `strace`, proxy del protocolo de Postgres o de MySQL, registro de sentencias de la base, traza de PHP |
 | Vigilante de prod | `sidecar/prodwatch.py` | proceso del host; solo lo arranca el laboratorio de Grafana | Las reglas `file`, `proc` y `net` sobre contenedores de prod con `bpftrace`; solo alerta (`prod.alert`) |
-| WAF de detección | `waf/`, `gateway/waf.py` | contenedor `immune-waf:1`; solo lo arranca el laboratorio de ScadaBR. El gateway lo consulta si tiene `WAF_URL` | OWASP CRS sobre Coraza: marca como sospechoso un request que el clasificador dio por limpio. No bloquea |
+| WAF de detección | `waf/`, `gateway/waf.py` | contenedor `immune-waf:1`; opcional en `immune up` (`IMMUNE_WAF=1`) y usado por el laboratorio de ScadaBR. El gateway lo consulta si tiene `WAF_URL` | OWASP CRS sobre Coraza: marca como sospechoso un request que el clasificador dio por limpio. No bloquea |
 | Fleet | `fleet/` | proceso del host, `127.0.0.1:8070` | Crea y destruye los contenedores de prod y de los clones; despliegue blue/green |
 | Pipeline | `pipeline/` | proceso del host | Ciclo de vida del incidente, runner, las cinco validaciones, auditoría de clase |
 | Patcher | `patcher/` | librería cargada por el pipeline | Arma el prompt, llama a la CLI `claude` confinada, deriva la regla y las variantes del PoC, parches de respaldo |
@@ -249,8 +249,7 @@ servicio informa una anomalía, el request pasa a sospechoso con el motivo `waf:
 cualquier otro. El WAF no bloquea ni responde al cliente. Un error, un timeout (1.5 s) o una respuesta distinta de
 200 dejan el request como limpio (`gateway/waf.py`).
 
-Estado: `deploy/compose.yaml` no define `WAF_URL` ni el contenedor, así que un stack de `immune up` no lo usa.
-Solo lo arranca `labs/scadabr-cve-2026-8602/lab.sh`. Los tests (`gateway/tests/test_waf.py`) cubren el cliente y
+Estado: `immune up` lo arranca solo con `IMMUNE_WAF=1` en su entorno (perfil `waf` de `deploy/compose.yaml`; la imagen `immune-waf:1` se construye en el primer uso). Sin esa variable, el stack no lo usa. Verificado el 2026-11-22: la configuración de Compose, y la imagen corriendo con las mismas restricciones del servicio (solo lectura, sin capacidades), que marca una inyección SQL y deja pasar una búsqueda normal a través de `gateway/waf.py`. No se levantó un stack completo con el WAF. También lo arranca `labs/scadabr-cve-2026-8602/lab.sh`. Los tests (`gateway/tests/test_waf.py`) cubren el cliente y
 el cambio de clase con un servicio simulado; no hay un test que ejecute Coraza.
 
 ## 4. Oráculos

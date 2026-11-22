@@ -40,7 +40,7 @@ fleet 8270.
 | `overlay/.immune/openemr_identity.py` | Sidecar profile: `ensure_user`, `identity_headers` (logs in on the clone), `rewrite_request` (CSRF tokens), `public_paths`, `extra_oracles` |
 | `legit.py`, `attacks.py` | Demo traffic (`--base`, default `http://127.0.0.1:8280`) |
 | `seed-rules.sh` | Posts one optional policy rule to the gateway admin API |
-| `REVIEW_NOTES.md` | Surfaces of OpenEMR and the oracle expected on each |
+| `AGENT_BRIEF.md` | Red-team brief (Spanish) an operator hands to a coding agent to exercise the five CVEs of OpenEMR 8.2.0 against the local lab, through the gateway only. Its credentials belong to the synthetic clinic the seed creates |
 
 ## Configuration
 
@@ -71,9 +71,19 @@ not allow it, checked against the clone's ACL tables), `mfa` (a token issued wit
 
 No automated test in the repository runs this example: it needs the OpenEMR clone and its image. The
 components it relies on are unit-tested elsewhere (`sidecar/tests/test_mysqlproxy.py`,
-`sidecar/tests/test_phptrace.py`, `immune/tests/test_mysql_runtime.py`). `REVIEW_NOTES.md` states that
-detections were verified with a test-only fixture mounted into a clone; that fixture and its harness are not
-in the repository.
+`sidecar/tests/test_phptrace.py`, `immune/tests/test_mysql_runtime.py`). No recorded result of a detection on
+this example is in the repository.
+
+No defect is planted: the app is OpenEMR v8_2_0 as released (`fetch.py` checks the commit and that the tree
+equals the tag). The surfaces the gateway and the clones watch most closely, and the oracle expected on each:
+
+| Surface | Route | Oracle |
+|---|---|---|
+| Patient search / finder | `interface/main/finder/*.php`, `patient_select.php` | `sql` |
+| Documents | `controller.php?document&retrieve` | `file` |
+| REST / FHIR API | `/apis/default/api/*`, `/apis/default/fhir/*` | `sql`, `owner` |
+| Administration | `interface/super/edit_globals.php`, `usergroup_admin.php`, `main/backup.php` | `proc`, `file` |
+| Login | `interface/main/main_screen.php?auth=login` | none (the password is `x-sensitive`) |
 
 ## Limits
 

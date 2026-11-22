@@ -1,1 +1,0 @@
-SELECT gl_name, gl_value FROM globals WHERE gl_name IN ('rest_api','rest_fhir_api','rest_portal_api','rest_system_scopes_api','oauth_password_grant','portal_onsite_two_enable','portal_onsite_two_basepath','configuration_import_export');

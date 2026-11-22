@@ -83,7 +83,7 @@ Images:
 | `immune-strace:1` | `deploy/Dockerfile.strace` | tracer container of the sidecar's `docker` mode (Grafana lab) |
 | `immune-bpftrace:1` | `deploy/Dockerfile.bpftrace` | tracer container of `python -m sidecar.prodwatch` (Grafana lab) |
 | `immune-gobuild:1` | `deploy/Dockerfile.gobuild` | build and test sandbox of `pipeline/extfix.py` (Grafana lab) |
-| `immune-waf:1` | `waf/Dockerfile` | detection service of `waf/` (started only by the ScadaBR lab) |
+| `immune-waf:1` | `waf/Dockerfile` | detection service of `waf/` (started by `immune up` with `IMMUNE_WAF=1`, and by the ScadaBR lab) |
 
 `install.sh` builds `immune-base:1` and `immune-sidecar:1`, `immune-cbuild:1` with `IMMUNE_WITH_ANTICIPATE=1`,
 and pulls the images of the OpenEMR example with `IMMUNE_WITH_OPENEMR=1`. The app images are built by
@@ -592,8 +592,11 @@ id is missing) and is detonated as in section 6.3. The service never causes a de
 timeout (1.5 s), non-200 answer or invalid JSON leaves the request `clean`. Captive sessions, scanner paths
 and the `observe` and `passthrough` modes do not consult it.
 
-`deploy/compose.yaml` neither starts the service nor sets `WAF_URL`: a stack started by `immune up` does not
-use it. The ScadaBR lab is the only place in the repository that does. Reference: `waf/README.md`.
+`deploy/compose.yaml` has the service under the Compose profile `waf`. `immune up` enables the profile and sets
+`WAF_URL=http://waf:8080` for the gateway only when `IMMUNE_WAF=1` is in its environment (`compose_env`,
+`ensure_waf_image` in `immune/__main__.py`); otherwise the stack does not use it. Checked on 2026-11-22: the Compose
+configuration, and the image running with the service's restrictions answering `gateway/waf.py`; not a full
+stack with the WAF. The ScadaBR lab also starts the service. Reference: `waf/README.md`.
 
 ### 6.9 Canary
 

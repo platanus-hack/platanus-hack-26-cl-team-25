@@ -1,9 +1,9 @@
-"""Incident flow for an app we did not write and cannot run in the in-process harness (any language).
+"""Incident flow for an app we did not write and cannot run in the in-process harness.
 
 Two modes:
 - judge (app.runtime generic, no REPRO_URL): the full flow of `orchestrator.Pipeline` (PoC 3/3, rule, LLM
   fix, five gates, PR, blue/green deploy, verify), with every runner job executed on ephemeral clone
-  triples (app image + Postgres + observer; `pipeline/generic.py`) and the language-neutral patch
+  triples (app image + Postgres + observer; `pipeline/generic.py`) and the patch
   generator `pipeline/generic_patch.py`.
 - reproduction only (REPRO_URL set, e.g. labs/grafana-cve-2021-43798): oracle.fired -> incident -> PoC
   replayed 3 times against a reserved shadow clone through its sidecar. 3/3: containment rule -> patch

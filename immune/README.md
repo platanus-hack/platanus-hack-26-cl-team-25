@@ -397,6 +397,8 @@ Keys read from the raw file and not validated by `config.py`, so a misspelt one 
 | Variable | Effect |
 |---|---|
 | `IMMUNE_PROJECT` | Project directory when `--project` is absent |
+| `IMMUNE_WAF` | `1`: `up`/`reset` start the optional detection service of [`waf/`](../waf/README.md) (Compose profile `waf`), build `immune-waf:1` if missing and set the gateway's `WAF_URL` |
+| `DASHBOARD_SUBTITLE` | Subtitle passed to the dashboard container |
 | `PROD_APP_SECRET`, `SHADOW_APP_SECRET`, `ADMIN_TOKEN`, `BUS_TOKEN` | Override the values of `<runtime>/secrets.env` |
 | `POOL_SIZE` | Overrides `pool_size` on a fresh start |
 | `T0_REF` | Build `releases/t0` from `git archive <ref>` instead of the working tree |
