@@ -169,23 +169,36 @@
   }
   var ROUTE_LABEL = { prod: 'prod', deny: 'rechazado', shadow_l1: 'clon L1', shadow_l2: 'clon L2', l0: 'L0' };
 
-  function buildSteps(inc) {
-    var box = el('div', 'steps');
-    var gates = null;
+  /* always-visible flow rail: the pipeline stage at a glance, without opening the card. The deep technical
+     detail stays in the expanded body. The five gates collapse into one node with an n/5 count. */
+  var RAIL = [['detect', 'Detecta'], ['poc', 'PoC'], ['rule', 'Regla'], ['patch', 'Parche'],
+              ['gates', 'Gates'], ['prod', 'Producción'], ['verify', 'Verifica']];
+  function buildRail(inc) {
+    var byKey = Object.create(null), gp = 0, gt = 0, gactive = false, gfail = false, gts = null;
     S.stages(inc).forEach(function (s) {
-      var isGate = s.key.indexOf('gate:') === 0;
-      var chip = el('span', 'step ' + s.state + (isGate ? ' g' : ''));
-      chip.appendChild(el('i', 'sd'));
-      chip.appendChild(el('b', null, isGate ? (GATE_LABEL[s.label] || s.label) : s.label));
-      if (s.key === 'detect' && s.ts) chip.appendChild(el('span', 'ts', hms(s.ts)));
-      else if (s.dt != null && s.key !== 'opened') chip.appendChild(el('span', 'd', '+' + dec(s.dt) + ' s'));
-      if (s.note) chip.appendChild(el('span', 'note', s.note));
-      if (isGate) {
-        if (!gates) { gates = el('span', 'gate-group'); gates.appendChild(el('span', 'gl', inc.fuxa ? 'Validaciones' : '5 validaciones')); box.appendChild(gates); }
-        gates.appendChild(chip);
-      } else box.appendChild(chip);
+      if (s.key.indexOf('gate:') === 0) {
+        gt++;
+        if (s.state === 'done') gp++;
+        else if (s.state === 'fail') gfail = true;
+        else if (s.state === 'active') gactive = true;
+        if (s.ts) gts = s.ts;
+      } else byKey[s.key] = s;
     });
-    return box;
+    var gstate = gfail ? 'fail' : gactive ? 'active' : (gt && gp === gt) ? 'done' : gp ? 'active' : 'pending';
+    var rail = el('div', 'rail');
+    RAIL.forEach(function (m) {
+      var key = m[0], st, note = null, ts = null, dt = null;
+      if (key === 'gates') { st = gstate; ts = gts; note = gt ? gp + '/' + gt : null; }
+      else { var s = byKey[key] || { state: 'pending' }; st = s.state; ts = s.ts; dt = s.dt; note = s.note; }
+      var node = el('span', 'node ' + st);
+      node.appendChild(el('i', 'nd'));
+      node.appendChild(el('b', null, m[1]));
+      if (key === 'gates' && gt) node.appendChild(el('span', 'gc', gp + '/' + gt));
+      if (ts) node.title = m[1] + ' · ' + hms(ts) + (dt != null ? ' (+' + dec(dt) + ' s)' : '');
+      else if (note) node.title = note;
+      rail.appendChild(node);
+    });
+    return rail;
   }
 
   function buildDetail(inc, php) {
@@ -345,6 +358,7 @@
     if (live) stc.appendChild(el('i', 'pulse'));
     stc.appendChild(el('span', null, label));
     add(row, stc, chevron());
+    row.appendChild(buildRail(inc));     // flow stage, visible without opening the card
     card.appendChild(row);
 
     if (open) {
@@ -378,7 +392,6 @@
       props.title = 'Tiempos desde que el pipeline abre el incidente';
       body.appendChild(props);
 
-      if (live || inc.fuxa) body.appendChild(buildSteps(inc));
       body.appendChild(buildDetail(inc, php));
       card.appendChild(body);
     }

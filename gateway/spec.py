@@ -113,6 +113,7 @@ class Operation:
     json_schema: dict | None = None
     form_schema: dict | None = None
     owner_scoped: bool = False
+    high_risk: bool = False      # x-high-risk: always verify in the shadow (e.g. a process/script execution endpoint)
 
     @property
     def literal_count(self) -> int:
@@ -132,7 +133,7 @@ class Spec:
                 if not isinstance(op, dict):
                     continue
                 o = Operation(method=method.upper(), template=template, segments=split_template(template),
-                              owner_scoped=bool(op.get("x-owner-scoped")))
+                              owner_scoped=bool(op.get("x-owner-scoped")), high_risk=bool(op.get("x-high-risk")))
                 for p in list(common) + list(op.get("parameters") or []):
                     if isinstance(p, dict) and "name" in p and "in" in p:
                         o.params[(p["in"], p["name"])] = p
