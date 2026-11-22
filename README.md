@@ -13,17 +13,25 @@ team-25
 - Isidro Pasman ([@isidropasman](https://github.com/isidropasman))
 - Uriel Gandelman ([@UriGandel](https://github.com/UriGandel))
 
+## El problema
+
+El software del que depende la vida de la gente no se puede corregir a la velocidad a la que hoy se lo ataca.
+
+Atacar se volvió barato: un agente encuentra y explota una falla en horas. Corregirla sigue dependiendo de una persona, y lleva semanas. El agua, la energía y las historias clínicas corren sobre software que nadie alcanza a parchear a tiempo.
+
 ## Qué es
 
-Un sistema inmunológico para tu app. Immune es un proxy inverso que ejecuta cada request sospechoso primero en una copia aislada de la app, con datos sintéticos. Si ahí el ataque funciona, lo contiene con una regla y despliega un parche validado, sin intervención humana.
+Immune protege infraestructura crítica frente a vulnerabilidades zero-day. Es un proxy inverso que se pone delante de la aplicación: desvía cada request sospechoso a un clon de producción con datos sintéticos y, si el ataque funciona ahí, lo contiene con una regla y despliega un parche validado, sin intervención humana.
+
+No necesita conocer la falla de antemano. No mira cómo se ve el request: mira qué hace.
 
 ## Cómo funciona
 
-1. **Detecta.** El gateway compara cada parámetro con el esquema de la app y una gramática segura. Lo que se sale va a un clon, no a producción.
-2. **Confirma.** Cinco oráculos deterministas miran qué hizo el clon: consulta SQL, archivos, procesos, red y datos de otro dueño. El veredicto lo da la ejecución, no un puntaje. Un falso positivo cuesta latencia, nunca un cliente bloqueado.
-3. **Contiene.** Una regla acotada a la ruta y el parámetro, nunca a la IP. El atacante recibe la respuesta del clon y sigue ahí.
-4. **Cura.** Un LLM confinado propone un diff. No decide: el parche solo sale si pasa cinco validaciones mecánicas, y se despliega en blue/green con rollback.
-5. **Recuerda.** Al cerrar el incidente, prueba esa misma clase de falla en el resto de la app y parchea lo que encuentre.
+1. **Clasifica.** Cada request se valida contra el contrato OpenAPI de la aplicación y una gramática segura por parámetro. El clasificador es determinista: no hay un modelo de lenguaje en el camino del tráfico. Lo que se sale del contrato no se bloquea, se marca como sospechoso.
+2. **Desvía.** El request sospechoso se ejecuta en un clon de producción con datos sintéticos, nunca en producción. Ahí hay oráculos que miran qué hizo la aplicación: consultas SQL, archivos, procesos, red y datos de otro dueño. Si uno dispara, hay una prueba reproducible. Un falso positivo cuesta latencia, nunca un usuario bloqueado.
+3. **Contiene.** De esa prueba sale una regla acotada a la ruta y el parámetro, nunca a la IP, activa en menos de dos segundos. La escribe código, no un modelo, tiene vencimiento y se borra cuando el parche queda verificado.
+4. **Corrige.** Un agente confinado propone el parche. No decide: el parche solo sale si pasa cinco validaciones mecánicas, entre ellas frenar el exploit original y dejar pasar el tráfico legítimo grabado. Se despliega en canario, con rollback.
+5. **Recuerda.** Con la batería de ese mismo ataque, Immune sondea el resto de la API en un entorno aislado y parchea lo que encuentre de la misma clase.
 
 ## Resultados medidos
 
@@ -32,9 +40,16 @@ En nuestra app de prueba (7 fallas plantadas: inyección SQL, path traversal y a
 - 21 de 21 incidentes parchados, sin reintentos. Mediana desde el ataque confirmado: regla a los 1,9 s, parche en producción a los 24,9 s.
 - Con 3 ataques, uno por clase, quedaron parchadas las 7 fallas: 4 las encontró la auditoría propia.
 - Las validaciones rechazaron 15 de 15 parches defectuosos escritos a propósito y aceptaron los 7 correctos.
-- Sobre el código de Apache HTTP Server 2.4.49, el parche propuesto se comporta igual que el oficial en 21 de 21 casos. Es una falla pública: prueba el mecanismo, no un descubrimiento.
 
 Datos: `docs/demo/metricas-tiempo-a-parche.json`.
+
+Sobre software real:
+
+- **Grafana 8.3.0 (CVE-2021-43798).** Ciclo completo sobre el binario sin modificar: regla a los 0,6 s, parche en producción a los 54 s, medido en local. Ver `labs/grafana-cve-2021-43798/`.
+- **Apache HTTP Server 2.4.49.** Revisando el código, el parche propuesto se comporta igual que el oficial en 21 de 21 casos. Ver `docs/demo/anticipacion-apache-2.4.49.md`.
+- **FUXA v1.2.9.** Una interfaz de operación de una planta de tratamiento de agua, protegida por Immune. La demo usa evidencia sintética, marcada como tal. Ver `docs/fuxa.md`.
+
+Las fallas de Grafana y Apache son públicas: prueban el mecanismo, no un descubrimiento.
 
 ## Instalar y probar
 
@@ -55,9 +70,10 @@ cd /ruta/a/tu-app && immune init && immune up
 
 ## Límites
 
-- Lo que los oráculos no ven, el sistema no lo aprende: fallas de lógica de negocio y ataques de segundo orden quedan afuera.
-- Lo que el gateway no marca como sospechoso llega a producción.
-- Protege la capa HTTP. Los tiempos son de nuestra app de prueba, no de producción.
+- Lo que los oráculos no ven, el sistema no lo aprende: fallas de lógica de negocio, credenciales robadas y ataques de segundo orden quedan afuera.
+- Lo que el clasificador no marca como sospechoso llega a producción.
+- La auditoría propia cubre hoy tres clases: inyección SQL, path traversal y acceso a datos ajenos.
+- Protege la capa HTTP. Los tiempos son de nuestra app de prueba y de un laboratorio local, no de producción.
 
 ## Más
 
