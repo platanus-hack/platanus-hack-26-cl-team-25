@@ -66,8 +66,12 @@ def docker_cmd(container: str, image: str, name: str, label: str = "") -> list:
            "--cap-drop", "ALL", "--cap-add", "SYS_PTRACE", "--cap-add", "KILL"]
     if label:
         cmd += ["--label", label]
-    # no -qq: the "attached" message is how we know the tracer is in place
-    return cmd + [image] + [a for a in BASE_ARGS if a != "-qq"] + ["-p", "1"]
+    # Attach to EVERY thread in the shared PID namespace, not just PID 1: the app's JVM is a pre-existing
+    # worker thread, and the Runtime.exec -> execve we detect is issued from it, so `strace -f -p 1` misses it.
+    strace_cmd = " ".join(a for a in BASE_ARGS if a != "-qq")
+    sh = ('set --; for d in /proc/[0-9]*/task/[0-9]*; do t=${d##*/}; [ "$t" = "$$" ] && continue; '
+          'set -- "$@" -p "$t"; done; exec ' + strace_cmd + ' "$@"')
+    return cmd + [image, "sh", "-c", sh]
 
 
 class Tracer:

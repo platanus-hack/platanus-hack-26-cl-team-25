@@ -142,6 +142,10 @@
     if (inc.route && typeof rq.path === 'string') {
       if (!routeMatches(inc.route, rq.path)) return 0;
       if (inc.method && typeof rq.method === 'string' && inc.method !== rq.method) return 0;
+      /* route-level oracle with no code sink (authz/missing-auth on /httpds, or the proc/RCE oracle): there is
+         no stack to compare, so matching route+method IS the whole defect -- otherwise every extra hit
+         (e.g. a second param) lingers as a separate "Ataque confirmado" pending card. */
+      if (!inc.sink) return 1;
       /* same route and method: the sink's line moves when a patch for another incident edits the same file (a
          captive clone runs that later release), so the file is enough. Exact lines left these hits pending. */
       return oracleMatchesSink(o.data, inc.sink, true) ? 1 : 0;
