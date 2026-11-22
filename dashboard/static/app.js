@@ -122,7 +122,7 @@
     idor: ['Datos de otro usuario', 'Cambiando un id en la URL, un usuario leía datos que no eran suyos.']
   };
   function storyOf(inc, status) {
-    if (inc.fuxa) return inc.fuxa.synthetic ? 'Evidencia simulada.' : 'Violación observada por Inmune.';
+    if (inc.fuxa) return inc.fuxa.synthetic ? 'Evidencia simulada.' : 'Violación observada por Immune.';
     if (status === 'cured') return inc.verify && inc.verify.blocked ? 'Parchada y verificada en producción.' : 'Parchada.';
     if (status === 'dismissed') return 'Descartada: no se pudo reproducir.';
     if (status === 'contained') return 'El gateway cierra este punto con una regla mientras se valida el parche.';

@@ -18,7 +18,7 @@ function emit(type, context, evidence) {
     try {
         appendFileSync('/telemetry/events.jsonl', entry + '\n', { mode: 0o600 });
     } catch {
-        console.error('Inmune: structured telemetry unavailable');
+        console.error('Immune: structured telemetry unavailable');
     }
 }
 
