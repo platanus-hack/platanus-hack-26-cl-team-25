@@ -36,5 +36,7 @@ sleep 6
 touch "$LOG.done"
 wait $REC
 kill $LEGIT 2>/dev/null || true
+for _ in 1 2 3 4 5; do kill -0 $LEGIT 2>/dev/null || break; sleep 1; done
+kill -9 $LEGIT 2>/dev/null || true
 echo "recording in $OUT"
 ls -la "$OUT"

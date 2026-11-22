@@ -151,8 +151,10 @@ The human override for an automatic deploy (`cmd_rollback`). It asks the fleet w
 picks the release directory built just before it (`previous_release`, by mtime; `--to RELEASE` names one) and
 posts it to the fleet's `/deploy`: the same blue/green path as a patch, with health check, smoke request and
 watch window. When `autopatch` is `merge` it first rewrites it to `pr`, so the pipeline stops merging on its own
-(`--keep-autopatch` skips this). Active rules are not touched. The pipeline reads the production release from the
-fleet, so its next patch starts from the rolled-back release.
+(`--keep-autopatch` skips this). A verified patch lifts its rule, so after the deploy `rules_to_restore` walks the
+release chain of `<runtime>/pipeline/state.json` (`base_release -> release`) back from the target and re-posts the
+rule of every patched incident whose release is not on it: the defects the rollback brings back stay contained.
+The pipeline reads the production release from the fleet, so its next patch starts from the rolled-back release.
 
 ### immune init
 

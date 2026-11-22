@@ -74,8 +74,8 @@ Cómo leerlo:
 
 | Medición | Resultado |
 |---|---|
-| Tests que recolecta `pytest` en la raíz (los 12 `testpaths` de `pytest.ini`) | 916 |
-| `.venv/bin/pytest -q -m "not live"` | 909 pasan, 1 omitido (`skip`), 6 deseleccionados |
+| Tests que recolecta `pytest` en la raíz (los 12 `testpaths` de `pytest.ini`) | 917 |
+| `.venv/bin/pytest -q -m "not live"` | 910 pasan, 1 omitido (`skip`), 6 deseleccionados |
 | Los 6 tests `live` (llaman al modelo) | No se ejecutaron |
 | Suite propia de `examples/notas` | 33 tests |
 | `pyflakes` sobre el Python versionado | Sin avisos |

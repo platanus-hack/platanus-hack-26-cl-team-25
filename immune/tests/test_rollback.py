@@ -54,3 +54,18 @@ def test_rollback_refuses_an_unknown_release(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "http", lambda *a, **k: {"prod": {"release": "t0"}})
     with pytest.raises(cli.CliError):
         cli.cmd_rollback(_cfg(tmp_path), "nope", True)
+
+
+def test_rollback_restores_the_rules_of_the_fixes_it_removes(tmp_path):
+    import json
+    (tmp_path / "pipeline").mkdir()
+    rule = lambda n: {"id": "rule-%s" % n, "route": "/x", "scope": "all"}  # noqa: E731
+    incs = {"a": {"outcome": "patched", "base_release": "t0", "release": "r1", "rule": rule("a")},
+            "b": {"outcome": "patched", "base_release": "r1", "release": "r2", "rule": rule("b")},
+            "c": {"outcome": "patched", "base_release": "r2", "release": "r3", "rule": rule("c")},
+            "d": {"outcome": "rule_only", "rule": rule("d")}}
+    (tmp_path / "pipeline" / "state.json").write_text(json.dumps({"incidents": incs}))
+    cfg = _cfg(tmp_path)
+    assert [r["id"] for r in cli.rules_to_restore(cfg, "r1")] == ["rule-b", "rule-c"]
+    assert [r["id"] for r in cli.rules_to_restore(cfg, "r3")] == []
+    assert [r["id"] for r in cli.rules_to_restore(cfg, "t0")] == ["rule-a", "rule-b", "rule-c"]

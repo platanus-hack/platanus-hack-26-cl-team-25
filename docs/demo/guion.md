@@ -94,7 +94,7 @@ No lo proponemos. `immune init` deja `autopatch: pr`: el parche validado queda c
 persona; el merge automático hay que activarlo a mano. El demo usa `merge` para mostrar el ciclo completo. La
 regla de contención, que sí es automática, no cambia código: solo fuerza que ese punto se ejecute en el clon. Si
 un parche ya desplegado hay que sacarlo, `immune rollback` vuelve a la release anterior por el mismo camino
-blue/green y deja el autopatch en `pr`; además hay rollback automático si sube la tasa de 5xx en los 20 segundos
+blue/green, reactiva la regla de contención de cada defecto que ese parche cerraba y deja el autopatch en `pr`; además hay rollback automático si sube la tasa de 5xx en los 20 segundos
 posteriores al cambio.
 
 **"¿Cuánto les cuesta esto a los clientes legítimos?"**

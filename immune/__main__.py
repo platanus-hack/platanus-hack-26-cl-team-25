@@ -747,6 +747,27 @@ def previous_release(cfg: icfg.Config, current: str) -> str | None:
     return others[-1] if others else None
 
 
+def rules_to_restore(cfg: icfg.Config, target: str) -> list:
+    """Rules of the patched incidents whose fix is not in `target`: the release chain (base_release -> release in
+    <runtime>/pipeline/state.json) is walked back from `target`; an incident patched into a release outside that
+    chain loses its fix with the rollback. A verified patch lifts its rule, so without this the rollback would
+    reopen the defect with no containment."""
+    try:
+        with open(cfg.rt("pipeline", "state.json")) as f:
+            incs = (json.load(f).get("incidents") or {})
+    except (OSError, ValueError):
+        return []
+    parent = {i.get("release"): i.get("base_release") for i in incs.values()
+              if isinstance(i, dict) and i.get("release") and i.get("base_release")}
+    chain, r = set(), target
+    while r and r not in chain:
+        chain.add(r)
+        r = parent.get(r)
+    return [i["rule"] for i in incs.values()
+            if isinstance(i, dict) and i.get("outcome") == "patched" and isinstance(i.get("rule"), dict)
+            and i.get("release") and i["release"] not in chain]
+
+
 def cmd_rollback(cfg: icfg.Config, to: str | None, keep_autopatch: bool) -> int:
     """Human override: put an earlier release back in production through the same blue/green path, and stop the
     pipeline from merging on its own (autopatch merge -> pr) unless --keep-autopatch. Active rules stay."""
@@ -776,7 +797,17 @@ def cmd_rollback(cfg: icfg.Config, to: str | None, keep_autopatch: bool) -> int:
     if not res.get("ok"):
         say("rollback did not complete; production stays on %s" % res.get("release"))
         return 1
-    say("production on %s. Containment rules stay active; `immune status` lists them." % target)
+    restored = []
+    for rule in rules_to_restore(cfg, target):
+        try:
+            http("POST", "http://127.0.0.1:%d/_admin/rules" % cfg.ports["admin"], rule, tok, timeout=5)
+            restored.append(rule.get("id") or "?")
+        except (urllib.error.URLError, OSError) as e:
+            say("could not re-activate %s (%s): that defect is open again without containment"
+                % (rule.get("id"), getattr(e, "reason", e)))
+    if restored:
+        say("re-activated the containment rule(s) of the fixes this release lacks: %s" % ", ".join(restored))
+    say("production on %s. `immune status` lists the active rules." % target)
     return 0
 
 
