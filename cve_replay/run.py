@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from cve_replay import bus  # noqa: E402
 from cve_replay.incident import build_incident  # noqa: E402
-from cve_replay.oracle import FileEscapeOracle  # noqa: E402
+from cve_replay.oracle import FileEscapeOracle, ProcessSpawnOracle  # noqa: E402
 from cve_replay.targets import TARGETS  # noqa: E402
 
 RUNDIR = HERE / "runs"
@@ -158,8 +158,15 @@ def detect(t) -> dict:
     attack_trace = _lines_between(trace, t_poc, t_end)      # files the PoC request opened
 
     events = oracle.check(attack_trace)
-    print(f"[detect] oracle fired {len(events)} event(s): "
-          + ", ".join(e["detail"]["opened"] for e in events))
+    # process-spawn oracle: same windows, fires when a request makes the server exec a program
+    exec_oracle = ProcessSpawnOracle()
+    exec_oracle.prewarm(_lines_between(trace, t_legit, t_poc))
+    events += exec_oracle.check(attack_trace)
+
+    def _desc(e):
+        d = e.get("detail", {})
+        return d.get("opened") or d.get("spawned") or e.get("oracle", "?")
+    print(f"[detect] oracle fired {len(events)} event(s): " + ", ".join(_desc(e) for e in events))
     req = {"method": t.method, "path": t.poc_path, "status": st}
     inc = build_incident(t, req, events)
 

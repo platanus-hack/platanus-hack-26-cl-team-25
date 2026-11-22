@@ -66,3 +66,37 @@ def test_prompt_never_reveals_the_cve_or_project():
     prompt = core.render_prompt(inc, feedback=None, attempt=1, editable=["server/util.c"]).lower()
     for term in ("apache", "httpd", "cve", "41773", "2.4.49"):
         assert term not in prompt, f"prompt leaks {term!r}"
+
+
+# ---- process-spawn oracle (webshell / RCE class): runtime-agnostic, reads the syscall trace
+from cve_replay.oracle import ProcessSpawnOracle  # noqa: E402
+
+_STARTUP = (
+    '1 1.0 execve("/usr/local/bin/apache2-foreground", ["apache2-foreground"], 0x0) = 0\n'
+    '1 1.1 execve("/usr/bin/mkdir", ["mkdir", "-p", "/var/run/apache2"], 0x0) = 0\n'
+    '1 1.2 execve("/usr/sbin/apache2", ["apache2", "-DFOREGROUND"], 0x0) = 0\n'
+)
+_ATTACK = '7 9.0 execve("/usr/bin/id", ["id"], 0x0) = 0\n'
+
+
+def test_process_spawn_oracle_fires_on_request_time_exec():
+    o = ProcessSpawnOracle()
+    o.prewarm(_STARTUP)                                   # boot execs become the baseline
+    assert o.check(_STARTUP) == []                        # the baseline itself never fires
+    events = o.check(_ATTACK)
+    assert [e["detail"]["spawned"] for e in events] == ["/usr/bin/id"]
+    assert events[0]["oracle"] == "exec"
+
+
+def test_process_spawn_oracle_quiet_without_exec():
+    o = ProcessSpawnOracle()
+    o.prewarm(_STARTUP)
+    assert o.check('7 9.0 open("/var/www/html/uploads/shell.php", O_RDONLY) = 4') == []
+
+
+def test_exec_event_shapes_a_generic_incident():
+    t = TARGETS["apache-2.4.49"]
+    events = [{"oracle": "exec", "detail": {"spawned": "/usr/bin/id", "argv": '"id"'}}]
+    inc = build_incident(t, {"method": "GET", "path": "/uploads/shell.php", "status": 200}, events)
+    assert inc["evidence"]["events"][0]["oracle"] == "exec"
+    assert inc["evidence"]["events"][0]["detail"]["spawned"] == "/usr/bin/id"
