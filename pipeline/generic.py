@@ -45,8 +45,13 @@ SIDECAR_IMAGE = "immune-sidecar:1"
 PG_IMAGE = "postgres:16-alpine"
 
 
-def _docker(*args, check=True, timeout=120):
-    p = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+def _docker(*args, check=True, timeout=120, input_=None):
+    if input_ is not None:   # bytes: LF line endings reach the container on any host
+        b = subprocess.run(["docker", *args], capture_output=True, timeout=timeout, input=input_.encode("utf-8"))
+        p = subprocess.CompletedProcess(b.args, b.returncode, b.stdout.decode("utf-8", "replace"),
+                                        b.stderr.decode("utf-8", "replace"))
+    else:
+        p = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RunnerError("docker %s: %s" % (" ".join(args[:2]), (p.stderr or p.stdout).strip()[-600:]))
     return p
@@ -57,7 +62,7 @@ def _ip(name: str, net: str) -> str:
 
 
 class Triple:
-    """One ephemeral app + Postgres + observer for one release directory."""
+    """One ephemeral app + database (Postgres or MySQL, immune/dbkind.py) + observer for one release directory."""
 
     def __init__(self, runner: "JudgeRunner", release_dir: str):
         self.r = runner
@@ -83,24 +88,27 @@ class Triple:
         if not st.st_mode & 0o005:
             os.chmod(self.release_dir, (st.st_mode | 0o055) & 0o7777)
         _docker("network", "create", "--internal", *self.labels(), self.net)
-        pginit = os.path.join(proj.shadow_dir, "pginit")
+        kind = f.db
+        initdir = os.path.join(proj.shadow_dir, kind.init_dir)
+        tmpfs = []
+        for path, opts in kind.tmpfs().items():
+            tmpfs += ["--tmpfs", "%s:rw,%s" % (path, opts)]
+        dbenv = []
+        for k, v in kind.env(self.su_pw, self.app_pw).items():
+            dbenv += ["-e", "%s=%s" % (k, v)]
         _docker("run", "-d", "--name", self.db, "--network", self.net, *self.labels(), *self.common(),
-                "--user", "70:70", "--memory", "256m",
-                "--tmpfs", "/var/lib/postgresql/data:rw,uid=70,gid=70,mode=0700",
-                "--tmpfs", "/var/run/postgresql:rw,uid=70,gid=70", "--tmpfs", "/tmp:rw,mode=1777",
-                "-v", "%s:/docker-entrypoint-initdb.d:ro" % pginit,
-                "-e", "POSTGRES_PASSWORD=" + self.su_pw, "-e", "APP_DB_PASSWORD=" + self.app_pw,
-                PG_IMAGE, "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off")
-        from fleet.generic import pg_ready
-        if not pg_ready(self.db):
+                "--user", kind.user, "--memory", kind.clone_memory, *tmpfs,
+                "-v", "%s:/docker-entrypoint-initdb.d:ro" % initdir, *dbenv, kind.image, *kind.args)
+        from fleet.generic import db_ready
+        if not db_ready(kind, self.db, self.su_pw, 180):
             raise RunnerError("judge database did not start: %s" % _docker("logs", self.db, check=False).stderr[-400:])
         self.timing["db_s"] = round(time.time() - t0, 2)
-        env = self.r.app_env("postgres://app:%s@127.0.0.1:5432/clone" % self.app_pw, "127.0.0.1")
+        env = self.r.app_env(kind.url("app", self.app_pw, "127.0.0.1", "clone"), "127.0.0.1")
         args = []
         for k, v in env.items():
             args += ["-e", "%s=%s" % (k, v)]
         _docker("run", "-d", "--name", self.app, "--network", self.net, *self.labels(), *self.common(),
-                "--memory", "384m", "--tmpfs", "/tmp:rw,mode=1777", "-v", "%s:%s:ro" % (self.release_dir, f.workdir),
+                "--memory", "384m", "--tmpfs", "/tmp:rw,mode=1777", *self.source_mounts(),
                 *args, self.r.image, *f.command)
         cdir = os.path.join(proj.runtime_dir, "pipeline", "judge")
         os.makedirs(cdir, exist_ok=True)
@@ -144,6 +152,17 @@ class Triple:
             raise RunnerError("judge observer not ready after 90s")
         self.timing["up_s"] = round(time.time() - t0, 2)
         return self
+
+    def source_mounts(self) -> list:
+        """The patched release over the t0 image, one release path at a time: the image may hold more than the
+        release under workdir (vendored dependencies, built assets), which a single mount would hide."""
+        f = self.r.facts
+        out = []
+        for p in self.r.project.app.release_paths:
+            src = os.path.join(self.release_dir, p)
+            if os.path.exists(src):
+                out += ["-v", "%s:%s:ro" % (src, f.workdir.rstrip("/") + "/" + p.strip("/"))]
+        return out or ["-v", "%s:%s:ro" % (self.release_dir, f.workdir)]
 
     def down(self):
         _docker("rm", "-f", self.obs, self.app, self.db, check=False, timeout=60)
@@ -189,6 +208,20 @@ class Triple:
                 "trace": trace}
 
     def create_db(self, name: str):
+        kind = self.r.facts.db
+        if kind.name == "mysql":
+            tables = _docker("exec", "-e", "MYSQL_PWD=" + self.su_pw, self.db, "mariadb", "-uroot", "-N", "-e",
+                             "SELECT table_name FROM information_schema.tables WHERE table_schema='seed' "
+                             "AND table_type='BASE TABLE'").stdout.split()
+            stmts = ["SET SESSION foreign_key_checks=0", "SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'",
+                     "CREATE DATABASE `%s` CHARACTER SET utf8mb4" % name]
+            for t in tables:
+                stmts += ["CREATE TABLE `%s`.`%s` LIKE `seed`.`%s`" % (name, t, t),
+                          "INSERT INTO `%s`.`%s` SELECT * FROM `seed`.`%s`" % (name, t, t)]
+            stmts.append("GRANT ALL ON `%s`.* TO 'app'@'%%'" % name)
+            _docker("exec", "-i", "-e", "MYSQL_PWD=" + self.su_pw, self.db, "mariadb", "-uroot",
+                    input_=";\n".join(stmts) + ";\n")
+            return kind.url("app", self.app_pw, self.db, name)
         _docker("exec", self.db, "psql", "-q", "-U", "postgres", "-d", "postgres", "-c",
                 'CREATE DATABASE "%s" TEMPLATE seed OWNER app' % name)
         return "postgres://app:%s@%s:5432/%s" % (self.app_pw, self.db, name)
@@ -202,11 +235,26 @@ def _body_info(body: bytes) -> dict:
     return {"sha": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b""), "head": text[:300]}
 
 
-def _norm_body(body: bytes):
+def _norm_body(body: bytes, normalize=None):
+    """A replayed body as compared by the legit gate. `normalize` (legit.normalize of the project config):
+    regexes of per-session values (CSRF tokens, timestamps) replaced before comparing."""
+    if normalize:
+        text = (body or b"").decode("utf-8", "replace")
+        for rx in normalize:
+            try:
+                text = re.sub(rx, "<normalized>", text)
+            except re.error:
+                continue
+        body = text.encode("utf-8")
     try:
         return json.loads(body)
     except (ValueError, UnicodeDecodeError):
         return {"sha256": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b"")}
+
+
+def legit_normalize(project) -> list:
+    raw = ((getattr(project, "raw", None) or {}).get("legit") or {}).get("normalize") or []
+    return [str(x) for x in raw if isinstance(x, str)]
 
 
 def _short(v, n=400):
@@ -233,7 +281,7 @@ class JudgeRunner:
         from immune.config import substitute
         f = self.facts
         out = {k: substitute(str(v), {"db": url, "secret": "judge", "static": ""}) for k, v in f.env.items()}
-        out[f.url_env] = url
+        out.update(f.db_env_for(url))
         if f.bind_env:
             out[f.bind_env] = bind
         return out
@@ -346,7 +394,7 @@ class JudgeRunner:
         for rq in job.get("requests") or []:
             r = tr.send(rq)
             out.append({"name": rq.get("name"), "method": rq.get("method", "GET"), "path": rq.get("path"),
-                        "status": r["status"], "body": _norm_body(r["body"])})
+                        "status": r["status"], "body": _norm_body(r["body"], legit_normalize(self.project))})
         return {"results": out}
 
     def job_pytest(self, tr: Triple, job: dict) -> dict:
@@ -364,7 +412,7 @@ class JudgeRunner:
         try:
             p = subprocess.run(["docker", "run", "--rm", "--name", name, "--network", tr.net, *tr.labels(), *tr.common(),
                                 "--memory", "512m", "--tmpfs", "/tmp:rw,mode=1777", "-e", "HOME=/tmp",
-                                "-v", "%s:%s:ro" % (tr.release_dir, f.workdir), "-w", f.workdir, *args,
+                                *tr.source_mounts(), "-w", f.workdir, *args,
                                 "--entrypoint", "/bin/sh", self.image, "-c", cmd],
                                capture_output=True, text=True, timeout=float(job.get("timeout", 600)))
             out, code = (p.stdout or "") + (p.stderr or ""), p.returncode
@@ -397,13 +445,24 @@ IMPORT_RES = [re.compile(r"""\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)"""),
               re.compile(r"""^\s*import\s+\(?\s*"([^"]+)\"""", re.M),                # go
               re.compile(r"""^\s*#\s*include\s*[<"]([^>"]+)[>"]""", re.M),           # c/c++
               re.compile(r"""^\s*use\s+([A-Za-z0-9_:\\]+)""", re.M),                  # rust/php/perl
-              re.compile(r"""^\s*(?:require|require_relative|load)\s+['"]([^'"]+)['"]""", re.M)]  # ruby
+              re.compile(r"""^\s*(?:require|require_relative|load)\s+['"]([^'"]+)['"]""", re.M),  # ruby
+              # php: include/require with or without parentheses, constant prefixes (__DIR__ . "/x.php")
+              re.compile(r"""\b(?:include|include_once|require|require_once)\b\s*\(?\s*(?:[A-Za-z_\\]+\s*\.\s*)?['"]([^'"]+)['"]""")]
 DANGER_RE = re.compile(r"\b(child_process|execSync|execFile|spawnSync|spawn|fork|eval|Function|vm\.run\w*|"
                        r"process\.env|process\.binding|dlopen|os\.(?:Getenv|Setenv|LookupEnv|exec\w*|system)|exec\.Command|"
                        r"getenv|setenv|system|popen|Runtime\.getRuntime|ProcessBuilder|net\.(?:connect|createConnection|Socket)|"
-                       r"dgram|http\.request|https\.request|fetch|XMLHttpRequest|WebSocket|socket)\b")
+                       r"dgram|http\.request|https\.request|fetch|XMLHttpRequest|WebSocket|socket|"
+                       # php
+                       r"shell_exec|passthru|proc_open|pcntl_exec|assert|create_function|unserialize|curl_exec|"
+                       r"curl_multi_exec|fsockopen|pfsockopen|stream_socket_client|putenv|apache_setenv|"
+                       r"call_user_func|call_user_func_array|preg_replace_callback_array|extract|parse_str|"
+                       r"move_uploaded_file|\$_ENV|\$_SERVER\s*\[\s*['\"]PHP_AUTH)\b")
 AUTH_RE = re.compile(r"\b(401|403)\b|requireUser|requireAuth|authenticate|authorize|isAdmin|currentUser|"
-                     r"Unauthorized|Forbidden")
+                     r"Unauthorized|Forbidden|"
+                     # php / OpenEMR-style ACL and CSRF checks
+                     r"aclCheckCore|aclCheckForm|aclCheckIssue|aclCheckAcoSpec|zhAclCheck|AclMain|"
+                     r"verifyCsrfToken|checkCsrfInput|csrfNotVerified|authorizeUser|AccessDeniedHelper|"
+                     r"deny_and_exit|denyAndExit")
 STRING_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`""")
 COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/|#[^\n]*", re.S)
 

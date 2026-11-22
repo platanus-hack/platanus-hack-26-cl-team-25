@@ -27,6 +27,15 @@ Flat keys (all optional except ``app_port``)::
       admin_url: postgres://postgres:pw@pg:5432/postgres
       database: clone
       template: seed
+    mysql:                        # optional, instead of postgres (MySQL / MariaDB apps)
+      listen: 127.0.0.1:3306      # the app's database host/port point here
+      upstream: db:3306
+      admin_url: mysql://root:pw@db:3306/
+      database: clone             # rebuilt from `template` after L1 requests (only the tables written)
+      template: seed
+    tracer:                       # optional: in-process call traces of the clone's app, for evidence stacks
+      kind: php-xdebug            # (fleet runs the shadow-only -trace image of the release)
+      dir: /tmp/immune-trace      # where the app writes its traces (shared /tmp of the clone)
 
 A product config (contracts/product.md §2/§6, with ``app:``/``database:`` sections) is also accepted:
 ``app.port``, ``app.health``, ``app.allowed_file_roots``, ``app.command``, ``app.source_dirs`` map to the
@@ -51,6 +60,12 @@ class PgConfig:
 
 
 @dataclass
+class MysqlConfig(PgConfig):
+    listen_port: int = 3306
+    up_port: int = 3306
+
+
+@dataclass
 class Config:
     listen_host: str = "0.0.0.0"
     listen_port: int = 8000
@@ -72,6 +87,9 @@ class Config:
     public_paths: list = field(default_factory=list)
     markers_path: str | None = None
     postgres: PgConfig | None = None
+    mysql: MysqlConfig | None = None
+    tracer: dict | None = None
+    openapi: str | None = None          # the app's OpenAPI: literal route segments are not request inputs
     trace: bool = True
     clone_id: str = ""
     clone_key: str = ""
@@ -107,6 +125,7 @@ def from_dict(d: dict) -> Config:
         d = {k: v for k, v in flat.items() if v is not None}
     c = Config()
     pg = d.pop("postgres", None)
+    my = d.pop("mysql", None)
     for k, v in d.items():
         if hasattr(c, k) and v is not None:
             setattr(c, k, v)
@@ -118,6 +137,14 @@ def from_dict(d: dict) -> Config:
         p.database = pg.get("database", p.database)
         p.template = pg.get("template", p.template)
         c.postgres = p
+    if my:
+        m = MysqlConfig()
+        m.listen_host, m.listen_port = _hostport(my.get("listen", "127.0.0.1:3306"), 3306)
+        m.up_host, m.up_port = _hostport(my["upstream"], 3306)
+        m.admin_url = my.get("admin_url", "")
+        m.database = my.get("database", m.database)
+        m.template = my.get("template", m.template)
+        c.mysql = m
     c.app_port, c.listen_port, c.grace_ms = int(c.app_port), int(c.listen_port), int(c.grace_ms)
     return c
 

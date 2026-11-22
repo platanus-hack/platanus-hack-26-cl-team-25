@@ -4,14 +4,16 @@
 #                           make sure the images exist, link bin/immune into ~/.local/bin, then report
 #                           the optional prerequisites (`immune doctor --prereqs`)
 # Idempotent: every step is skipped when already done. Never uses sudo.
-# Env: IMMUNE_BIN_DIR (default ~/.local/bin), PYTHON (default python3), IMMUNE_SKIP_IMAGES=1,
-#      IMMUNE_WITH_ANTICIPATE=1 (also build immune-cbuild:1, only used by `immune anticipate`)
+# Env: IMMUNE_BIN_DIR (default ~/.local/bin), IMMUNE_VENV_DIR (default .venv), PYTHON (default python3),
+#      IMMUNE_SKIP_IMAGES=1,
+#      IMMUNE_WITH_ANTICIPATE=1 (also build immune-cbuild:1, only used by `immune anticipate`),
+#      IMMUNE_WITH_OPENEMR=1 (also pull the pinned OpenEMR and MariaDB images)
 set -eu
 
 HOME_DIR=$(cd "$(dirname "$0")" && pwd)
 BIN_DIR=${IMMUNE_BIN_DIR:-"$HOME/.local/bin"}
 PY=${PYTHON:-python3}
-VENV="$HOME_DIR/.venv"
+VENV=${IMMUNE_VENV_DIR:-"$HOME_DIR/.venv"}
 REQ="$HOME_DIR/deploy/requirements.txt"
 
 say() { printf 'install: %s\n' "$*"; }
@@ -87,6 +89,15 @@ else
       die "image $img is missing and deploy/$df does not exist (incomplete checkout)"
     fi
   done
+  if [ "${IMMUNE_WITH_OPENEMR:-}" = "1" ]; then
+    images=$(PYTHONPATH="$HOME_DIR" "$VENV/bin/python" -c 'from immune.doctor import openemr_images; print(*openemr_images())')
+    for img in $images; do
+      if ! docker image inspect "$img" >/dev/null 2>&1; then
+        docker pull "$img" || die "docker pull of $img failed"
+      fi
+      say "image $img ok"
+    done
+  fi
 fi
 
 # 5. the CLI
@@ -104,6 +115,10 @@ fi
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "note: $BIN_DIR is not on your PATH; add it (e.g. in ~/.profile)";; esac
 
 # 6. what the product needs at run time beyond this script (git, claude CLI, optional images): one place, immune/doctor.py
-PYTHONPATH="$HOME_DIR" "$VENV/bin/python" -m immune.doctor --prereqs \
+set -- --prereqs
+if [ "${IMMUNE_WITH_OPENEMR:-}" = "1" ]; then
+  set -- "$@" --openemr
+fi
+PYTHONPATH="$HOME_DIR" "$VENV/bin/python" -m immune.doctor "$@" \
   || die "a required prerequisite is missing (see above); fix it and re-run."
 say "done. Next: cd your-app && immune init   (built-in demo: immune up --project $HOME_DIR)"

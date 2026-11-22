@@ -3,7 +3,9 @@ import asyncio, json, os, socket, subprocess, sys, threading, time
 import httpx, uvicorn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PY = os.path.join(ROOT, ".venv", "bin", "python")
+_PY = os.path.join(ROOT, ".venv", "Scripts" if sys.platform == "win32" else "bin",
+                   "python.exe" if sys.platform == "win32" else "python")
+PY = _PY if os.path.exists(_PY) else sys.executable
 PYPATH = os.pathsep.join([ROOT, os.path.join(ROOT, "acceptance", "fixture")])
 
 

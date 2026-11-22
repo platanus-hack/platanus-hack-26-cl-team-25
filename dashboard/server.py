@@ -221,6 +221,7 @@ def create_app(store: str | None = None, token: str | None = None, *, lifespan=N
     bus = Bus(store if store is not None else os.environ.get("BUS_STORE") or None,
               token if token is not None else os.environ.get("BUS_TOKEN", ""))
     max_streams = _int(os.environ.get("DASH_MAX_STREAMS"), MAX_STREAMS) or MAX_STREAMS
+    subtitle = os.environ.get("DASHBOARD_SUBTITLE", "")
     no_store = {"Cache-Control": "no-store"}
 
     async def post_events(request: Request):
@@ -256,7 +257,10 @@ def create_app(store: str | None = None, token: str | None = None, *, lifespan=N
         raw = bus.authorized(request)
 
         def hello() -> str:
-            return "event: hello\ndata: %s\n\n" % json.dumps({"gen": bus.gen, "seq": bus.seq}, separators=(",", ":"))
+            data = {"gen": bus.gen, "seq": bus.seq}
+            if subtitle:
+                data["subtitle"] = subtitle
+            return "event: hello\ndata: %s\n\n" % json.dumps(data, separators=(",", ":"))
 
         async def gen():
             bus.streams += 1

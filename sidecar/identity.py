@@ -8,6 +8,8 @@ Sources, first that applies:
                                                     clone database (Postgres) before the request
    - ``identify(env, headers) -> (uid, role) | None``   requester of a request without x-imm-uid
    - ``load_markers(env) -> {marker: owner}``, ``public_paths() -> [prefix]``
+   - ``rewrite_request(env, uid, role, query, headers, body) -> (query, body)``   session-bound values of the
+                                                    client's request (CSRF tokens) replaced by the clone's
 2. ``identity_command`` (shell): env ``IMM_UID``, ``IMM_ROLE``; stdout lines ``Header: value``, or one bare
    line taken as a bearer token.
 3. nothing: the client's headers are left untouched.
@@ -51,6 +53,22 @@ class SyncPg:
         pass  # every statement autocommits
 
 
+class SyncMysql:
+    """``conn.execute(sql, params) -> rows`` facade over the async MySQL client (``?`` placeholders), for profile
+    hooks run in a thread. Every statement is reported to ``on_sql`` so the L1 reset rebuilds what it wrote."""
+
+    def __init__(self, conn, loop, on_sql=None):
+        self.conn, self.loop, self.on_sql = conn, loop, on_sql
+
+    def execute(self, sql, params=()):
+        if self.on_sql is not None:
+            self.on_sql(sql)
+        return asyncio.run_coroutine_threadsafe(self.conn.execute(sql, params), self.loop).result(10)
+
+    def commit(self):
+        pass  # every statement autocommits
+
+
 class Identity:
     def __init__(self, profile=None, command: str | None = None):
         self.profile = profile
@@ -80,6 +98,17 @@ class Identity:
                 hdrs[k.strip().lower()] = v.strip()
             return hdrs
         return {}
+
+    def rewrites(self) -> bool:
+        return self.profile is not None and hasattr(self.profile, "rewrite_request")
+
+    def rewrite_request(self, env, uid: int, role: str, query: str, headers: dict, body: bytes):
+        try:
+            q, b = self.profile.rewrite_request(env, uid, role, query, headers, body)
+            return str(q), bytes(b)
+        except Exception as e:  # noqa: BLE001 - the request is still judged as sent
+            log.warning("rewrite_request failed: %r", e)
+            return query, body
 
     def identify(self, env, headers: dict):
         p = self.profile

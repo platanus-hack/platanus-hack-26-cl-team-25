@@ -15,10 +15,13 @@ EXTS = {".js", ".mjs", ".cjs", ".ts", ".go", ".rs", ".java", ".kt", ".cs", ".py"
         ".cpp", ".cc", ".scala", ".ex", ".exs", ".sql"}
 SKIP_DIRS = {"node_modules", ".git", "vendor", "target", "dist", "build", "__pycache__", "bin", "obj"}
 MAX_FILE = 1 << 20
-MAX_FILES = 5000
+MAX_FILES = 30000
 
 _LIT = re.compile(r'"((?:[^"\\\n]|\\.)*)"|\'((?:[^\'\\\n]|\\.)*)\'|`((?:[^`\\]|\\.)*)`', re.S)
-_INTERP = re.compile(r"\$\{[^}]*\}|#\{[^}]*\}")
+# interpolations split a literal into its static parts: JS/Ruby ${..} #{..}, PHP "{$x}" / "$x->y" / "$x[k]",
+# and SQL placeholders (? / :name) that the driver replaces with a literal before the statement runs
+_INTERP = re.compile(r"\$\{[^}]*\}|#\{[^}]*\}|\{\$[^}]*\}|\$[A-Za-z_]\w*(?:->\w+|\[[^\]]*\])*|\?|"
+                     r"(?<![:\w]):[A-Za-z_]\w*")
 
 
 def _unescape(s: str) -> str:

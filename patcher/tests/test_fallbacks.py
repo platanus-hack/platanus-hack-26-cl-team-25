@@ -132,6 +132,13 @@ def test_unknown_route_gives_empty_diff(t0_release, monkeypatch):
 
 # ------------------------------------------------------------------ fake CLI (no LLM)
 def _fake_cli(tmp_path, body):
+    # POSIX executes shebang scripts; Windows needs a .cmd shim that calls Python.
+    script = tmp_path / "fake-claude-body.py"
+    script.write_text(textwrap.dedent(body))
+    if os.name == "nt":
+        shim = tmp_path / "fake-claude.cmd"
+        shim.write_text('@"%s" "%%~dp0fake-claude-body.py" %%*\r\n' % sys.executable)
+        return str(shim)
     p = tmp_path / "fake-claude"
     p.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
     p.chmod(p.stat().st_mode | stat.S_IEXEC)

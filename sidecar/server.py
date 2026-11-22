@@ -2,7 +2,7 @@
 
 Per request (contracts/README.md §5, under one lock):
  1. strip ``x-imm-*``;  2. identity hook (``x-imm-uid`` -> app credentials, ``ensure_user`` on the clone db);
- 3. (L2 pre-state: not available for Postgres, ``pre_state_b64`` is null);
+ 3. (L2 pre-state: not available for Postgres / MySQL, ``pre_state_b64`` is null);
  4. open the observation window, forward to the app on loopback, buffer the whole response, keep the
     window open ``grace_ms`` longer, close it;  5. oracles;  6. verdict;  7. signed evidence push before
     the response is released;  8. response with verdict headers;  9. L1: recreate the clone database.
@@ -21,7 +21,8 @@ from immune_contracts import wire
 
 from . import config as cfgmod
 from . import constants as constmod
-from . import http1, identity, observer, pgclient
+from . import http1, identity, mysqlclient, observer, pgclient, phptrace
+from .mysqlproxy import MysqlProxy, written_tables
 from .pgproxy import PgProxy
 from .tracer import Tracer
 
@@ -45,6 +46,18 @@ class Sidecar:
         self.lock = asyncio.Lock()
         self._http = None
         self.last_reset_ms = None
+        self.last_reset_tables = None
+        self._seed_tables = None     # mysql: {lower name: name} of the template database
+        self._admin_dirty = set()    # mysql: tables written by ensure_user (outside the proxy)
+        self.dialect = "mysql" if cfg.mysql else "sqlite"
+        self.calltrace = phptrace.CallTracer.from_config(cfg.tracer, cfg.source_dirs) if cfg.tracer else None
+        self.spec = None
+        if cfg.openapi:
+            try:
+                from gateway.spec import Spec
+                self.spec = Spec.load(cfg.openapi)
+            except Exception as e:  # noqa: BLE001 - without it every path segment counts as input
+                log.warning("openapi %s not loaded: %r", cfg.openapi, e)
         # judge mode (pipeline's ephemeral clones only, never fleet clones): every response also carries
         # x-imm-trace = base64(JSON {events, sql:[{sql, params}], failed, opens, marker_owners})
         self.judge = os.environ.get("SIDECAR_JUDGE") == "1"
@@ -57,6 +70,12 @@ class Sidecar:
             pg = cfg.postgres
             self.proxy = PgProxy(pg.listen_host, pg.listen_port, pg.up_host, pg.up_port, self.obs.on_statement,
                                  self.obs.on_bound if self.judge else None)
+            await self.proxy.start()
+        elif cfg.mysql:
+            await self.reset_db(full=True)
+            my = cfg.mysql
+            self.proxy = MysqlProxy(my.listen_host, my.listen_port, my.up_host, my.up_port, self.obs.on_statement,
+                                    self.obs.on_bound if self.judge else None)
             await self.proxy.start()
         self.obs.learning = True
         if self.tracer:
@@ -76,6 +95,11 @@ class Sidecar:
                                                  int(cfg.scan_executable_max_mb) << 20)
         if cfg.postgres:
             await self.reset_db()
+        elif cfg.mysql:
+            await self.reset_db(full=True)
+        if self.calltrace:
+            self.calltrace.root = root
+            await asyncio.to_thread(self.calltrace.clear)
         log.info("ready: tracer=%s pids=%s allowlist=%d files, %d net; %d markers; %d constants; reset %.1f ms",
                  cfg.mode if self.tracer else "off", self.tracer.pids if self.tracer else [],
                  len(self.obs.file_allow), len(self.obs.net_allow), len(self.markers),
@@ -106,7 +130,9 @@ class Sidecar:
             await asyncio.sleep(0.2)
         raise RuntimeError(f"app not healthy on {self.cfg.app_host}:{self.cfg.app_port}{self.cfg.health}: {last!r}")
 
-    async def reset_db(self):
+    async def reset_db(self, full: bool = False):
+        if self.cfg.mysql:
+            return await self._reset_mysql(full)
         pg = self.cfg.postgres
         t = time.perf_counter()
         if self.proxy:
@@ -140,9 +166,69 @@ class Sidecar:
                 self.proxy.ready.set()
         self.last_reset_ms = (time.perf_counter() - t) * 1000
 
+    async def _reset_mysql(self, full: bool):
+        """Rebuild the clone database from the template: every table written since the last reset (the proxy
+        and ensure_user report them), or all of them when a write target was unknown, and on start."""
+        my = self.cfg.mysql
+        t = time.perf_counter()
+        if self.proxy:
+            self.proxy.ready.clear()
+        try:
+            if self.proxy:
+                await self.proxy.terminate_all()
+                dirty, everything = self.proxy.take_dirty()
+            else:
+                dirty, everything = set(), True
+            dirty |= self._admin_dirty
+            self._admin_dirty = set()
+            full = full or everything
+            for attempt in range(2):
+                try:
+                    if self.admin is None:
+                        self.admin = await mysqlclient.MysqlConn.from_url(my.admin_url, database="")
+                    q = mysqlclient.quote_ident
+                    if self._seed_tables is None:
+                        rows = await self.admin.execute(
+                            "SELECT table_name FROM information_schema.tables WHERE table_schema = ? "
+                            "AND table_type = 'BASE TABLE'", (my.template,))
+                        self._seed_tables = {r[0].lower(): r[0] for r in rows}
+                    stmts = reset_statements(my.database, my.template, self._seed_tables, dirty, full, q)
+                    head = stmts[:2]
+                    for i in range(2, len(stmts), 400):   # bounded multi-statement batches
+                        await self.admin.query(";".join(head + stmts[i:i + 400]))
+                    self.last_reset_tables = sum(1 for x in stmts if x.startswith("INSERT"))
+                    break
+                except (ConnectionError, OSError, mysqlclient.MysqlError):
+                    self.admin = None
+                    if attempt:
+                        raise
+        finally:
+            if self.proxy:
+                self.proxy.ready.set()
+        self.last_reset_ms = (time.perf_counter() - t) * 1000
+
+    def _note_admin_write(self, sql: str):
+        tables = written_tables(sql)
+        if tables is None:
+            if self.proxy:
+                self.proxy.dirty_all = True
+            else:
+                self._admin_dirty |= set(self._seed_tables or {})
+        else:
+            self._admin_dirty |= {x.lower() for x in tables}
+
     async def ensure_user(self, uid, role):
         p = self.ident.profile
-        if p is None or not hasattr(p, "ensure_user") or not self.cfg.postgres:
+        if p is None or not hasattr(p, "ensure_user") or not (self.cfg.postgres or self.cfg.mysql):
+            return
+        if self.cfg.mysql:
+            my = self.cfg.mysql
+            conn = await mysqlclient.MysqlConn.from_url(my.admin_url, database=my.database)
+            facade = identity.SyncMysql(conn, asyncio.get_running_loop(), self._note_admin_write)
+            try:
+                await asyncio.to_thread(p.ensure_user, facade, uid, role)
+            finally:
+                await conn.close()
             return
         pg = self.cfg.postgres
         conn = await pgclient.PgConn.from_url(pg.admin_url, database=pg.database)
@@ -174,7 +260,9 @@ class Sidecar:
         if uid is not None:
             role = imm.get(wire.H_ROLE) or "user"
             await self.ensure_user(uid, role)
-            new = self.ident.headers_for(self.env, uid, role)
+            # in a thread: a profile may log in over HTTP, and the app's database traffic runs through the
+            # proxy on this event loop
+            new = await asyncio.to_thread(self.ident.headers_for, self.env, uid, role)
             if new:
                 names = {k.encode() for k in new}
                 app_headers = [(k, v) for k, v in app_headers if k not in names] + \
@@ -182,6 +270,11 @@ class Sidecar:
         else:
             uid, role = self.ident.identify(self.env, client_h)
 
+        if uid is not None and self.ident.rewrites():
+            # session-bound values of the client's request (e.g. CSRF tokens) -> the clone session's
+            qs, body = await asyncio.to_thread(self.ident.rewrite_request, self.env, uid, role,
+                                               query_string.decode("latin-1"), _hdict(app_headers), body)
+            query_string = qs.encode("latin-1")   # http1 recomputes content-length from the body
         target = raw_path + (b"?" + query_string if query_string else b"")
         t0 = time.perf_counter()
         if self.tracer and not self.tracer.alive():
@@ -191,6 +284,9 @@ class Sidecar:
             tracer_dead = True
         else:
             tracer_dead = False
+            if self.calltrace:
+                await asyncio.to_thread(self.calltrace.clear)
+                app_headers = phptrace.with_trigger(app_headers)
             self.obs.begin()
             try:
                 status, rheaders, rbody = await http1.request(cfg.app_host, cfg.app_port, method,
@@ -206,10 +302,16 @@ class Sidecar:
 
         query = query_string.decode("latin-1")
         rh = _hdict(rheaders)
-        events = observer.sql_events(rec.statements, observer.extract_inputs(path, query, client_h, body),
-                                     self.constants)
+        events = observer.sql_events(rec.statements, observer.extract_inputs(path, query, client_h, body, self.spec,
+                                                                              method.upper()),
+                                     self.constants, self.dialect)
         events += self.obs.system_events(rec)
         events += observer.owner_events(self.markers, self.public, path, rh, rbody, uid, role, bool(events))
+        if events and self.calltrace:
+            try:   # where in the app's code: never changes the verdict
+                await asyncio.to_thread(self.calltrace.attach, events)
+            except Exception as e:  # noqa: BLE001
+                log.warning("rid=%s call trace unavailable: %r", rid, e)
         if events:
             verdict = wire.VERDICT_ORACLE
         elif status in (401, 404) or status >= 500 or tracer_dead:
@@ -252,7 +354,7 @@ class Sidecar:
                 "marker_owners": owners, "uid": uid}
 
     async def finish(self, mode):
-        if mode == "L1" and self.cfg.postgres:
+        if mode == "L1" and (self.cfg.postgres or self.cfg.mysql):
             try:
                 await self.reset_db()
                 log.info("L1 reset %.1f ms", self.last_reset_ms)
@@ -271,6 +373,31 @@ class Sidecar:
             log.info("evidence rid=%s pushed: %s", evidence["rid"], r.status_code)
         except Exception as e:
             log.warning("evidence rid=%s push failed: %r", evidence["rid"], e)
+
+
+def reset_statements(database: str, template: str, seed_tables: dict, dirty, full: bool, q) -> list:
+    """SQL that rebuilds `database` from `template` (MySQL has no CREATE DATABASE ... TEMPLATE).
+    The first two statements are session settings repeated in every batch."""
+    cl, sd = q(database), q(template)
+    stmts = ["SET SESSION foreign_key_checks = 0", "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'"]
+    if full:
+        stmts += [f"DROP DATABASE IF EXISTS {cl}",
+                  f"CREATE DATABASE {cl} CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci"]
+        names = sorted(seed_tables.values())
+    else:
+        names = []
+        for name in sorted(dirty):
+            real = seed_tables.get(name.lower())
+            if real is None:
+                stmts.append(f"DROP TABLE IF EXISTS {cl}.{q(name)}")   # a table the app created
+            else:
+                names.append(real)
+    for name in names:
+        if not full:
+            stmts.append(f"DROP TABLE IF EXISTS {cl}.{q(name)}")
+        stmts += [f"CREATE TABLE {cl}.{q(name)} LIKE {sd}.{q(name)}",
+                  f"INSERT INTO {cl}.{q(name)} SELECT * FROM {sd}.{q(name)}"]
+    return stmts
 
 
 def _hdict(pairs) -> dict:

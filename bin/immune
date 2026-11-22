@@ -3,7 +3,7 @@
 set -euo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
-PY="$ROOT/.venv/bin/python"
-[ -x "$PY" ] || { echo "immune: $ROOT/.venv is missing; run $ROOT/install.sh first" >&2; exit 1; }
+PY="${IMMUNE_VENV_DIR:-$ROOT/.venv}/bin/python"
+[ -x "$PY" ] || { echo "immune: Python executable unavailable at $PY; run $ROOT/install.sh" >&2; exit 1; }
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 exec "$PY" -m immune "$@"

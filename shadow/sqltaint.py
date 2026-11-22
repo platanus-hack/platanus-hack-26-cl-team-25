@@ -13,7 +13,9 @@ never appear in it):
 4. otherwise                                                   -> fire.
 
 Statements that failed to prepare/execute never reach this module.
-We tokenise ourselves (SQLite lexical rules) because we need comments.
+We tokenise ourselves because we need comments: SQLite lexical rules by default, MySQL / MariaDB rules
+with ``dialect="mysql"`` (backslash escapes inside quotes, double-quoted strings, ``#`` and ``-- ``
+comments), so ``O'Brien`` escaped by the app stays one string literal.
 """
 from __future__ import annotations
 
@@ -34,16 +36,33 @@ _TOKEN = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 
+_TOKEN_MYSQL = re.compile(
+    r"""
+    (?P<ws>\s+)
+  | (?P<comment>--(?=[ \t\r\n]|$)[^\n]*|\#[^\n]*|/\*.*?(?:\*/|\Z))
+  | (?P<blob>[xX]'[^']*(?:'|\Z)|[bB]'[01]*(?:'|\Z))
+  | (?P<string>(?:_[A-Za-z0-9]+)?'(?:[^'\\]|\\.|'')*(?:'|\Z)|"(?:[^"\\]|\\.|"")*(?:"|\Z))
+  | (?P<qident>`(?:[^`]|``)*(?:`|\Z))
+  | (?P<number>0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)
+  | (?P<ident>[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_$\x80-\U0010ffff]*)
+  | (?P<var>\?|@@?[A-Za-z0-9_.$]+|:[A-Za-z0-9_]+)
+  | (?P<op>\|\||<<|>>|<=>|<=|>=|!=|<>|:=|->>|->|&&|.)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
 LITERALS = {"string", "number", "blob"}
+DIALECTS = {"sqlite": _TOKEN, "postgres": _TOKEN, "mysql": _TOKEN_MYSQL}
 
 
-def tokenize(sql: str) -> list[tuple[str, int, int]]:
+def tokenize(sql: str, dialect: str = "sqlite") -> list[tuple[str, int, int]]:
     """[(kind, start, end)] covering the whole text."""
+    rx = DIALECTS.get(dialect, _TOKEN)
     out = []
     pos = 0
     n = len(sql)
     while pos < n:
-        m = _TOKEN.match(sql, pos)
+        m = rx.match(sql, pos)
         if not m or m.end() == pos:
             out.append(("op", pos, pos + 1))
             pos += 1
@@ -101,7 +120,7 @@ class Constants:
         return hit
 
 
-def check(statements, inputs, constants) -> list[dict]:
+def check(statements, inputs, constants, dialect: str = "sqlite") -> list[dict]:
     """statements: [(sql, stack)], inputs: [(location, param, value)] -> sql events."""
     events = []
     seen = set()
@@ -112,7 +131,7 @@ def check(statements, inputs, constants) -> list[dict]:
                 hit = None
                 for i in _occurrences(sql, cand):
                     if tokens is None:
-                        tokens = tokenize(sql)
+                        tokens = tokenize(sql, dialect)
                     reason = classify(sql, tokens, i, i + len(cand), constants)
                     if reason:
                         hit = reason

@@ -16,6 +16,12 @@ Per clone n (all three on the stack's clone network, labelled immune.run=<RUN_ID
 The gateway's clone address is `immune-<name>-clone-<n>:8000` (the observer's port in the app's netns).
 Prod: the same image on the prod network as prod-<colour>, against the real database URL. Blue/green =
 a new image tag per release (built here on /deploy from the materialised release directory).
+
+database.kind mysql: the clone database is the pinned MariaDB (uid 999, tmpfs datadir, init script from
+<runtime>/data/shadow/myinit creating user `app` and the databases `seed` and `clone`), the observer runs the
+MySQL proxy on 127.0.0.1:3306 and rebuilds the tables of `clone` written by L1 requests from `seed`.
+shadow.tracer: clones run <image>-trace (the release image + the call tracer; prod never does) with a bigger
+/tmp for the per-request traces, and the observer turns them into evidence stacks.
 """
 from __future__ import annotations
 
@@ -28,6 +34,7 @@ import time
 
 from docker.errors import NotFound
 
+from immune import dbkind
 from immune import generic as ig
 
 from .manager import PROD_RESTART, Clone, Fleet, FleetError
@@ -74,40 +81,130 @@ def remove_networks(name: str) -> None:
 
 
 def pg_ready(container: str, timeout: float = 60.0) -> bool:
-    """TCP readiness (the entrypoint's init phase listens on the unix socket only)."""
-    end = time.time() + timeout
-    while time.time() < end:
-        p = _docker("exec", container, "pg_isready", "-q", "-h", "127.0.0.1", "-p", "5432", check=False, timeout=10)
-        if p.returncode == 0:
-            return True
-        st = _docker("inspect", "-f", "{{.State.Running}}", container, check=False).stdout.strip()
-        if st != "true":
-            return False
-        time.sleep(0.15)
-    return False
+    """TCP readiness of a Postgres container (the entrypoint's init phase listens on the unix socket only)."""
+    return dbkind.KINDS["postgres"].ready(container, "", timeout)
+
+
+def db_ready(kind: dbkind.DbKind, container: str, su_pw: str, timeout: float = 90.0) -> bool:
+    return kind.ready(container, su_pw, timeout)
+
+
+def _tmpfs_args(tmpfs: dict) -> list:
+    out = []
+    for path, opts in tmpfs.items():
+        out += ["--tmpfs", "%s:rw,%s" % (path, opts)]
+    return out
 
 
 def start_demo_db(cfg, f: ig.Facts, url: str, network: str) -> None:
-    """The demo's prod database: postgres on the prod network (alias proddb), then data.demo_postgres.seed_command
-    in the app image (t0) against it. Labelled with the project only (not the run): fleet /reset keeps it."""
-    from sidecar.pgclient import parse_url
-    p = parse_url(url)
+    """The demo's prod database on the prod network (alias proddb), then data.demo_<kind>.seed_command in the app
+    image (t0) against it. Labelled with the project only (not the run): fleet /reset keeps it."""
+    kind = f.db
+    p = kind.parse(url)
+    root_pw = ig.demo_root_password(cfg) or p["password"]
     name = ig.demo_db_name(cfg)
     _docker("rm", "-f", name, check=False)
+    env = []
+    for k, v in kind.demo_env(p["user"], p["password"], p["database"], root_pw).items():
+        env += ["-e", "%s=%s" % (k, v)]
     _docker("run", "-d", "--name", name, "--network", network, "--network-alias", "proddb",
             "--label", "immune.project=%s" % cfg.name, "--label", "immune.role=proddb",
-            "--user", "70:70", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "--tmpfs", "/var/lib/postgresql/data:rw,uid=70,gid=70,mode=0700", "--tmpfs", "/var/run/postgresql:rw,uid=70,gid=70",
-            "--tmpfs", "/tmp:rw,mode=1777", "-e", "POSTGRES_USER=%s" % p["user"], "-e", "POSTGRES_PASSWORD=%s" % p["password"],
-            "-e", "POSTGRES_DB=%s" % p["database"], ig.PG_IMAGE)
-    if not pg_ready(name):
+            "--user", kind.user, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            *_tmpfs_args(kind.tmpfs()), *env, kind.image, *(kind.args if kind.name == "mysql" else []))
+    if not db_ready(kind, name, root_pw, 120):
         raise FleetError("demo prod database did not start: %s" % _docker("logs", name, check=False).stderr[-600:])
     cmd = f.demo.get("seed_command")
     if cmd:
         cmd = cmd if isinstance(cmd, list) else ["sh", "-c", str(cmd)]
-        _docker("run", "--rm", "--network", network, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges", "--label", "immune.project=%s" % cfg.name,
-                "-e", "%s=%s" % (f.url_env, url), f.image("t0"), *[str(x) for x in cmd], timeout=300)
+        envs = dict(f.db_env_for(url), IMMUNE_DB_ROOT_PASSWORD=root_pw, IMMUNE_DB_URL=url)
+        eargs = []
+        for k, v in envs.items():
+            eargs += ["-e", "%s=%s" % (k, v)]
+        if f.demo.get("seed_privileged"):
+            # installers that write their own config files: writable root fs, the image's own user (root
+            # entrypoints drop privileges themselves), no added capabilities beyond docker's defaults
+            sandbox = ["--security-opt", "no-new-privileges"]
+        else:
+            sandbox = ["--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+        p = _docker("run", "--rm", "--network", network, *sandbox, "--label", "immune.project=%s" % cfg.name,
+                    *eargs, "--entrypoint", "", f.image("t0"), *[str(x) for x in cmd], timeout=1200, check=False)
+        if p.returncode != 0:
+            raise FleetError("demo seed failed: %s" % (p.stderr or p.stdout).strip()[-1500:])
+
+
+TRACE_DOCKERFILE = """FROM {image}
+USER root
+RUN apk add --no-cache {package} && rm -f {ini}/*xdebug*.ini && mkdir -p {dir} && chmod 0777 {dir}
+COPY zz-immune-xdebug.ini {ini}/zz-immune-xdebug.ini
+COPY immune-trace-prepend.php /immune-trace/prepend.php
+RUN chmod 0755 /immune-trace && chmod 0644 /immune-trace/prepend.php
+USER {user}
+"""
+
+TRACE_INI = """; Inmune: shadow clones only (this image never serves prod). One function trace per judged request (the
+; observer sets the XDEBUG_TRACE cookie on it; logins and warm-up are not traced), read and removed by the observer (sidecar/phptrace.py), which turns it into the evidence's file:line stack.
+zend_extension=xdebug.so
+xdebug.mode=trace
+xdebug.start_with_request=trigger
+xdebug.trigger_value=
+xdebug.trace_format=1
+xdebug.use_compression=0
+xdebug.output_dir={dir}
+xdebug.trace_output_name=trace.%u
+xdebug.var_display_max_data=4096
+xdebug.var_display_max_children=8
+xdebug.var_display_max_depth=1
+xdebug.log_level=0
+opcache.jit=off
+auto_prepend_file=/immune-trace/prepend.php
+"""
+
+# Keeps the per-request trace small: calls into excluded trees (e.g. vendor/: template engines, frameworks) are
+# not recorded; the app's own calls, including its calls into the database layer, are.
+TRACE_PREPEND = """<?php
+if (function_exists('xdebug_set_filter')) {{
+    xdebug_set_filter(XDEBUG_FILTER_TRACING, XDEBUG_PATH_EXCLUDE, {paths});
+}}
+"""
+
+
+def trace_excludes(f: ig.Facts) -> list:
+    """shadow.tracer.exclude fragments as absolute path prefixes inside the image (relative to app.workdir)."""
+    out = []
+    for x in (f.tracer or {}).get("exclude") or ["/vendor/"]:
+        x = str(x)
+        out.append(x if x.startswith(f.workdir.rstrip("/") + "/") else f.workdir.rstrip("/") + "/" + x.strip("/") + "/")
+    return out
+
+
+def build_trace_image(cfg, f: ig.Facts, release: str) -> float:
+    """<image>-trace: the release image + Xdebug in trace mode, for shadow clones only. -> seconds."""
+    t = time.time()
+    base = f.image(release)
+    probe = _docker("run", "--rm", "--entrypoint", "sh", "--user", "0", base, "-c",
+                    "v=$(php -r 'echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;'); echo $v; "
+                    "php --ini | sed -n 's/^Scan for additional .ini files in: *//p' | tr -d '\042'; true",
+                    check=False, timeout=120)
+    lines = probe.stdout.split()
+    if probe.returncode != 0 or len(lines) < 2:
+        raise FleetError("shadow.tracer: %s has no PHP CLI (%s)" % (base, (probe.stderr or "")[-200:]))
+    user = _docker("image", "inspect", "-f", "{{.Config.User}}", base, check=False).stdout.strip() or "root"
+    trace_dir = (f.tracer or {}).get("dir") or "/tmp/immune-trace"
+    # the image keeps /tmp on a tmpfs at run time: the directory is re-created by the app's start script, the
+    # one baked here only covers images whose /tmp is not replaced
+    dockerfile = TRACE_DOCKERFILE.format(image=base, package="php%s-pecl-xdebug" % lines[0], dir=trace_dir,
+                                         ini=lines[1], user=user)
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="immune-trace-") as ctx:
+        with open(os.path.join(ctx, "Dockerfile"), "w", newline="\n") as fh:
+            fh.write(dockerfile)
+        with open(os.path.join(ctx, "zz-immune-xdebug.ini"), "w", newline="\n") as fh:
+            fh.write(TRACE_INI.format(dir=trace_dir))
+        with open(os.path.join(ctx, "immune-trace-prepend.php"), "w", newline="\n") as fh:
+            fh.write(TRACE_PREPEND.format(paths=json.dumps(trace_excludes(f))))
+        _docker("build", "-q", "-t", f.trace_image(release), "--label", "immune.project=%s" % cfg.name,
+                "--label", "immune.release=%s" % release, "--label", "immune.trace=1", ctx, timeout=900)
+    return time.time() - t
 
 
 # ---------------------------------------------------------------------------- fleet
@@ -148,6 +245,9 @@ class GenericFleet(Fleet):
             secs = build_image(self.project, self.f, self._release_dir(release), release)
             log.info("built %s in %.1fs", tag, secs)
             self.timings["build_s"] = round(secs, 1)
+        if self.f.tracer and not image_exists(self.f.trace_image(release)):
+            secs = build_trace_image(self.project, self.f, release)
+            log.info("built %s in %.1fs", self.f.trace_image(release), secs)
 
     @property
     def timings(self):
@@ -158,7 +258,7 @@ class GenericFleet(Fleet):
     def app_env(self, url: str, bind: str, secret: str) -> dict:
         from immune.config import substitute
         out = {k: substitute(str(v), {"db": url, "secret": secret, "static": ""}) for k, v in self.f.env.items()}
-        out[self.f.url_env] = url
+        out.update(self.f.db_env_for(url))
         if self.f.bind_env:
             out[self.f.bind_env] = bind
         return out
@@ -184,27 +284,32 @@ class GenericFleet(Fleet):
         t0 = time.time()
         self.ensure_image(clone.release)
         shadow = os.path.join(self.cfg.runtime_dir, "data", "shadow")
-        pginit = os.path.join(shadow, "pginit")
-        if not os.path.isfile(os.path.join(pginit, "01-seed.sh")):
-            raise FleetError("no shadow seed at %s (immune up builds it)" % pginit)
+        kind = self.f.db
+        initdir = os.path.join(shadow, kind.init_dir)
+        if not os.path.isfile(os.path.join(initdir, "01-seed.sh")):
+            raise FleetError("no shadow seed at %s (immune up builds it)" % initdir)
         su_pw, app_pw = secrets.token_hex(12), secrets.token_hex(12)
         db = clone.name + "-db"
-        self._run(db, ig.PG_IMAGE, PG_ARGS, role="clone-db", release=clone.release, user="70:70",
-                  env={"POSTGRES_PASSWORD": su_pw, "APP_DB_PASSWORD": app_pw}, network=self.cfg.clonenet,
-                  binds=[f"{pginit}:/docker-entrypoint-initdb.d:ro"], mem="256m",
-                  tmpfs={"/var/lib/postgresql/data": "uid=70,gid=70,mode=0700", "/var/run/postgresql": "uid=70,gid=70",
-                         "/tmp": "size=32m,mode=1777"})
-        if not pg_ready(db):
+        self._run(db, kind.image, kind.args, role="clone-db", release=clone.release, user=kind.user,
+                  env=kind.env(su_pw, app_pw), network=self.cfg.clonenet,
+                  binds=[f"{initdir}:/docker-entrypoint-initdb.d:ro"], mem=kind.clone_memory,
+                  tmpfs=kind.tmpfs())
+        if not db_ready(kind, db, su_pw, 180):
             raise FleetError("clone database %s did not start" % db)
         t_db = time.time()
-        url = "postgres://app:%s@127.0.0.1:5432/clone" % app_pw
-        app = self._run(clone.name, self.f.image(clone.release), self.f.command or None, role="clone",
+        url = kind.url("app", app_pw, "127.0.0.1", "clone")
+        traced = bool(self.f.tracer)
+        app = self._run(clone.name, self.f.trace_image(clone.release) if traced else self.f.image(clone.release),
+                        self.f.command or None, role="clone",
                         release=clone.release, env=self.app_env(url, "127.0.0.1", self.cfg.shadow_secret),
-                        network=self.cfg.clonenet, mem="384m")
+                        network=self.cfg.clonenet, mem="1g" if traced else "384m",
+                        tmpfs={"/tmp": "size=384m,mode=1777"} if traced else None)
         cfgdir = os.path.join(self.cfg.runtime_dir, "stack", "clones")
         os.makedirs(cfgdir, exist_ok=True)
         cpath = os.path.join(cfgdir, clone.name + ".json")
         sc = sidecar_config(self.f, db, su_pw, profile="/profile/" + self.f.profile_file() if self.f.profile_module else None)
+        if traced:
+            sc["tracer"] = dict(self.f.tracer)
         fd = os.open(cpath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(sc, fh)
@@ -335,9 +440,9 @@ class GenericFleet(Fleet):
 def sidecar_config(f: ig.Facts, db: str, su_pw: str, profile: str | None, app_port: int | None = None) -> dict:
     cfg = {"listen_port": 8000, "app_port": app_port or f.port, "health": f.health,
            "allowed_file_roots": f.allowed_file_roots, "source_dirs": f.source_dirs, "warmup_paths": f.warmup_paths,
-           "postgres": {"listen": "127.0.0.1:5432", "upstream": "%s:5432" % db,
-                        "admin_url": "postgres://postgres:%s@%s:5432/postgres" % (su_pw, db),
-                        "database": "clone", "template": "seed"}}
+           **f.db.sidecar(db, su_pw)}
+    if f.openapi_in_profile:
+        cfg["openapi"] = "/profile/" + f.openapi_in_profile
     if profile:
         cfg["profile"] = profile
     return cfg
