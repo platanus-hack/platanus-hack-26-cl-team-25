@@ -300,3 +300,13 @@ def test_recorded_requests_exclude_what_the_aftercheck_flagged(tmp_path):
     rec.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     v = Validator(_Cfg(c, str(rec)), runner=_Runner(lambda r, j: pytest.fail("not used")))
     assert [(r["query"], r.get("uid")) for r in v.recorded_requests()] == [("q=ok", 3), ("q=bad", 4)]
+
+
+def test_audit_block(tmp_path):
+    c = icfg.load(project(tmp_path))
+    assert (c.audit.enabled, c.audit.max_jobs, c.audit.max_seconds) == (True, 40, 120)   # python-asgi default
+    c = icfg.load(project(tmp_path, MIN + "audit: {enabled: false, max_jobs: 5, max_seconds: 30}\n"))
+    assert (c.audit.enabled, c.audit.max_jobs, c.audit.max_seconds) == (False, 5, 30)
+    msg = errors(tmp_path, MIN + "audit: {enabled: maybe, max_jobs: -1}\n")
+    assert "audit.enabled" in msg and "audit.max_jobs" in msg
+    assert icfg.load(ROOT).audit.enabled is True

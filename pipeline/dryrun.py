@@ -68,6 +68,8 @@ def run(fixtures: list, workdir: str | None = None, env: dict | None = None, tim
     repo = LocalRepo(os.path.join(rt, "repo"), cfg.run_id, cfg.release_dir("t0"))
     pipe = Pipeline(cfg, state, pub, GatewayAdmin(cfg.gateway_admin_url, cfg.admin_token),
                     Fleet(cfg.fleet_url, cfg.admin_token), repo)
+    if not (env or {}).get("DRYRUN_AUDIT"):
+        pipe.audit_settings = lambda: (False, 0, 0)   # one incident's flow; the class self-audit is tested apart
     follower = Follower(cfg.bus_url, lambda: state.data["last_seq"], pipe.on_event, pipe.on_reset)
     follower.start()
     t0 = time.time()

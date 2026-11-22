@@ -2,6 +2,7 @@
 the generated legit scenarios are deterministic).
 
     python -m immune.doctor [--project DIR] [--json] [--only 1,2]
+    python -m immune.doctor --prereqs [--json]     host prerequisites only (no project needed; install.sh runs it)
     from immune import doctor; checks = doctor.run(project)
 
 Each check -> {"id", "name", "ok", "reason" (one line), "owner" (the init step that owns the failing
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -358,6 +360,66 @@ def run(project: str | None = None, only: list[int] | None = None) -> list[dict]
     return out
 
 
+# ------------------------------------------------------------------------------------- prerequisites
+def _tool(argv: list[str]) -> tuple[bool, str]:
+    """(found and runs, first line of its output or the reason)."""
+    exe = argv[0] if os.path.isabs(argv[0]) else shutil.which(argv[0])
+    if not exe:
+        return False, "not found on PATH"
+    try:
+        p = subprocess.run([exe] + argv[1:], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    line = ((p.stdout or p.stderr or "").strip().splitlines() or [""])[0]
+    return p.returncode == 0, line[:120] if p.returncode == 0 else (line[:160] or "exit %d" % p.returncode)
+
+
+def _claude_bin() -> str:
+    try:
+        from patcher.claude_cli import claude_bin
+        return claude_bin()
+    except Exception:  # noqa: BLE001
+        return os.environ.get("CLAUDE_BIN") or "claude"
+
+
+def prereqs() -> list[dict]:
+    """What the product needs on this host, beyond a project. required=False rows only limit a feature.
+    Each row: {"name", "ok", "required", "reason", "fix" (what to do, when not ok), "needed_for"}."""
+    out = []
+
+    def add(name, ok, required, reason, needed_for, fix):
+        out.append({"name": name, "ok": bool(ok), "required": required, "reason": reason, "needed_for": needed_for,
+                    "fix": "" if ok else fix})
+
+    ok, why = _tool(["docker", "info", "--format", "server {{.ServerVersion}}"])
+    add("docker", ok, True, why, "everything", "install Docker Engine, start the daemon and make it usable without sudo "
+        "(docker group)")
+    docker_ok = ok
+    ok, why = _tool(["docker", "compose", "version", "--short"]) if docker_ok else (False, "docker not usable")
+    add("docker compose", ok, True, why, "immune up", "install the Compose plugin (docker-compose-plugin / docker-compose-v2)")
+    for img, required, needed_for, fix in (
+            (docker.IMAGE, True, "immune up, init, doctor", "run ./install.sh in the immune checkout"),
+            ("immune-sidecar:1", False, "apps with app.runtime: generic", "run ./install.sh in the immune checkout"),
+            ("immune-cbuild:1", False, "immune anticipate", "IMMUNE_WITH_ANTICIPATE=1 ./install.sh")):
+        ok, why = _tool(["docker", "image", "inspect", img, "--format", "present"]) if docker_ok else (False, "docker not usable")
+        add("image " + img, ok, required, why if ok else "not built", needed_for, fix)
+    ok, why = _tool(["git", "--version"])
+    add("git", ok, True, why, "building and applying patches", "install git")
+    ok, why = _tool([_claude_bin(), "--version"])
+    add("claude CLI", ok, False, why, "LLM steps of immune init, automatic patches",
+        "install Claude Code (https://claude.com/claude-code) and log in once with `claude`, or set CLAUDE_BIN; "
+        "without it: `immune init --no-llm`, and incidents stop at the blocking rule")
+    ok, why = _tool(["gh", "--version"])
+    add("gh CLI", ok, False, why, "repo.target: github (pull requests)", "install GitHub CLI and run `gh auth login`")
+    return out
+
+
+def format_prereq(r: dict) -> str:
+    tag = "ok" if r["ok"] else ("FAIL" if r["required"] else "warn")
+    tail = r["reason"] if r["ok"] else "%s; needed for: %s. Fix: %s" % (r["reason"], r["needed_for"], r["fix"])
+    return "  [%-4s] %-22s %s" % (tag, r["name"], tail)
+
+
 def format_line(c: dict) -> str:
     tag = {"pass": "ok", "fail": "FAIL", "warn": "warn", "skip": "skip"}.get(c["status"], c["status"])
     return "  [%-4s] %d %-30s %s" % (tag, c["id"], c["name"], c["reason"])
@@ -368,7 +430,21 @@ def main(argv=None) -> int:
     ap.add_argument("--project", default=None)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--only", default="", help="comma-separated check numbers")
+    ap.add_argument("--prereqs", action="store_true", help="check the host prerequisites only (no project needed)")
     a = ap.parse_args(argv)
+    if a.prereqs:
+        rows = prereqs()
+        ok = all(r["ok"] for r in rows if r["required"])
+        if a.json:
+            print(json.dumps({"ok": ok, "prereqs": rows}, indent=1))
+        else:
+            for r in rows:
+                print(format_prereq(r))
+            missing = [r["name"] for r in rows if not r["ok"] and r["required"]]
+            optional = [r["name"] for r in rows if not r["ok"] and not r["required"]]
+            print("prerequisites: %s%s" % ("ok" if ok else "MISSING " + ", ".join(missing),
+                                           ("; optional not available: " + ", ".join(optional)) if optional else ""))
+        return 0 if ok else 1
     only = [int(x) for x in a.only.split(",") if x.strip()] or None
     checks = run(os.path.abspath(a.project) if a.project else None, only)
     ok = all(c["ok"] for c in checks)

@@ -34,16 +34,22 @@ En nuestra app de prueba (7 fallas plantadas: inyección SQL, path traversal y a
 
 Datos: `docs/demo/metricas-tiempo-a-parche.json`.
 
-## Probarlo
+## Instalar y probar
 
-Requiere Docker y Python 3.12.
+Requiere Linux con Docker Engine utilizable sin sudo, el plugin de Docker Compose, git y Python 3.12 o superior con el módulo venv.
 
 ```bash
-./install.sh                           # prepara el entorno y las imágenes
-bin/immune reset                       # levanta el demo con la app de prueba
-bin/immune init --project DIR --yes    # adapta Immune a tu app (FastAPI + SQLite)
-bin/immune up --project DIR
+git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25.git immune && cd immune
+./install.sh                 # revisa requisitos, crea .venv, construye las imágenes y enlaza ~/.local/bin/immune
+immune doctor --prereqs      # qué tiene esta máquina y qué es opcional
+cd /ruta/a/tu-app && immune init && immune up
 ```
+
+`install.sh` no usa sudo y se puede volver a correr. Opcionales, todos informados por `immune doctor --prereqs`:
+
+- **Claude Code CLI** (`claude`, con sesión iniciada): los pasos con modelo de `immune init` y los parches automáticos. Sin él, `immune init --no-llm`: los ataques se detectan y se contienen con una regla, pero no se parchean.
+- **GitHub CLI** (`gh`, con sesión iniciada): solo para `repo.target: github`.
+- **`immune-cbuild:1`**: solo para `immune anticipate` (`IMMUNE_WITH_ANTICIPATE=1 ./install.sh`).
 
 ## Límites
 

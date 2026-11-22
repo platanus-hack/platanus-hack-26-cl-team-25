@@ -64,8 +64,10 @@ class Validator:
         return res
 
     # ------------------------------------------------------------ reproduction (before any patch)
-    def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None) -> dict:
-        """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}"""
+    def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None,
+                  corpus: list | None = None) -> dict:
+        """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}
+        `corpus`: [(value, request)] from the class corpus (pipeline/corpus.py), counted like variants."""
         manifest = None
         try:
             manifest = self.manifest(base_dir)
@@ -77,6 +79,12 @@ class Validator:
             nv = pocmod.normalise_variant(v, base)
             if nv:
                 variants.append(("p%d:%s" % (i, (nv.get("query") or nv["path"])[:40]), nv))
+        have = {json.dumps(r, sort_keys=True) for _n, r in variants} | {json.dumps(base, sort_keys=True)}
+        for val, r in corpus or []:
+            k = json.dumps(r, sort_keys=True)
+            if k not in have:
+                have.add(k)
+                variants.append(("c:%s" % str(val)[:40], r))
         seqs = [{"name": "poc", "requests": poc["requests"], "repeat": 3}]
         seqs += [{"name": "v:" + n, "requests": poc["requests"][:-1] + [r]} for n, r in variants]
         res = self.run(base_dir, {"kind": "harness", "state_b64": poc.get("state_b64"), "sequences": seqs})
@@ -150,12 +158,20 @@ class Validator:
     def recorded_requests(self, limit: int = 200) -> list:
         """Clean GET requests the gateway forwarded to prod with status 200: the most recent per path+query."""
         path = self.cfg.record_path
-        try:
-            with open(path, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                f.seek(max(0, f.tell() - 8 * 1024 * 1024))
-                lines = f.read().decode("utf-8", "replace").splitlines()
-        except OSError:
+        want, lines = 8 * 1024 * 1024, []
+        for p_ in (path, path + ".1"):       # the gateway rotates the recording; the previous file is older
+            if want <= 0:
+                break
+            try:
+                with open(p_, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - want))
+                    lines = f.read().decode("utf-8", "replace").splitlines() + lines
+                    want -= size
+            except OSError:
+                continue
+        if not lines:
             return []
         recs = []
         for line in lines:

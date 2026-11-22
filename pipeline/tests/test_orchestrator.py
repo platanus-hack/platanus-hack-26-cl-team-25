@@ -25,7 +25,7 @@ class ScriptedValidator:
         self.reproducible, self.plan, self.calls, self.cache = reproducible, list(plan or []), [], {}
         self.diffs = []
 
-    def reproduce(self, inc, p, base_dir, extra=None):
+    def reproduce(self, inc, p, base_dir, extra=None, corpus=None):
         return {"runs": 3 if self.reproducible else 1, "of": 3, "reproducible": self.reproducible, "counted": [],
                 "ignored": [], "sink_match": True, "statuses": [200] * 3}
 
@@ -74,12 +74,15 @@ def env(tmp_path, monkeypatch):
     fl.stop()
 
 
-def make(env, validator=None, patcher=stub_patcher):
+def make(env, validator=None, patcher=stub_patcher, audit=False):
     cfg = env["cfg"]
     st = State(os.path.join(cfg.state_dir, "state.json"))
-    return Pipeline(cfg, st, Publisher(cfg.bus_url, cfg.bus_token, cfg.run_id), GatewayAdmin(cfg.gateway_admin_url, "at"),
-                    Fleet(cfg.fleet_url, "at"), LocalRepo(os.path.join(env["rt"], "repo"), "t", cfg.release_dir("t0")),
-                    validator=validator or ScriptedValidator(), patcher=patcher)
+    p = Pipeline(cfg, st, Publisher(cfg.bus_url, cfg.bus_token, cfg.run_id), GatewayAdmin(cfg.gateway_admin_url, "at"),
+                 Fleet(cfg.fleet_url, "at"), LocalRepo(os.path.join(env["rt"], "repo"), "t", cfg.release_dir("t0")),
+                 validator=validator or ScriptedValidator(), patcher=patcher)
+    if not audit:   # the class self-audit has its own tests (test_audit.py)
+        p.audit_settings = lambda: (False, 40, 120)
+    return p
 
 
 def seq(env, iid):
@@ -254,3 +257,147 @@ def test_autopatch_off_keeps_only_the_rule(env, events, tmp_path):
     assert (inc["outcome"], inc["outcome_detail"]) == ("rule_only", "autopatch_off")
     s = seq(env, iid)
     assert "rule.active" in s and "patch.attempt" not in s and stub_patcher.calls == []
+
+
+# ---------------------------------------------------------------- things that fail around the pipeline
+class FlakyFleet:
+    """Stands in for clients.Fleet's transport: scripted answers for POST /deploy and GET /state."""
+
+    def __init__(self, deploys, states):
+        self.deploys, self.states, self.calls = list(deploys), list(states), []
+
+    def install(self, fleet):
+        from pipeline.clients import ServiceError
+
+        class R:
+            def __init__(self, code, body):
+                self.status_code, self._b, self.text = code, body, str(body)
+
+            def json(self):
+                return self._b
+
+        def req(method, path, timeout=None, **kw):
+            self.calls.append((method, path))
+            script = self.deploys if path == "/deploy" else self.states
+            item = script.pop(0) if len(script) > 1 else script[0]
+            if isinstance(item, Exception):
+                raise item
+            return R(*item)
+        fleet._req = req
+        fleet.RESTART_WAIT_S = 2.0
+        return ServiceError
+
+
+def test_deploy_survives_a_fleet_restart(env):
+    from pipeline.clients import ServiceError
+    up = (200, {"ready": True, "prod": {"active": "blue", "release": "t0"}})
+    f = Fleet("http://127.0.0.1:1", "at")
+    FlakyFleet([ServiceError("POST /deploy: Server disconnected"), (200, {"ok": True, "rolled_back": False,
+                                                                         "release": "abc", "detail": "deployed"})],
+               [ServiceError("down"), up]).install(f)
+    res = f.deploy("abc")
+    assert res["ok"] and res["attempts"] == 2
+    # it died after finishing the switch: the state says the release is live, nothing is deployed twice
+    f = Fleet("http://127.0.0.1:1", "at")
+    fl = FlakyFleet([ServiceError("POST /deploy: Server disconnected")],
+                    [(200, {"ready": True, "prod": {"active": "green", "release": "abc"}})])
+    fl.install(f)
+    res = f.deploy("abc")
+    assert res["ok"] and "confirmed" in res["detail"] and [c for c in fl.calls if c[1] == "/deploy"] == [("POST", "/deploy")]
+    # still adopting the run (409), then fine
+    f = Fleet("http://127.0.0.1:1", "at")
+    FlakyFleet([(409, {"detail": "no active prod"}), (200, {"ok": True, "rolled_back": False, "detail": "deployed"})],
+               [up]).install(f)
+    assert f.deploy("abc")["ok"]
+    # a real refusal is not retried
+    f = Fleet("http://127.0.0.1:1", "at")
+    fl = FlakyFleet([(200, {"ok": False, "rolled_back": True, "detail": "prod_5xx grew"})], [up])
+    fl.install(f)
+    assert f.deploy("abc")["rolled_back"] and len(fl.calls) == 1
+    # never coming back is an error, not a silent success
+    f = Fleet("http://127.0.0.1:1", "at")
+    FlakyFleet([ServiceError("down")], [ServiceError("down")]).install(f)
+    f.RESTART_WAIT_S = 0.3
+    with pytest.raises(ServiceError):
+        f.deploy("abc")
+
+
+class DownPatcher:
+    """The generator is unreachable: it never proposes anything."""
+    calls = 0
+
+    @classmethod
+    def propose(cls, base_dir, incident, feedback, attempt):
+        cls.calls += 1
+        return {"diff": "", "source": "fallback", "notes": "fallback (claude: command not found); no fallback"}
+
+
+def test_generator_outage_is_contained_then_retried_until_it_is_back(env, events):
+    DownPatcher.calls = 0
+    p = make(env, patcher=DownPatcher)
+    p.cfg.retry_cooldown_s = 0.0
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    assert inc["outcome"] == "rule_only" and inc["outcome_detail"] == "transient"
+    assert inc["rule"]["id"] in env["gw"].rules                      # contained meanwhile
+    first_rule, to_rule = inc["first_rule_posted"], inc["seconds_to_rule"]
+    assert p.retry_transient() == [iid] and inc["status"] == "queued" and inc["retries"] == 1
+    p.step()
+    assert inc["outcome_detail"] == "transient" and inc["retries"] == 1
+    p._patcher = stub_patcher                                         # the generator is back
+    assert p.retry_transient() == [iid]
+    p.step()
+    assert inc["outcome"] == "patched", inc["reason"]
+    assert inc["first_rule_posted"] == first_rule and inc["seconds_to_rule"] == to_rule   # a retry does not move it
+    assert p.retry_transient() == []                                  # patched: left alone
+
+
+def test_retries_are_bounded_and_spaced(env, events):
+    p = make(env, patcher=DownPatcher)
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    p.cfg.retry_cooldown_s, p.cfg.max_retries = 60.0, 2
+    assert p.retry_transient() == []                                  # too soon
+    inc["closed_at"] -= 61
+    assert p.retry_transient() == [iid]
+    p.step()
+    inc["closed_at"] -= 61
+    assert p.retry_transient() == []                                  # second wait is 4x longer
+    inc["closed_at"] -= 200
+    assert p.retry_transient() == [iid]
+    p.step()
+    inc["closed_at"] -= 10 ** 6
+    assert p.retry_transient() == [] and inc["retries"] == 2          # gave up; the rule keeps it contained
+
+
+def test_a_patch_the_gates_reject_is_not_retried(env, events):
+    p = make(env, validator=ScriptedValidator(plan=["poc", "poc", "poc"]))
+    p.cfg.retry_cooldown_s = 0.0
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    assert inc["outcome"] == "rule_only" and inc.get("outcome_detail") != "transient"
+    assert p.retry_transient() == []
+
+
+def test_rule_of_an_unpatched_incident_is_renewed_and_restored(env, events):
+    p = make(env, validator=ScriptedValidator(plan=["poc", "poc", "poc"]))
+    iid = p.enqueue(events["sqli"])
+    p.step()
+    inc = p.state.incident(iid)
+    rid = inc["rule"]["id"]
+    env["gw"].rules[rid]["expires_in"] = 3000.0                       # plenty left: untouched
+    assert p.keep_rules() == 0
+    env["gw"].rules[rid]["expires_in"] = 30.0                         # about to expire
+    assert p.keep_rules() == 1 and "expires_in" not in env["gw"].rules[rid]
+    del env["gw"].rules[rid]                                          # the gateway lost it
+    assert p.keep_rules() == 1 and rid in env["gw"].rules
+    # a patched incident's rule is never put back
+    q = make(env)
+    other = q.enqueue(events["traversal"])
+    q.step()
+    assert q.state.incident(other)["outcome"] == "patched"
+    n = len(env["gw"].rules)
+    assert q.keep_rules() <= 1 and len(env["gw"].rules) == n and q.state.incident(other)["rule"]["id"] not in env["gw"].rules

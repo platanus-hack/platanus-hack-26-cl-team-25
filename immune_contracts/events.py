@@ -26,6 +26,8 @@ UPSTREAM_SWITCHED = "upstream.switched" # data: {release, addr}
 POOL_STATE = "pool.state"               # data: {l1_free, l2_busy, size}
 DEPLOY_STARTED = "deploy.started"       # data: {release}
 DEPLOY_DONE = "deploy.done"             # data: {release, ok: bool, rolled_back: bool, detail}
+CANARY_STARTED = "canary.started"       # data: {release, addr, weight}
+CANARY_DONE = "canary.done"             # data: {release, reason: promoted|aborted|superseded, canary, stable}
 # pipeline
 INCIDENT_OPENED = "incident.opened"     # data: {incident, vuln_class: sqli|traversal|idor|other, method, route, param, sink:{file,line}, evidence_rid, request:{method,path,query,body_b64}}
 POC_READY = "poc.ready"                 # data: {incident, reproducible: bool, runs, poc}
@@ -36,7 +38,14 @@ PR_OPENED = "pr.opened"                 # data: {incident, url, branch}
 PR_MERGED = "pr.merged"                 # data: {incident, url, sha}
 INCIDENT_CLOSED = "incident.closed"     # data: {incident, outcome: patched|rule_only|not_reproducible, seconds_to_rule, seconds_to_patch}
 VERIFY_RESULT = "verify.result"         # data: {incident, exploit_blocked_on_prod: bool}
+FUXA_STATUS = "fuxa.status"              # data: {active, enforced, coverage, pending, monitor}
+# pipeline: self-audit of the same class after an incident closes (contracts/product.md §8)
+AUDIT_STARTED = "audit.started"         # data: {incident, vuln_class, candidates}
+AUDIT_FINDING = "audit.finding"         # data: {incident, parent, route, param}
+AUDIT_DONE = "audit.done"               # data: {incident, checked, findings, seconds}
+# incident.opened also carries optional origin: live|audit and parent: <incident id>
 # sim
+PROD_ALERT = "prod.alert"               # data: {container, oracle: file|proc|net, detail, candidates, confirmed:[{method,path,query}], note}
 ATTACK_ATTEMPT = "attack.attempt"       # data: {vuln, ok: bool, saw_real_data: bool}
 
 TYPES = tuple(v for k, v in list(globals().items()) if k.isupper() and isinstance(v, str) and "." in v)

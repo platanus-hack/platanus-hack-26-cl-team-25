@@ -3,6 +3,7 @@
 set -euo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
-PY="$ROOT/.venv/bin/python"; [ -x "$PY" ] || PY="$(command -v python3)"
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || { echo "immune: $ROOT/.venv is missing; run $ROOT/install.sh first" >&2; exit 1; }
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 exec "$PY" -m immune "$@"
