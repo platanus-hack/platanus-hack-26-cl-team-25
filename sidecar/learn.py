@@ -1,4 +1,4 @@
-"""python -m sidecar.marker.learn --sidecar http://127.0.0.1:3902 --recordings runtime/.../requests.jsonl
+"""python -m sidecar.learn --sidecar http://127.0.0.1:3902 --recordings runtime/.../requests.jsonl
 
 Teaches the sql oracle the statement structures of legitimate traffic: replays, through the sidecar in learn
 mode, the requests the gateway recorded as clean (class clean, no classifier reasons, served by prod, status
@@ -16,7 +16,13 @@ import os
 import httpx
 
 from immune_contracts import wire
-from .core import H_LEARN, learn_message
+
+H_LEARN = wire.INTERNAL_PREFIX + "learn"      # signature that authorises a learn-mode request
+
+
+def learn_message(method: str, target: bytes) -> bytes:
+    return b"learn " + method.upper().encode() + b" " + target
+
 
 DROP = {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}
 
@@ -52,7 +58,7 @@ def replay(sidecar: str, key: str, records, client: httpx.Client | None = None) 
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="python -m sidecar.marker.learn")
+    ap = argparse.ArgumentParser(prog="python -m sidecar.learn")
     ap.add_argument("--sidecar", required=True)
     ap.add_argument("--recordings", required=True, help="the gateway's RECORD_PATH (jsonl)")
     a = ap.parse_args()

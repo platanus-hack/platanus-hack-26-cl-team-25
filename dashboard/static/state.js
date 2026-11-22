@@ -415,7 +415,7 @@
         st.attacks[v].push({ ts: ts, ok: !!d.ok, saw: !!d.saw_real_data });
         if (st.attacks[v].length > ATTACK_MAX) st.attacks[v].shift();
         break;
-      case 'prod.alert':   // oracles on production, alert only (sidecar/marker/prodwatch.py); no panel yet
+      case 'prod.alert':   // oracles on production, alert only (sidecar/prodwatch.py); no panel yet
         st.prodAlerts.push({ ts: ts, container: str(d.container), oracle: str(d.oracle), note: str(d.note),
                              candidates: num(d.candidates), confirmed: Array.isArray(d.confirmed) ? d.confirmed.length : 0 });
         if (st.prodAlerts.length > 50) st.prodAlerts.shift();

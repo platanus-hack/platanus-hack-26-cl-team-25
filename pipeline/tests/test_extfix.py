@@ -69,12 +69,11 @@ def test_published_events_match_the_bus_contract(fx):
 
 def test_prompt_and_describe_cover_proc_and_net_events(fx):
     from pipeline.extfix import describe
-    proc = {"oracle": "proc", "detail": {"event": "execve", "args": ["/bin/sh", "sh", "-c", "id"],
-                                         "observed": "syscall", "result": "ok"}, "stack": []}
-    net = {"oracle": "net", "detail": {"event": "connect", "address": "169.254.169.254:80", "observed": "syscall",
-                                       "result": "EINPROGRESS"}, "stack": []}
-    blind = {"oracle": "file", "detail": {"path": "/etc/shadow", "observed": "syscall", "result": "EACCES"}}
-    assert "executed the program `/bin/sh sh -c id`" in describe(proc)
+    proc = {"oracle": "proc", "detail": {"path": "/bin/sh", "argv": ["sh", "-c", "id"]}, "stack": []}
+    net = {"oracle": "net", "detail": {"family": "AF_INET", "address": "169.254.169.254", "port": 80,
+                                       "syscall": "connect"}, "stack": []}
+    blind = {"oracle": "file", "detail": {"path": "/etc/shadow", "realpath": "/etc/shadow", "result": "EACCES"}}
+    assert "executed the program `sh -c id`" in describe(proc)
     assert "connection to `169.254.169.254:80`" in describe(net) and "failed" not in describe(net)
     assert "opened `/etc/shadow`" in describe(blind) and "EACCES" in describe(blind)
     inc = dict(INC, oracle="proc", evidence={"events": [blind, proc]})

@@ -8,6 +8,20 @@ Flat keys (all optional except ``app_port``)::
     app_port: 3000
     health: /health
     mode: attach                  # attach (--pid container:<app>) | launch (sidecar starts `command` traced)
+                                  # | docker (sidecar outside; a tracer container joins `container`'s PID namespace)
+    container: immune-shadow      # docker mode: the app container
+    tracer_image: immune-strace:1 # docker mode
+    tracer_label: ""              # docker mode: label for the tracer container
+    protected_paths: []           # globs. When set (or the markers file has file markers) the file oracle fires
+                                  # only on these, failed attempts included, instead of "outside allowed roots"
+    exec_allow: []                # program path globs that never fire `proc`
+    net_allow: []                 # "address:port" globs that never fire `net`
+    learn_background: false       # what the app does with no request in flight stops firing
+    prod_ignore: []               # protected paths prod opens in normal operation (python -m sidecar.prodwatch)
+    sql_log:                      # optional sql source instead of the proxy: follow the shadow database's log
+      cmd: docker logs -f --since 1s shadow-db
+      dialect: postgres           # postgres | mysql
+    sql_baseline: null            # JSON file of learnt statement structures (rule new_structure; sidecar/sqllog.py)
     command: [node, server.js]    # launch mode only
     target_pid: null              # attach: anchor pid of the app (default: PID 1 of the shared namespace)
     allowed_file_roots: [/app/static]   # paths as seen by the app
@@ -72,6 +86,17 @@ class Config:
     public_paths: list = field(default_factory=list)
     markers_path: str | None = None
     postgres: PgConfig | None = None
+    container: str = ""
+    tracer_image: str = "immune-strace:1"
+    tracer_label: str = ""
+    protected_paths: list = field(default_factory=list)
+    exec_allow: list = field(default_factory=list)
+    net_allow: list = field(default_factory=list)
+    learn_background: bool = False
+    prod_ignore: list = field(default_factory=list)
+    sql_log_cmd: str = ""
+    sql_dialect: str = "postgres"
+    sql_baseline: str | None = None
     trace: bool = True
     clone_id: str = ""
     clone_key: str = ""
@@ -107,6 +132,9 @@ def from_dict(d: dict) -> Config:
         d = {k: v for k, v in flat.items() if v is not None}
     c = Config()
     pg = d.pop("postgres", None)
+    sl = d.pop("sql_log", None) or {}
+    if sl.get("cmd"):
+        d["sql_log_cmd"], d["sql_dialect"] = sl["cmd"], sl.get("dialect", "postgres")
     for k, v in d.items():
         if hasattr(c, k) and v is not None:
             setattr(c, k, v)
@@ -130,6 +158,10 @@ def load(path: str | None, env=None) -> Config:
     c.collector_url = env.get("COLLECTOR_URL", c.collector_url)
     c.release = env.get("RELEASE", c.release)
     c.markers_path = c.markers_path or env.get("MARKERS_PATH")
+    for key, name in (("SIDECAR_CONTAINER", "container"), ("SQL_LOG_CMD", "sql_log_cmd"),
+                      ("SQL_DIALECT", "sql_dialect"), ("SQL_BASELINE", "sql_baseline")):
+        if env.get(key):
+            setattr(c, name, env[key])
     if env.get("SIDECAR_GRACE_MS"):
         c.grace_ms = int(env["SIDECAR_GRACE_MS"])
     return c

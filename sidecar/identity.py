@@ -100,8 +100,8 @@ class Identity:
             if p is not None and hasattr(p, "load_markers"):
                 return {str(k): int(v) for k, v in (p.load_markers(env) or {}).items()}
             if path:
-                with open(path) as f:
-                    return {str(k): int(v) for k, v in json.load(f).items()}
+                with open(path) as f:   # {marker: {"path": …}} entries are file markers (observer.load_file_markers)
+                    return {str(k): int(v) for k, v in json.load(f).items() if not isinstance(v, dict)}
         except Exception as e:
             log.warning("markers not loaded (%r): owner oracle disabled", e)
         return {}
