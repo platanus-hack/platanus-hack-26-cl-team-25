@@ -25,6 +25,7 @@ import threading
 import time
 import zlib
 
+from shadow import effects as shadow_effects
 from shadow import inputs as shadow_inputs
 from shadow import sqltaint
 
@@ -141,9 +142,13 @@ class Observer:
                 return True
         return False
 
-    def system_events(self, rec: Record) -> list[dict]:
+    def system_events(self, rec: Record, input_hosts=()) -> list[dict]:
+        """file / proc / net events of a request. ``input_hosts``: canonical hosts the request's inputs name; a
+        loopback destination among them is SSRF (an ordinary loopback connection is the app's own business)."""
         events, seen = [], set()
         execed = {o.pid for o in rec.obs if o.kind == "exec"}
+        # a DNS lookup is seen twice (connect to the resolver, then the datagram with the name): keep the one with it
+        named = {o.detail["address"] for o in rec.obs if o.kind == "net" and o.detail.get("qname")}
 
         def add(kind, detail, o=None):
             key = (kind, repr(sorted(detail.items())))
@@ -170,12 +175,16 @@ class Observer:
                 if d["child"] not in execed:  # fork without exec (exec'd children are reported by execve)
                     add("proc", {"syscall": d["syscall"], "child": d["child"]}, o)
             elif o.kind == "net":
-                if self.net_fires(d):
-                    add("net", {"family": d["family"], "address": d["address"], "port": d["port"],
-                                "syscall": d["syscall"]}, o)
+                if self.net_fires(d, input_hosts):
+                    if d["port"] == 53 and not d.get("qname") and d["address"] in named:
+                        continue
+                    detail = {"family": d["family"], "address": d["address"], "port": d["port"], "syscall": d["syscall"]}
+                    if d.get("qname"):
+                        detail["qname"] = d["qname"]
+                    add("net", detail, o)
         return events
 
-    def net_fires(self, d) -> bool:
+    def net_fires(self, d, input_hosts=()) -> bool:
         from .strace import is_loopback
         fam = d["family"]
         if self.net_globs and _match("%s:%s" % (d.get("address"), d.get("port")), self.net_globs):
@@ -184,7 +193,9 @@ class Observer:
             if d["port"] == 53:
                 return self.dns_fires  # a name lookup during a request (SSRF to a hostname)
             if is_loopback(d["address"]):
-                return False  # the app talking to itself or to the sidecar's pg proxy
+                # the app talking to itself or to the sidecar's pg proxy is normal (and was learnt at warm-up); a
+                # loopback destination the request itself named, and the app never used, is SSRF to an internal service
+                return (shadow_effects.canon(d["address"]) in input_hosts) and _net_key(d) not in self.net_allow
             return _net_key(d) not in self.net_allow
         if fam == "AF_UNIX":
             return _net_key(d) not in self.net_allow

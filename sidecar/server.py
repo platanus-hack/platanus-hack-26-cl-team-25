@@ -19,6 +19,7 @@ import sys
 import time
 
 from immune_contracts import wire
+from shadow import effects as shadow_effects
 
 from . import config as cfgmod
 from . import constants as constmod
@@ -386,7 +387,8 @@ class Sidecar:
             events = [e for e in events if e["detail"]["reason"] != "token"]
         events += sqllog.structure_events(self.baseline, rec.statements + failed, self.baseline_dialect,
                                           skip={e["detail"]["statement"] for e in events})
-        events += observer.marker_events(self.file_markers, rh, rbody, self.obs.system_events(rec))
+        events += observer.marker_events(self.file_markers, rh, rbody,
+                                         self.obs.system_events(rec, shadow_effects.input_hosts(inputs)))
         events += observer.owner_events(self.markers, self.public, path, rh, rbody, uid, role, bool(events))
         # profile oracles (optional, app-specific; e.g. openemr_identity replays the authorization the app
         # skipped and flags stored active markup): same event shape, same verdict machinery, never fatal
@@ -403,6 +405,9 @@ class Sidecar:
                 events += got or []
             except Exception as e:  # noqa: BLE001
                 log.warning("rid=%s profile oracle failed: %r", rid, e)
+        # input -> effect classes (ssrf, cmdi, ssti, deser, xxe, redirect): the request's own input reached the effect
+        events = shadow_effects.refine(events, inputs, {"headers": client_h, "body": body},
+                                       {"status": status, "headers": rh, "body": observer.decoded_body(rh, rbody)})
         if events and self.calltrace:
             try:   # where in the app's code: never changes the verdict
                 await asyncio.to_thread(self.calltrace.attach, events)

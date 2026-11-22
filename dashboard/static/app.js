@@ -106,7 +106,10 @@
   }
   var DETAIL_LABEL = { input: 'Entrada', location: 'Ubicación', param: 'Parámetro', reason: 'Motivo', statement: 'Consulta', path: 'Ruta pedida',
                        realpath: 'Archivo leído', owner: 'Dueño', uid: 'Usuario', table: 'Tabla', command: 'Comando', url: 'URL', host: 'Host',
-                       operation: 'Operación', role: 'Rol', session: 'Sesión', boundary: 'Efecto', decision: 'Qué pasó', expected: 'Esperado' };
+                       operation: 'Operación', role: 'Rol', session: 'Sesión', boundary: 'Efecto', decision: 'Qué pasó', expected: 'Esperado',
+                       address: 'Destino', port: 'Puerto', qname: 'Nombre consultado', matched: 'Coincide por', argv: 'Línea de comandos',
+                       expression: 'Expresión', evaluated: 'Resultado', literal: 'Literal', format: 'Formato', correlated: 'Nombra el efecto',
+                       entity: 'Entidad externa', target: 'Redirige a', status: 'Estado', metachar: 'Metacaracteres' };
   var CODE_KEYS = { statement: 1, command: 1 };
 
   function renderDiff(diff) {

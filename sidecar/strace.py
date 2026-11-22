@@ -230,6 +230,38 @@ def parse_sockaddr(text: str) -> dict | None:
     return {"family": fam, "address": "", "port": 0}
 
 
+_SOCK_PEER = re.compile(r"->\[?([0-9a-fA-F:.]+)\]?:(\d+)\]>?$")
+
+
+def dns_qname(data: bytes) -> str | None:
+    """The question name of a DNS query datagram (header 12 bytes, then length-prefixed labels), else None."""
+    if len(data) < 13:
+        return None
+    labels, i = [], 12
+    while i < len(data):
+        n = data[i]
+        if n == 0:
+            break
+        if n & 0xC0 or i + 1 + n > len(data):       # compression pointer / truncated: not a plain question
+            return None
+        labels.append(data[i + 1:i + 1 + n].decode("ascii", "replace"))
+        i += 1 + n
+    return ".".join(labels).lower() if labels else None
+
+
+def _dns_send(sc: "Syscall") -> dict | None:
+    """A sendto on a socket connected to a resolver (fd decoration ``<UDP:[a:p->10.0.0.2:53]>``): the destination
+    comes from the decoration (the call carries no address) and the question name from the datagram."""
+    if sc.name != "sendto" or len(sc.args) < 2:
+        return None
+    m = _SOCK_PEER.search(sc.args[0])
+    if not m or m.group(2) != "53":
+        return None
+    q = dns_qname(unquote(sc.args[1]).encode("utf-8", "surrogateescape"))
+    fam = "AF_INET6" if ":" in m.group(1) else "AF_INET"
+    return {"family": fam, "address": m.group(1), "port": 53, **({"qname": q} if q else {})}
+
+
 def is_loopback(addr: str) -> bool:
     a = addr.lower()
     return a.startswith("127.") or a in ("::1", "localhost") or a.startswith("::ffff:127.")
@@ -290,6 +322,12 @@ def observe(sc: Syscall, cwd_of=None, attempts: bool = False) -> Observation | N
             sa = parse_sockaddr(sc.args[1]) if len(sc.args) > 1 else None
         else:
             sa = parse_sockaddr(", ".join(sc.args[1:]))  # sendto dest / sendmsg msg_name; NULL -> None
+        if sa is not None and sa.get("port") == 53 and name == "sendto" and len(sc.args) > 1:
+            q = dns_qname(unquote(sc.args[1]).encode("utf-8", "surrogateescape"))
+            if q:
+                sa["qname"] = q
+        if sa is None:
+            sa = _dns_send(sc)          # connected UDP socket to a resolver: the datagram has the name
         if sa is None:
             return None
         # attempts count, even if they fail (the app tried to reach out)

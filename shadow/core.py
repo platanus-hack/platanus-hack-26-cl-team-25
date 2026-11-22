@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from immune_contracts import authtoken, wire
 
-from . import db, inputs, instrument, sqltaint
+from . import db, effects, inputs, instrument, sqltaint
 from .instrument import STATE, RequestRecord
 
 log = logging.getLogger("shadow")
@@ -289,7 +289,7 @@ class Engine:
         client_h = _hdict(client)
         query = query_string.decode("latin-1")
         events = self.evaluate(rec, method, path, query, client_h, body, scope.get("path_params"),
-                               rheaders, rbody, uid, role)
+                               rheaders, rbody, uid, role, status)
         # 6. verdict
         if events:
             verdict = wire.VERDICT_ORACLE
@@ -359,13 +359,16 @@ class Engine:
             log.warning("evidence rid=%s push failed: %r", evidence["rid"], e)
 
     # ------------------------------------------------------------ oracles
-    def evaluate(self, rec, method, path, query, client_h, body, path_params, rheaders, rbody, uid, role):
+    def evaluate(self, rec, method, path, query, client_h, body, path_params, rheaders, rbody, uid, role, status=None):
         ins = inputs.extract(path, query, client_h, body, path_params)
         events = sqltaint.check(rec.statements, ins, self.constants())
         events += rec.events  # file / proc / net, collected live
         last_stack = rec.statements[-1][1] if rec.statements else []
         events += self.owner_events(path, rheaders, rbody, uid, role, bool(events), last_stack, path_params)
-        return events
+        # input -> effect classes (ssrf, cmdi, ssti, deser, xxe, redirect): the request's own input reached the effect
+        rh = _hdict(rheaders or [])
+        return effects.refine(events, ins, {"headers": client_h or {}, "body": body or b""},
+                              {"status": status, "headers": rh, "body": _decoded_body(rheaders or [], rbody or b"")})
 
     def co_members(self, path_params, uid) -> set:
         """Group-shared access (shadow/sharing.json): the members of every group this request addresses
