@@ -346,3 +346,18 @@ def test_redact_multipart_replaces_the_named_part_and_keeps_the_rest():
     assert out.count(b"--XyZ") == 3
     assert redact_multipart(body, ct, set()) == body
     assert redact_multipart(body, "multipart/form-data", {"pw"}) == b"<redacted>"
+
+
+def test_high_risk_route_detonates_any_identity():
+    # x-high-risk: a process/script execution endpoint is verified in the shadow for EVERY caller, including
+    # an authenticated admin (the RCE attacker is trusted); the syscall oracle confirms execution there.
+    spec = Spec({"paths": {"/ScadaBR/dwr/call/plaincall/EventHandlersDwr.testProcessCommand.dwr":
+                           {"post": {"x-high-risk": True, "responses": {"200": {"description": "ok"}}}}}})
+    path = "/ScadaBR/dwr/call/plaincall/EventHandlersDwr.testProcessCommand.dwr"
+    for who in (ADMIN, TRUSTED, ANON):
+        r = c("POST", path, body=b"callCount=1", ctype="text/plain", who=who, spec=spec)
+        assert r.cls == SUSPECT and "high_risk:route" in r.reasons
+    # a route without the marker is not flagged by this rule
+    r = c("POST", path, body=b"callCount=1", ctype="text/plain", who=ADMIN,
+          spec=Spec({"paths": {path: {"post": {"responses": {"200": {"description": "ok"}}}}}}))
+    assert "high_risk:route" not in r.reasons
