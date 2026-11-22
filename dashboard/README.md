@@ -56,12 +56,23 @@ through the `lifespan` argument of `create_app`, and with two extra public route
 
 ## Behaviour
 
+### Interactive demo
+
+Open `/?demo` or select **Abrir demo interactiva**. Sending a message starts a two-minute replay of the
+first three incidents from the recorded run in `tests/fixtures/real_run.jsonl`. The public
+`static/replay.json` contains an allowlisted projection of the recording, retaining the event sequence,
+original timing offsets, decisions and outcomes. The attacker-side chat recreates the actions in first
+person and stays in the browser. The original event metadata is shown in the expandable technical log.
+The terminal-style view presents the recorded methods, timings and response codes as requests appear.
+Selecting a request holds its route in the diagram while the recording continues. The incident panel
+tracks the temporary rule, patch preparation, validation and deployment from the recorded events.
+
 ### Routes
 
 | Route | Access | Behaviour |
 |---|---|---|
 | `GET /` | public | The page |
-| `GET /static/<file>` | public | `app.js`, `state.js`, `style.css` and the two fonts; nothing else is served |
+| `GET /static/<file>` | public | `app.js`, `state.js`, `replay.js`, `replay.json`, `style.css` and the two fonts; nothing else is served |
 | `GET /health` | public | `{ok, events, seq}` |
 | `GET /events?since=&type=&limit=` | public | One page of events with `seq > since`, optionally filtered by type prefix. The response carries `next`; a reader follows it until a page comes back empty |
 | `GET /events/stream?since=` | public | Server-sent events: history after `since` (or `Last-Event-ID`), then live |

@@ -30,6 +30,7 @@ HEARTBEAT_S = 15.0
 POLL_S = 1.0   # how often an idle stream checks for shutdown and for a client that went away
 TYPES = frozenset(ev_contract.TYPES)
 FILES = {"app.js": "text/javascript; charset=utf-8", "state.js": "text/javascript; charset=utf-8",
+         "replay.js": "text/javascript; charset=utf-8", "replay.json": "application/json; charset=utf-8",
          "style.css": "text/css; charset=utf-8", "inter.woff2": "font/woff2", "mono.woff2": "font/woff2"}
 # sent on every response: the page is public and read-only
 SECURITY_HEADERS = {

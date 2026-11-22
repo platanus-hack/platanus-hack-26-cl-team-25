@@ -17,6 +17,7 @@
     <span class="sub" id="dashboard-subtitle" hidden></span>
   </div>
   <div class="bar-right">
+    <button class="demo-mode" id="demo-mode" type="button">Abrir demo interactiva</button>
     <div class="chip" id="upstream" hidden><span class="k">Producción</span><b id="up-addr"></b><span class="k" id="up-rel"></span></div>
     <div class="chip" id="run" hidden><span class="k">Corrida</span><b id="run-id"></b></div>
     <div class="chip flag" id="scripted" hidden>DEMO · datos guionados</div>
@@ -24,7 +25,84 @@
   </div>
 </header>
 
-<div class="page">
+<main class="demo page" id="demo" aria-labelledby="demo-title" hidden>
+  <div class="demo-intro">
+    <div>
+      <h2 id="demo-title" tabindex="-1">Del intento al parche</h2>
+      <p>Dispará una corrida grabada y seguí cómo Immune aísla las solicitudes sospechosas y verifica los parches.</p>
+    </div>
+    <span class="demo-badge">Corrida grabada · 2 min</span>
+  </div>
+
+  <section class="demo-frame" aria-labelledby="demo-map-title">
+    <div class="demo-control-bar">
+      <div class="demo-controls" role="group" aria-label="Controles de reproducción">
+        <button type="button" id="demo-pause" disabled>Pausar</button>
+        <button type="button" id="demo-reset" disabled>Reiniciar</button>
+      </div>
+      <label class="demo-clock" for="demo-progress"><span id="demo-time">00:00 / 02:00</span>
+        <progress id="demo-progress" max="120000" value="0" aria-label="Tiempo de reproducción"></progress>
+      </label>
+    </div>
+    <div class="demo-workspace">
+      <aside class="demo-chat" aria-labelledby="demo-chat-title">
+        <h3 id="demo-chat-title">Conversación con el LLM <span>Lado atacante</span></h3>
+        <div class="demo-chat-thread" id="demo-chat-thread" aria-label="Conversación" tabindex="0" hidden>
+          <div id="demo-message" class="demo-message" hidden>
+            <b>Vos</b>
+            <p id="demo-user-text"></p>
+          </div>
+          <ol id="demo-chat-transcript" class="demo-transcript" aria-label="Respuestas y llamadas a herramientas"></ol>
+        </div>
+        <form id="demo-form">
+          <label for="demo-prompt">Tu mensaje</label>
+          <textarea id="demo-prompt" rows="3" maxlength="240" required>Revisá si la tienda de laboratorio permite accesos fuera de los permisos de una cuenta de prueba. Contame cómo responde.</textarea>
+          <button type="submit" class="demo-primary" id="demo-send">Enviar e iniciar</button>
+        </form>
+      </aside>
+      <div class="demo-dashboard">
+        <div class="demo-section-head">
+          <h3 id="demo-map-title">Ruta de la solicitud</h3>
+          <span id="demo-trace" class="demo-meta"></span>
+        </div>
+        <div class="demo-map" id="demo-map" role="group" aria-labelledby="demo-map-title">
+          <div class="demo-node demo-agent"><b>Origen</b><span id="demo-agent-state">En espera</span></div>
+          <span class="demo-edge demo-in" aria-hidden="true"></span>
+          <div class="demo-node demo-gateway"><b>Gateway</b><span id="demo-gateway-state">En espera</span></div>
+          <span class="demo-edge demo-out" aria-hidden="true"></span>
+          <div class="demo-node demo-prod"><b>Producción</b><span id="demo-prod-state">En espera</span></div>
+          <span class="demo-edge demo-down" aria-hidden="true"></span>
+          <div class="demo-node demo-shadow"><b>Copia aislada</b><span id="demo-shadow-state">En espera</span><span id="demo-detection" hidden>Ataque detectado</span></div>
+        </div>
+        <div class="demo-current" role="status" aria-atomic="true">
+          <h3 id="demo-phase-title">Esperando el mensaje</h3>
+          <p id="demo-phase-detail">Cuando inicies la grabación, cada solicitud aparecerá con su clasificación y destino.</p>
+        </div>
+        <section class="demo-incidents" aria-labelledby="demo-incidents-title">
+          <div class="demo-section-head">
+            <h3 id="demo-incidents-title">Cómo Immune resuelve los incidentes</h3>
+            <span id="demo-incidents-count" class="demo-meta" hidden></span>
+          </div>
+          <p id="demo-incidents-empty" class="demo-record">Los incidentes aparecen acá cuando la copia aislada aporta evidencia.</p>
+          <ul id="demo-incidents"></ul>
+        </section>
+        <section class="demo-requests" aria-labelledby="demo-requests-title">
+          <div class="demo-section-head">
+            <h3 id="demo-requests-title" tabindex="-1">Solicitudes registradas</h3>
+            <button type="button" id="demo-follow" hidden>Seguir la corrida</button>
+          </div>
+          <ol id="demo-requests"></ol>
+        </section>
+        <details class="demo-technical-log">
+          <summary>Registro completo de la demo</summary>
+          <ol id="demo-logs" class="demo-logs"></ol>
+        </details>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="page" id="live-dashboard">
 <section class="flow" id="flow" aria-label="Cómo funciona, con los números de esta corrida">
   <div class="stage">
     <div class="st-head"><span class="n">1</span>Detecta</div>
@@ -114,5 +192,6 @@
 </div>
 <script src="/static/state.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/replay.js"></script>
 </body>
 </html>

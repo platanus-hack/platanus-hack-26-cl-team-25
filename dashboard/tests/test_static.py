@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -56,3 +57,48 @@ def test_attack_panel_is_hidden_until_the_page_has_attack_events():
     assert 'class="empty"' not in panel.group(2)            # and there is no empty placeholder
     app = (STATIC / "app.js").read_text()
     assert "show($('panel-attacks'), S.showAttacks(st));" in app
+
+
+def test_public_replay_uses_only_display_metadata_from_the_recorded_run():
+    c = TestClient(create_app())
+    response = c.get("/static/replay.json")
+    assert response.status_code == 200
+    replay = response.json()
+    fixture = Path(__file__).parent / "fixtures" / "real_run.jsonl"
+    source = {row["seq"]: row for row in map(json.loads, fixture.read_text(encoding="utf-8").splitlines())}
+    fields = {
+        "request.classified": {"method", "class"},
+        "request.routed": {"route", "status", "ms"},
+        "oracle.fired": set(),
+        "incident.opened": {"origin", "vuln_class"},
+        "rule.active": set(),
+        "patch.attempt": {"attempt"},
+        "gate.result": {"gate", "ok"},
+        "deploy.started": set(),
+        "upstream.switched": set(),
+        "deploy.done": {"ok"},
+        "verify.result": {"exploit_blocked_on_prod"},
+        "incident.closed": {"outcome"},
+    }
+    events = replay["events"]
+    assert [event["seq"] for event in events] == sorted({event["seq"] for event in events})
+    assert [event["at"] for event in events] == sorted(event["at"] for event in events)
+    start = source[events[0]["seq"]]["ts"]
+    for event in events:
+        row = source[event["seq"]]
+        assert row["run"] == replay["run"]
+        assert event["type"] == row["type"]
+        assert event["at"] == round(row["ts"] - start, 3)
+        assert set(event) <= {"seq", "type", "at", "rid", "incident"} | fields[row["type"]]
+        assert all(event.get(key) == row["data"].get(key) for key in fields[row["type"]])
+        if "rid" in event:
+            assert event["rid"] == row["rid"][:8]
+        if event["type"] in {"deploy.started", "upstream.switched", "deploy.done"}:
+            assert any(
+                merge["type"] == "pr.merged"
+                and merge["incident"] == event["incident"]
+                and merge["data"]["sha"].startswith(row["data"]["release"])
+                for merge in source.values()
+            )
+    assert sum(event["type"] == "incident.closed" and event["outcome"] == "patched" for event in events) == 3
+    assert c.get("/health").json()["events"] == 0
