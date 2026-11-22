@@ -9230,26 +9230,50 @@ paths:
   /interface/billing/sl_eob_invoice.php:
     get:
       tags:
-      - interface
-      summary: OpenEMR UI script
+      - billing
+      summary: EOB posting - invoice editor (no ACL check in 8.2.0)
+      x-owner-scoped: true
+      parameters:
+      - name: id
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+        x-owner-id: true
       responses:
         '200':
-          description: page
+          description: invoice page
     post:
       tags:
-      - interface
-      summary: OpenEMR UI script (form)
+      - billing
+      summary: Post payment, adjustment or billing note (no ACL check in 8.2.0)
       requestBody:
         content:
           application/x-www-form-urlencoded:
             schema:
               type: object
-          multipart/form-data:
-            schema:
-              type: object
+              properties:
+                id:
+                  type: integer
+                  minimum: 0
+                form_save:
+                  type: string
+                  maxLength: 4
+                form_pid:
+                  type: string
+                  maxLength: 12
+                form_encounter:
+                  type: string
+                  maxLength: 12
+                form_method:
+                  type: string
+                  maxLength: 32
+                form_amount:
+                  type: string
+                  maxLength: 16
       responses:
         '200':
-          description: page
+          description: posted
   /interface/billing/sl_eob_patient_note.php:
     get:
       tags:
@@ -29953,6 +29977,206 @@ paths:
       responses:
         '200':
           description: ready
+  /oauth2/default/authorize:
+    get:
+      tags:
+      - oauth2
+      summary: Authorization endpoint
+      parameters:
+      - name: client_id
+        in: query
+        schema:
+          type: string
+          maxLength: 80
+      - name: redirect_uri
+        in: query
+        schema:
+          type: string
+          maxLength: 512
+      - name: response_type
+        in: query
+        schema:
+          type: string
+          maxLength: 32
+      - name: scope
+        in: query
+        schema:
+          type: string
+          maxLength: 1024
+      - name: state
+        in: query
+        schema:
+          type: string
+          maxLength: 256
+      - name: code_challenge
+        in: query
+        schema:
+          type: string
+          maxLength: 128
+      - name: code_challenge_method
+        in: query
+        schema:
+          type: string
+          maxLength: 16
+      responses:
+        '200':
+          description: login/consent page
+        '302':
+          description: redirect
+  /oauth2/default/introspect:
+    post:
+      tags:
+      - oauth2
+      summary: Token introspection (RFC 7662)
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  x-sensitive: true
+                client_id:
+                  type: string
+                  maxLength: 80
+                client_secret:
+                  type: string
+                  x-sensitive: true
+      responses:
+        '200':
+          description: introspection
+  /oauth2/default/jwk:
+    get:
+      tags:
+      - oauth2
+      responses:
+        '200':
+          description: JSON Web Keys
+  /oauth2/default/logout:
+    get:
+      tags:
+      - oauth2
+      responses:
+        '302':
+          description: logged out
+  /oauth2/default/registration:
+    post:
+      tags:
+      - oauth2
+      summary: Dynamic client registration (unauthenticated in 8.2.0, CWE-306)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_name:
+                  type: string
+                  maxLength: 255
+                redirect_uris:
+                  type: array
+                  maxItems: 8
+                  items:
+                    type: string
+                    maxLength: 512
+                grant_types:
+                  type: array
+                  maxItems: 8
+                  items:
+                    type: string
+                    maxLength: 32
+                scope:
+                  type: string
+                  maxLength: 1024
+                token_endpoint_auth_method:
+                  type: string
+                  maxLength: 32
+                jwks:
+                  type: object
+                contacts:
+                  type: array
+                  maxItems: 8
+                  items:
+                    type: string
+                    maxLength: 255
+                post_logout_redirect_uris:
+                  type: array
+                  maxItems: 8
+                  items:
+                    type: string
+                    maxLength: 512
+                initiate_login_uri:
+                  type: string
+                  maxLength: 512
+      responses:
+        '200':
+          description: client registered
+        '400':
+          description: rejected
+  /oauth2/default/token:
+    post:
+      tags:
+      - oauth2
+      summary: Token endpoint (authorization_code, password, client_credentials)
+      x-owner-scoped: true
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                grant_type:
+                  type: string
+                  maxLength: 40
+                client_id:
+                  type: string
+                  maxLength: 80
+                client_secret:
+                  type: string
+                  x-sensitive: true
+                client_assertion:
+                  type: string
+                  x-sensitive: true
+                client_assertion_type:
+                  type: string
+                  maxLength: 128
+                username:
+                  type: string
+                  maxLength: 255
+                password:
+                  type: string
+                  x-sensitive: true
+                mfa_token:
+                  type: string
+                  maxLength: 8
+                scope:
+                  type: string
+                  maxLength: 1024
+                code:
+                  type: string
+                  maxLength: 128
+                redirect_uri:
+                  type: string
+                  maxLength: 512
+                code_verifier:
+                  type: string
+                  maxLength: 128
+                refresh_token:
+                  type: string
+                  x-sensitive: true
+      responses:
+        '200':
+          description: token
+        '400':
+          description: oauth error
+  /oauth2/default/userinfo:
+    get:
+      tags:
+      - oauth2
+      responses:
+        '200':
+          description: userinfo
   /portal/account/account.lib.php:
     get:
       tags:

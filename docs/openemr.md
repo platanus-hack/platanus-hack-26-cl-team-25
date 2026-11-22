@@ -127,6 +127,31 @@ Notas:
 - `configuration_import_export=1` (seed) habilita el «Import Configuration» de backup.php: la primitiva de
   SQL arbitrario que la cadena del CVE-2026-39932 necesita (sin ella, el admin solo cambia `name`/`value` de
   categorías y el `eval()` no ejecuta nada).
+
+## Detección de las cinco CVE: oráculos del perfil, detección emergente y una regla de política
+
+Las cinco fallas no son iguales para un juez por ejecución: el RCE dispara el oráculo `proc` de serie. El
+resto se detecta **emergente** — el gateway arranca con cero reglas; el clasificador marca las formas
+sospechosas, los clones las ejecutan y los oráculos confirman; la regla de contención es **salida** del
+sistema, no input. Tres oráculos del perfil (`openemr_identity.extra_oracles`, llamados por
+sidecar/server.py después de los oráculos base, con la misma forma de evento) hacen la confirmación:
+
+| Mecanismo | CVE | Cómo llega a la sombra | Qué confirma el oráculo |
+|---|---|---|---|
+| `acl` | 2026-124471 | `sl_eob_invoice.php` está marcada `x-owner-scoped` con `id` como `x-owner-id`: toda lectura de un no admin se detona, y la iteración de ids (9 distintos en 30 s) dispara la heurística de enumeración | Replayea el chequeo `acct/bill` contra el gacl del clon: dispara para `front`/`doc`/anónimos; `admin` y Accounting leen sin ruido (fail-open de milisegundos) |
+| `mfa` | 2026-67611 | `/oauth2/default/token` está marcada `x-owner-scoped`: los grants sin sesión se detonan solos | **Sonda por ejecución**: el clon no conoce las contraseñas de prod, así que el oráculo fija una contraseña sintética a un usuario TOTP del propio clon (conexión admin, fuera de la ventana) y canjea el grant contra el app del clon; si el token sale sin segundo factor, el bypass está confirmado. Dispara cuando el request canjea credenciales de un usuario con TOTP sin mandar el código |
+| `xss` | 2026-67612 | El `save` del portal ya se detona por gramática (`grammar:form.content`) | El `content` con marcado activo (`on*=`, `javascript:`, `<script`, `<iframe`, `srcdoc=`) dispara en el momento de la inyección: el gateway retiene la respuesta y el payload nunca llega a prod. Las plantillas legítimas (HTML plano) no disparan |
+| oráculo `proc` (de serie) | 2026-39932 | `GET /controller.php?document_category&list` (cualquier sesión) tras plantar el payload | `passthru()` crea procesos dentro del clon → incidente con el `file:line` de Tree.class.php + regla de contención |
+| regla de **política** `fhir-patient-anon` (`seed-rules.sh`, opcional) | 2026-67610 | Sembrada por el operador, no aprendida: "Patient sin sesión web no se sirve" (los system tokens no crean sesión) | Sin oráculo: el clon no puede validar un Bearer de prod (401 → inconcluso) → la regla es **estricta** y niega lo inconcluso. Sin ella, la lectura masiva anónima pasa |
+
+Limites declarados: el oráculo `acl` replica el modelo ACL de OpenEMR (no de dueños por fila: los pacientes
+no tienen owner, por diseño). El eco del XSS solo se ve en sesiones con estado (L2): en L1 el reset del
+clon devuelve la plantilla al seed. Y los requests con Bearer de prod no validan en el clon (401 →
+inconcluso): por eso la cobertura FHIR es de contención por regla de política, no de oráculo.
+
+La semilla ya crea los encuentros y facturas que cruzan el IDOR: un encuentro activo por paciente con dos
+líneas CPT4 y su nota de facturación. Si querés la contención FHIR: `bash examples/openemr/seed-rules.sh`
+(usar el token admin del stack; sobrevive al gateway dentro del run).
 - Si `app/` se regenera con `python examples/openemr/fetch.py`, el seed del overlay se copia encima: los
   cambios viven en `examples/openemr/overlay/immune-runtime/seed-clinic.php`.
 - Para apagar una falla en la demo, alcanza con editar el `foreach` de globals del seed (por ejemplo,

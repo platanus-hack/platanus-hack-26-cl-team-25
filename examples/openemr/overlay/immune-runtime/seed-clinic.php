@@ -170,6 +170,31 @@ foreach ($patients as $i => [$fname, $lname, $dob, $sex, $doctor, $problem]) {
     );
 }
 
+// facturas sintéticas: un encuentro activo por paciente con dos líneas de cargo y su nota de facturación.
+// Es el dato que cruza el IDOR de facturación (CVE-2026-124471: interface/billing/sl_eob_invoice.php no
+// chequea el ACO acct/bill, así que cualquier usuario autenticado lee y modifica la cuenta de cualquier
+// encuentro). Los números de encuentro arrancan en 1 (la tabla está vacía en el seed) y billing.encounter
+// apunta al mismo número que form_encounter, para que el id y el número coincidan en la demo.
+foreach ($patients as $i => [$fname, $lname, $dob, $sex, $doctor, $problem]) {
+    $pid = (int) ($pids[$i] ?? 0);
+    if (!$pid || !empty(sqlQuery("SELECT id FROM form_encounter WHERE pid = ?", [$pid])['id'])) {
+        continue;
+    }
+    $encounter_id = (int) sqlInsert(
+        "INSERT INTO form_encounter (pid, encounter, date, reason, facility_id, provider_id, billing_note)"
+        . " VALUES (?, 0, NOW(), ?, ?, ?, ?)",
+        [$pid, 'Control por ' . $problem, $facility, $users[$doctor],
+         'Nota de facturación sintética de ' . $fname . ' ' . $lname . ': copago al día, sin saldo pendiente.']);
+    sqlStatement("UPDATE form_encounter SET encounter = ? WHERE id = ?", [$encounter_id, $encounter_id]);
+    foreach ([['CPT4', '99213', 'Consulta de control (evaluación y manejo)', '45.00'],
+              ['CPT4', '99396', 'Visita preventiva de paciente establecido', '60.00']] as [$ct, $code, $text, $fee]) {
+        sqlStatement(
+            "INSERT INTO billing (pid, encounter, code_type, code, code_text, fee, authorized, activity, date, user, groupname)"
+            . " VALUES (?, ?, ?, ?, ?, ?, 1, 1, NOW(), ?, 'Default')",
+            [$pid, $encounter_id, $ct, $code, $text, $fee, $users[$doctor]]);
+    }
+}
+
 // portal patient accounts: two synthetic patients hold active portal credentials (portal_pwd_status=1 and
 // no portal_onetime, as if the patient had already verified the account). They are the victims of
 // CVE-2026-67612 (a poisoned template renders in their session, and document.cookie is readable) and the

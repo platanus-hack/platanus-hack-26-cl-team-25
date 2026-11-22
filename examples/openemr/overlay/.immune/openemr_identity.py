@@ -208,3 +208,173 @@ def public_paths():
 
 def _b64(data: bytes) -> str:  # kept for symmetry with other profiles' token helpers
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+# ---------------------------------------------------------------- oráculos extra (perfil OpenEMR)
+#
+# `extra_oracles(ctx)` — el sidecar la llama después de los oráculos base (sidecar/server.py), con:
+#   env, conn (conexión admin MySQL del clon, async), database, method, path, query, headers, body,
+#   status, resp_headers, resp_body, uid, role, statements, failed, bound.
+# Tres verificaciones que miran lo que el app HIZO (SQL observado + respuesta) y lo que el app DEBIÓ
+# haber autorizado, usando las tablas del propio clon. Devuelven eventos con la misma forma que los
+# oráculos base, así que heredan todo el mecanismo: veredicto, evidencia, incidente y regla.
+
+_BILL_GROUPS = {"admin", "back", "breakglass"}   # gacl_aro_groups.value con el ACO acct/bill en 8.2.0
+_BILLING_PATH = re.compile(r"^/interface/billing/sl_eob_(invoice|search)\.php$")
+_BILLING_TABLE = re.compile(r"\b(billing|form_encounter|ar_activity|payments)\b", re.I)
+_ACTIVE_MARKUP = re.compile(
+    r"\bon(error|load|click|mouseover|focus|toggle|animationstart)\s*=|javascript\s*:"
+    r"|<\s*script\b|<\s*iframe\b|srcdoc\s*=", re.I)
+_acl_cache: dict = {}      # uid -> set de valores de gacl_aro_groups del usuario
+_mfa_cache: dict = {}      # username -> bool (tiene TOTP registrado en el clon)
+_stored_active: dict = {}  # contenido activo guardado en el clon -> docid (estado del proceso clon)
+
+
+def _ev(oracle: str, detail: dict) -> dict:
+    return {"oracle": oracle, "detail": detail, "stack": []}
+
+
+def _form_fields(body: bytes) -> dict:
+    try:
+        return {k: (v[0] if v else "") for k, v in
+                urllib.parse.parse_qs(body.decode("latin-1"), keep_blank_values=True).items()}
+    except Exception:
+        return {}
+
+
+async def _acl_groups(ctx, uid: int) -> set:
+    """Grupos gacl del usuario, según el clon (público/copiado verbatim del prod). Cacheado por proceso."""
+    if uid in _acl_cache:
+        return _acl_cache[uid]
+    groups: set = set()
+    conn = ctx.get("conn")
+    if conn is not None:
+        try:
+            rows = await conn.query(
+                "SELECT g.value FROM gacl_aro a"
+                " JOIN gacl_groups_aro_map m ON m.aro_id = a.id"
+                " JOIN gacl_aro_groups g ON g.id = m.group_id"
+                " WHERE a.section_value = 'users'"
+                " AND a.value = (SELECT username FROM users WHERE id = %d)" % int(uid))
+            groups = {r[0] for r in rows if r and r[0]}
+        except Exception:
+            groups = set()
+    _acl_cache[uid] = groups
+    return groups
+
+
+async def _has_totp(ctx, username: str) -> bool:
+    """¿El usuario tiene un TOTP registrado en el clon? (login_mfa_registrations, tabla reescrita del seed)."""
+    if username in _mfa_cache:
+        return _mfa_cache[username]
+    ok = False
+    conn, db = ctx.get("conn"), ctx.get("database") or "clone"
+    if conn is not None and username.replace("_", "").isalnum():
+        try:
+            rows = await conn.query(
+                "SELECT COUNT(*) FROM `%s`.`login_mfa_registrations` r"
+                " JOIN `%s`.`users` u ON u.id = r.user_id"
+                " WHERE r.method = 'TOTP' AND u.username = '%s'" % (db, db, username))
+            ok = bool(rows and rows[0] and rows[0][0] not in (None, "", "0"))
+        except Exception:
+            ok = False
+    _mfa_cache[username] = ok
+    return ok
+
+
+_grant_probe_cache: dict = {}   # resultado de la sonda del password grant, cacheado por proceso de clon
+
+
+async def _grant_probe(ctx) -> bool:
+    """Sonda por ejecución (una vez por clon): ¿el app emite un token por password grant sin mfa_token
+    para un usuario CON TOTP registrado? El clon no conoce las contraseñas de prod (los hashes del seed
+    son aleatorios), así que la sonda usa un usuario del propio clon: le fija una contraseña sintética
+    vía la conexión admin (fuera de la ventana de observación) y canjea el grant contra el app del clon.
+    Si el token sale sin segundo factor, el bypass está confirmado — no adivinado."""
+    if "result" in _grant_probe_cache:
+        return _grant_probe_cache["result"]
+    ok = False
+    conn, db = ctx.get("conn"), ctx.get("database") or "clone"
+    try:
+        if conn is not None:
+            rows = await conn.query(
+                "SELECT u.id, u.username FROM `%s`.`login_mfa_registrations` r"
+                " JOIN `%s`.`users` u ON u.id = r.user_id"
+                " WHERE r.method = 'TOTP' ORDER BY u.id LIMIT 1" % (db, db))
+            if rows:
+                uid, username = int(rows[0][0]), str(rows[0][1])
+                pw = "Sonda-" + secrets.token_urlsafe(12)
+                await conn.query("UPDATE `%s`.`users_secure` SET password = '%s', last_update_password = NOW()"
+                                 " WHERE id = %d" % (db, sha512_crypt(pw), uid))
+                form = _form_fields(ctx.get("body") or b"")
+                client_id = form.get("client_id") or ""
+                if not client_id.replace("-", "").isalnum():
+                    rows = await conn.query("SELECT client_id FROM `%s`.`oauth_clients`"
+                                            " WHERE grant_types LIKE '%%password%%' LIMIT 1" % db)
+                    client_id = str(rows[0][0]) if rows else ""
+                if client_id:
+                    body = urllib.parse.urlencode({"grant_type": "password", "client_id": client_id,
+                                                   "username": username, "password": pw})
+                    st, _, rb = _request(ctx.get("env") or {}, "POST", "/oauth2/default/token",
+                                         {"content-type": "application/x-www-form-urlencoded",
+                                          "host": "localhost"}, body)
+                    ok = st == 200 and b"access_token" in rb
+    except Exception:
+        ok = False
+    _grant_probe_cache["result"] = ok
+    return ok
+
+
+async def extra_oracles(ctx) -> list:
+    out: list = []
+    method, path, status = ctx["method"], ctx["path"], ctx["status"]
+    resp_body = ctx.get("resp_body") or b""
+
+    # ---- acl: lectura de facturación sin acct/bill (CVE-2026-124471). El app no chequea nada; el
+    # oráculo replayea la autorización contra el gacl del clon: admin/back leen sin ruido, front/doc
+    # y anónimos detonan.
+    if _BILLING_PATH.match(path) and status and status < 400 and ctx.get("statements"):
+        tables = {m.group(0).lower() for s in ctx["statements"] for m in _BILLING_TABLE.finditer(s)}
+        if tables:
+            uid = ctx.get("uid")
+            if uid is None:
+                out.append(_ev("acl", {"route": path, "why": "anonymous billing read", "tables": sorted(tables)}))
+            else:
+                groups = await _acl_groups(ctx, uid)
+                if not (groups & _BILL_GROUPS):
+                    out.append(_ev("acl", {"route": path, "user": uid, "groups": sorted(groups),
+                                           "required": "acct/bill", "tables": sorted(tables)}))
+
+    # ---- mfa: token por password grant sin segundo factor (CVE-2026-67611). El login web exige el
+    # código TOTP; UserRepository.php:111 solo lo valida si el request trae mfa_token. El clon no puede
+    # autenticar la contraseña del atacante (los hashes del seed son aleatorios), así que el oráculo
+    # confirma el bypass con la sonda por ejecución (_grant_probe) sobre el app del clon, y dispara
+    # cuando el request canjea credenciales de un usuario con TOTP registrado sin mandar el código.
+    if method == "POST" and path == "/oauth2/default/token":
+        form = _form_fields(ctx.get("body") or b"")
+        if form.get("grant_type") == "password" and "mfa_token" not in form:
+            username = form.get("username") or ""
+            if username and await _has_totp(ctx, username) and await _grant_probe(ctx):
+                out.append(_ev("mfa", {"user": username, "why": "token issued without mfa_token",
+                                       "scope": form.get("scope") or ""}))
+
+    # ---- xss: marcado activo guardado en una plantilla del portal (CVE-2026-67612). El save es el
+    # momento de la inyección: mode=save acepta todo salvo el literal "<?php" (import_template.php:125),
+    # y el contenido se devuelve sin codificar a cualquier víctima. El oráculo dispara en el clon
+    # durante el save, así que el gateway retiene la respuesta y el payload nunca llega a prod.
+    if method == "POST" and path == "/portal/import_template.php":
+        form = _form_fields(ctx.get("body") or b"")
+        if form.get("mode") == "save":
+            content = form.get("content") or ""
+            if _ACTIVE_MARKUP.search(content):
+                out.append(_ev("xss", {"stored": True, "docid": form.get("docid") or "",
+                                       "sample": content[:160]}))
+            if content:
+                import hashlib
+                _stored_active[hashlib.sha1(content.encode("latin-1", "replace")).hexdigest()] = \
+                    (content, form.get("docid") or "")
+        # eco diferido (L2/sesiones con estado): el contenido guardado devuelto tal cual
+        for content, docid in list(_stored_active.values()):
+            if content.encode("latin-1", "replace") in resp_body:
+                out.append(_ev("xss", {"echoed": True, "docid": docid, "sample": content[:160]}))
+    return out
