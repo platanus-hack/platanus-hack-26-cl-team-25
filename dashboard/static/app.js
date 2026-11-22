@@ -508,6 +508,16 @@
 
   function renderIncidents() {
     var host = $('incidents');
+    // Scroll anchoring: a new card is inserted at the top of the list, which would push whatever the viewer
+    // is reading downward and make the page "jump". Remember the first card at/below the viewport top before
+    // we touch the DOM, then after re-ordering restore its on-screen position by compensating the scroll.
+    var anchorId = null, anchorTop = 0;
+    Object.keys(cards).forEach(function (id) {
+      var n = cards[id].el;
+      if (!n.parentNode) return;
+      var top = n.getBoundingClientRect().top;
+      if (top >= -4 && (anchorId === null || top < anchorTop)) { anchorId = id; anchorTop = top; }
+    });
     var all = S.displayOrder(st);
     var ids = all.slice(0, CARDS_MAX);
     show($('inc-empty'), !all.length);
@@ -537,6 +547,11 @@
       if (!keep[id]) { var n = cards[id].el; if (n.parentNode) n.parentNode.removeChild(n); delete cards[id]; }
     });
     Object.keys(userOpen).forEach(function (id) { if (!keep[id]) delete userOpen[id]; });
+    // restore the anchored card's on-screen position (compensate for cards inserted/removed above it)
+    if (anchorId && cards[anchorId] && cards[anchorId].el.parentNode) {
+      var delta = cards[anchorId].el.getBoundingClientRect().top - anchorTop;
+      if (Math.abs(delta) > 1) window.scrollBy(0, delta);
+    }
   }
 
   function renderProd() {
