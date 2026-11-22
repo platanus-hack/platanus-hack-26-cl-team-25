@@ -14,11 +14,12 @@ from __future__ import annotations
 import time
 
 # gateway
-REQ_CLASSIFIED = "request.classified"   # data: {class: clean|suspect|captive|evidence, reasons:[..], method, path, session, uid}
+REQ_CLASSIFIED = "request.classified"   # data: {class: clean|suspect|captive|evidence|blocked|simulation|authorized|unavailable, reasons:[..], method, path, session, uid, status}
 REQ_ROUTED = "request.routed"           # data: {route: prod|shadow_l1|shadow_l2|l0|deny, status, verdict, ms}
 ORACLE_FIRED = "oracle.fired"           # data: evidence object (contracts/schemas/evidence.schema.json) + {session, uid}
 SESSION_CAPTURED = "session.captured"   # data: {session, clone, reason}
 SESSION_RELEASED = "session.released"   # data: {session, reason: ttl|evicted|patched|clone_gone|reset}
+SESSION_RESTRICTED = "session.restricted"  # FUXA containment: {session, operations, reason, expires}
 RULE_ACTIVE = "rule.active"             # data: rule object
 RULE_EXPIRED = "rule.expired"           # data: {id, reason}
 UPSTREAM_SWITCHED = "upstream.switched" # data: {release, addr}
@@ -39,7 +40,8 @@ PR_MERGED = "pr.merged"                 # data: {incident, url, sha}
 INCIDENT_CLOSED = "incident.closed"     # data: {incident, outcome: patched|rule_only|not_reproducible, seconds_to_rule, seconds_to_patch,
                                         #        outcome_detail?: escalated (fired live, not on every replay: rule kept, a person decides)|transient|pr_open|…}
 VERIFY_RESULT = "verify.result"         # data: {incident, exploit_blocked_on_prod: bool}
-FUXA_STATUS = "fuxa.status"              # data: {active, enforced, coverage, pending, monitor}
+FUXA_STATUS = "fuxa.status"              # data: {active, enforced, protected, persistent, validation, legitimate, coverage, coverage_audit, pending, partial, patch_mode, monitor}
+FUXA_REVIEW = "fuxa.review"              # The incident's candidate passed review checks and awaits approval.
 # pipeline: self-audit of the same class after an incident closes (contracts/product.md §8)
 AUDIT_STARTED = "audit.started"         # data: {incident, vuln_class, candidates}
 AUDIT_FINDING = "audit.finding"         # data: {incident, parent, route, param}

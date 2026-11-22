@@ -33,7 +33,8 @@ def patched_copy(release_dir: str, diffs: list[str]) -> tuple[str, list[str]]:
         f.write("[pytest]\n")
     errors = []
     for d in diffs:
-        r = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=root, input=d, text=True,
+        r = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=root,
+                           input=d.encode("utf-8"),  # bytes: a text pipe would CRLF-ify on Windows
                            capture_output=True)
         if r.returncode != 0:
             errors.append(r.stderr.strip())

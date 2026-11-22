@@ -22,9 +22,17 @@ function emit(type, context, evidence) {
     }
 }
 
+const OP_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+// The gateway forwards x-immune-op-id so this request and its verdict share one id.
+function opIdOf(req) {
+    const header = req && req.headers ? req.headers['x-immune-op-id'] : null;
+    return typeof header === 'string' && OP_ID.test(header) ? header : randomUUID();
+}
+
 function http(operation) {
     return function observeRequest(req, res, next) {
-        const context = { id: randomUUID(), operation };
+        const context = { id: opIdOf(req), operation };
         requests.set(req, context);
         res.once('finish', () => {
             if (res.statusCode === 401 || res.statusCode === 403) {
@@ -47,7 +55,7 @@ function roleOf(req, runtime) {
 }
 
 function authorize(operation, mode, req, runtime) {
-    const context = requests.get(req) || { id: randomUUID(), operation };
+    const context = requests.get(req) || { id: opIdOf(req), operation };
     let role = 'unknown';
     try {
         role = roleOf(req, runtime);
@@ -56,11 +64,28 @@ function authorize(operation, mode, req, runtime) {
     }
     const allowed = mode === 'observe' || role === 'admin';
     emit('effect', context, {
-        boundary: effects[operation],
+        boundary: effects[operation] || 'write-route',
         role,
         decision: mode === 'observe' ? 'observed' : allowed ? 'allowed' : 'blocked',
     });
     return allowed;
 }
 
-module.exports = { http, authorize };
+// Generic pre-effect guard for declared HTTP write routes. The candidate revision
+// is the only place where the mode switches from observe to enforce.
+function routeGuard(operation, mode, req, res, next, runtime) {
+    const context = { id: opIdOf(req), operation };
+    let role = 'unknown';
+    try {
+        role = roleOf(req, runtime);
+    } catch {
+        // Without a verifiable identity the guard stops the effect.
+    }
+    const allowed = mode === 'observe' || role === 'admin';
+    emit('effect', context, { boundary: 'write-route', role,
+        decision: mode === 'observe' ? 'observed' : allowed ? 'allowed' : 'blocked' });
+    if (allowed) return next();
+    res.status(403).end();
+}
+
+module.exports = { http, authorize, routeGuard, opIdOf };

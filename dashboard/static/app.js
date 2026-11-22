@@ -10,6 +10,24 @@
   var DIFF_LINES_MAX = 300;
   var TICKER_ROWS = 14;
 
+  var pollingFuxaRequests = false;
+  var fuxaReasons = {
+    device_control: 'Control de dispositivo',
+    tag_write: 'Escritura de tag',
+    historian_query: 'Consulta del histórico',
+    scheduler_without_token: 'Cambio de programación sin token',
+    scheduler_authorization: 'Cambio de programación sin autorización',
+    'repeated-denied-operations': 'Operaciones denegadas de forma repetida',
+    ttl: 'Restricción vencida'
+  };
+  var verdictLabels = {
+    authorized: 'Permitida',
+    blocked: 'Bloqueada',
+    unavailable: 'Evaluación no disponible',
+    restricted: 'Sesión restringida',
+    released: 'Restricción vencida'
+  };
+
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -87,7 +105,8 @@
     return dd;
   }
   var DETAIL_LABEL = { input: 'Entrada', location: 'Ubicación', param: 'Parámetro', reason: 'Motivo', statement: 'Consulta', path: 'Ruta pedida',
-                       realpath: 'Archivo leído', owner: 'Dueño', uid: 'Usuario', table: 'Tabla', command: 'Comando', url: 'URL', host: 'Host' };
+                       realpath: 'Archivo leído', owner: 'Dueño', uid: 'Usuario', table: 'Tabla', command: 'Comando', url: 'URL', host: 'Host',
+                       operation: 'Operación', role: 'Rol', session: 'Sesión', boundary: 'Efecto', decision: 'Qué pasó', expected: 'Esperado' };
   var CODE_KEYS = { statement: 1, command: 1 };
 
   function renderDiff(diff) {
@@ -122,9 +141,19 @@
     idor: ['Datos de otro usuario', 'Cambiando un id en la URL, un usuario leía datos que no eran suyos.']
   };
   function storyOf(inc, status) {
-    if (inc.fuxa) return inc.fuxa.synthetic ? 'Evidencia simulada.' : 'Violación observada por Immune.';
+    if (inc.fuxa) {
+      var head = inc.fuxa.synthetic ? 'Evidencia simulada. ' : 'Un rol sin permiso alcanzó una operación administrativa. ';
+      var outcome = inc.closed && inc.closed.outcome;
+      if (outcome === 'patched') return head + 'El control quedó en enforce y verificado en el gateway.';
+      if (outcome === 'rolled_back') return head + 'El candidato falló tras el cambio y se restauró la revisión anterior.';
+      if (outcome === 'rejected') return head + 'El candidato no pasó las validaciones.';
+      if (inc.awaitingReview) return head + 'El candidato está validado y espera aprobación.';
+      if (inc.rule && !inc.ruleExpired) return head + 'Una regla temporal contiene la operación mientras se valida el parche.';
+      return head + 'Inmune está validando el parche.';
+    }
     if (status === 'cured') return inc.verify && inc.verify.blocked ? 'Parchada y verificada en producción.' : 'Parchada.';
     if (status === 'dismissed') return 'Descartada: no se pudo reproducir.';
+    if (inc.closed && inc.closed.outcome === 'rule_only') return 'El incidente cerró con la regla del gateway.';
     if (status === 'contained') return 'El gateway cierra este punto con una regla mientras se valida el parche.';
     if (!inc.opened) return 'En cola: el pipeline atiende un incidente a la vez.';
     return 'Confirmada en un clon. Todavía sin regla.';
@@ -150,7 +179,7 @@
     return box;
   }
 
-  function buildDetail(inc) {
+  function buildDetail(inc, php) {
     var box = el('div', 'detail');
     var o = inc.oracles[0];
     var rq = (o && o.data.request) || inc.request;
@@ -170,10 +199,12 @@
     if (o) {
       var ev0 = o.data.events[0] || {};
       var fr = (ev0.stack && ev0.stack[0]) || null;
-      var sink = inc.sink || fr;
+      var sink = php || inc.sink || fr;
       var s2 = section('Oráculo ' + (ev0.oracle || '') + (inc.hits > 1 ? ', ' + inc.hits + ' disparos' : ''), inc, o.ts, 'bad');
-      if (sink && sink.file) rowOf(s2, 'Dónde', sink.file + ':' + sink.line + (fr && fr.func ? '  ' + fr.func + '()' : ''));
-      rowOf(s2, 'Respuesta', 'HTTP ' + (o.data.status == null ? '?' : o.data.status) + (o.data.mode ? ', clon ' + o.data.mode : ''));
+      var fn = php ? php.func : fr && fr.func;
+      if (sink && sink.file) rowOf(s2, 'Dónde', sink.file + (sink.line == null ? '' : ':' + sink.line) + (fn ? '  ' + fn + '()' : ''));
+      if (inc.fuxa) rowOf(s2, 'Origen', (o.data.mode || 'producción') + (o.data.status == null ? ', evento Socket.IO' : ', HTTP ' + o.data.status), 'plain');
+      else rowOf(s2, 'Respuesta', 'HTTP ' + (o.data.status == null ? '?' : o.data.status) + (o.data.mode ? ', clon ' + o.data.mode : ''));
       var dt = ev0.detail;
       if (dt && typeof dt === 'object' && !Array.isArray(dt)) {
         Object.keys(dt).slice(0, 8).forEach(function (k) {
@@ -204,10 +235,11 @@
 
     var stl = { pending: 'En curso', rejected: 'Rechazado', accepted: 'Aceptado' };
     inc.attempts.forEach(function (a) {
-      // a finished deploy decides the attempt's result (its gates passed, or an external lab validated and
-      // deployed it out of band); a gate-rejected attempt stays rejected.
-      var result = a.status;
-      if (result !== 'rejected' && inc.deploy && inc.deploy.doneTs) result = inc.deploy.ok ? 'accepted' : 'rejected';
+      // a finished deploy decides the attempt's result; a gate-rejected attempt stays rejected. This covers
+      // the external-lab path (validated and deployed out of band, e.g. the ScadaBR Java patch) too.
+      var result = inc.fuxa && inc.deploy && inc.deploy.doneTs
+        ? (inc.deploy.ok || inc.deploy.rolled_back ? 'accepted' : 'rejected')
+        : (a.status !== 'rejected' && inc.deploy && inc.deploy.doneTs ? (inc.deploy.ok ? 'accepted' : 'rejected') : a.status);
       var sa = section((inc.fuxa ? 'Parche local' : 'Parche') + (inc.attempts.length > 1 ? ', intento ' + a.attempt : ''), inc, a.diffTs || a.ts,
         result === 'accepted' ? 'done' : result === 'rejected' ? 'bad' : 'run');
       var ab = el('div', 'attempt ' + result);
@@ -218,7 +250,7 @@
       var gates = el('div', 'gates');
       S.GATES.forEach(function (g) {
         var gr = a.gates[g];
-        if (inc.fuxa) return;
+        if (inc.fuxa && gr.state === 'pending') return;
         var ge = el('div', 'gate ' + gr.state);
         var gn = el('div', 'n');
         add(gn, el('i', 'sd'), el('span', null, GATE_LABEL[g] || g));
@@ -276,6 +308,8 @@
     if (inc.fuxa) {
       var outcome = inc.closed && inc.closed.outcome;
       if (outcome === 'rejected') label = 'Requiere revisión';
+      else if (outcome === 'rolled_back') label = 'Reversión verificada';
+      else if (inc.awaitingReview) label = 'Pendiente de aprobación';
       else if (inc.deploy && inc.deploy.ok) label = 'Parche verificado';
       else label = inc.deploy ? 'Redesplegando' : inc.attempts.length ? 'Validando parche local' : 'Evidencia registrada';
     }
@@ -286,11 +320,13 @@
     card.id = 'card-' + inc.id;
 
     var row = el('summary', 'row');
-    row.appendChild(statusIcon(!inc.opened && status === 'open' ? 'queued' : status));
+    row.appendChild(statusIcon(!inc.opened && status === 'open' ? 'queued' : status === 'rolledBack' ? 'contained' : status));
     row.appendChild(el('span', 'id', inc.id));
     var title = el('span', 'title');
+    var php = inc.closed && inc.closed.outcome === 'rule_only' ? S.phpLocation(inc) : null;
     add(title, el('span', 'cls', cls ? cls[0] : (inc.vuln_class || 'Incidente')),
       el('span', 'route', (inc.method ? inc.method + ' ' : '') + (inc.route || '')),
+      php ? el('span', 'tag source-location', php.file + ':' + php.line) : null,
       inc.origin === 'audit' ? el('span', 'tag', 'Auto-auditoría') : null);
     row.appendChild(title);
     var r = S.timeToRule(inc), p = S.timeToProd(inc);
@@ -333,7 +369,7 @@
       body.appendChild(props);
 
       if (live || inc.fuxa) body.appendChild(buildSteps(inc));
-      body.appendChild(buildDetail(inc));
+      body.appendChild(buildDetail(inc, php));
       card.appendChild(body);
     }
     card.addEventListener('toggle', function () {
@@ -525,42 +561,155 @@
     var host = $('ticker');
     clear(host);
     if (!st.ticker.length) { host.appendChild(el('p', 'empty', 'Sin tráfico todavía')); return; }
+    var fuxaLabels = { suspect: 'Sospechoso', evidence: 'Ataque confirmado', blocked: 'Ataque bloqueado', simulation: 'Simulación' };
     var ticker = st.fuxa ? st.ticker.slice().sort(function (a, b) { return b.ts - a.ts; }) : st.ticker;
     ticker.slice(0, TICKER_ROWS).forEach(function (t) {
       var rc = t.route === 'prod' ? 'prod' : t.route === 'deny' ? 'deny' : t.route ? 'shadow' : '';
       var row = el('div', 'row cls-' + (/^[a-z]+$/.test(t.cls || '') ? t.cls : 'x') + (t.verdict === 'oracle' ? ' oracle' : ''));
       var path = el('span', 'path', (t.method || '') + ' ' + (t.path || ''));
       path.title = (t.method || '') + ' ' + (t.path || '') + (t.reasons && t.reasons.length ? '  [' + t.reasons.join(', ') + ']' : '');
-      add(row, el('span', 'ts', hms(t.ts)), el('span', 'rt ' + rc, t.route ? (ROUTE_LABEL[t.route] || t.route) : (t.cls || '...')),
+      if (st.fuxa && fuxaReasons[t.reason]) {
+        path.textContent += ' · ' + fuxaReasons[t.reason];
+        path.title = path.textContent;
+      }
+      var label = st.fuxa ? (fuxaLabels[t.cls] || verdictLabels[t.cls]) : (ROUTE_LABEL[t.route] || t.route);
+      add(row, el('span', 'ts', hms(t.ts)), el('span', 'rt ' + rc, label || t.cls || '…'),
         path, el('span', 'st', t.verdict === 'oracle' ? 'oráculo' : (t.status == null ? '' : t.status)));
       host.appendChild(row);
     });
   }
 
+  var projectSubtitle = '';
+
   function renderFuxa() {
     var live = st.fuxa;
     document.body.classList.toggle('fuxa', !!live);
-    show($('dashboard-subtitle'), !!live);
+    var subtitle = live ? 'Estación Delta · FUXA v1.2.9' : projectSubtitle;
+    $('dashboard-subtitle').textContent = subtitle;
+    show($('dashboard-subtitle'), !!subtitle);
     show($('fuxa-summary'), !!live);
     show($('traffic-legend'), !live);
     $('production-column').textContent = live ? 'Tiempo a parche' : 'En producción';
-    $('traffic-title').textContent = live ? 'Alertas HTTP' : 'Tráfico';
+    $('traffic-title').textContent = live ? 'Detecciones de Inmune' : 'Tráfico';
+    show($('fuxa-requests-panel'), !!live);
     if (!live) return;
-    $('dashboard-subtitle').textContent = 'Estación Delta · FUXA v1.2.9';
+    if (!pollingFuxaRequests) {
+      pollingFuxaRequests = true;
+      pollFuxaRequests();
+    }
     $('fuxa-revision').textContent = live.active ? 'Revisión activa ' + live.active : 'FUXA sin revisión activa';
     $('fuxa-monitor').textContent = live.monitor ? 'Monitor activo' : 'Monitor sin señal reciente';
-    $('fuxa-pending').textContent = live.pending + ' entradas del inventario con cobertura pendiente';
+    var persistence = $('fuxa-persistence');
+    persistence.hidden = !live.persistent;
+    persistence.textContent = 'Proyecto y sesiones persistentes';
+    var patchMode = $('fuxa-patch-mode');
+    patchMode.hidden = !live.patch_mode;
+    if (live.patch_mode) {
+      patchMode.textContent = live.patch_mode === 'review' ?
+        'Parches sujetos a aprobación' : 'Parches con despliegue automático';
+    }
+    var validation = $('fuxa-validation');
+    validation.hidden = !live.validation;
+    if (live.validation) {
+      validation.textContent = 'Validación aislada · ' + live.validation.checks + ' comprobaciones con ' +
+        live.validation.identities + ' identidades sintéticas' +
+        (live.validation.evaluator === 'metadata' ? ' · Autorización aislada antes del efecto' : '');
+    }
+    var legitimate = $('fuxa-legitimate');
+    legitimate.hidden = !live.legitimate;
+    if (live.legitimate) {
+      var flows = { project: 'proyecto HMI', guest_access: 'acceso de invitados', realtime: 'conexión en vivo' };
+      legitimate.textContent = 'Flujos verificados · ' +
+        live.legitimate.flows.map(function (flow) { return flows[flow] || flow; }).join(', ');
+    }
+    $('fuxa-pending').textContent = live.pending + ' entradas del inventario con cobertura pendiente' +
+      (live.partial ? ' · ' + live.partial + ' con cobertura parcial' : '');
+    var audit = $('fuxa-audit');
+    audit.hidden = !live.coverage_audit;
+    if (live.coverage_audit) {
+      audit.textContent = 'Auditoría de cobertura · ' + live.coverage_audit.write_review + ' rutas de escritura, ' +
+        live.coverage_audit.read_review + ' rutas de lectura y ' + live.coverage_audit.event_review +
+        ' eventos por revisar';
+    }
     var list = $('fuxa-coverage');
     var labels = { 'settings.write': 'Escritura de configuración', 'system-function.run': 'Funciones del sistema' };
     clear(list);
     live.coverage.forEach(function (id) {
       list.appendChild(el('li', null, (labels[id] || id) + ' · ' + (live.enforced.indexOf(id) >= 0 ? 'control activo' : 'en observación')));
     });
+    (live.protected || []).forEach(function (id) {
+      list.appendChild(el('li', null, (fuxaReasons[id] || id) + ' · control activo'));
+    });
+  }
+
+  function renderRestrictions() {
+    var host = $('restrictions');
+    if (!host) return;
+    var active = Object.keys(st.restrictions).map(function (key) { return st.restrictions[key]; });
+    active.sort(function (a, b) { return (a.expires || 0) - (b.expires || 0); });
+    var countLabel = $('fuxa-restricted-count');
+    countLabel.hidden = !st.fuxa || active.length === 0;
+    countLabel.textContent = count(active.length, 'sesión restringida', 'sesiones restringidas');
+    var panel = $('restrictions-panel');
+    if (panel) panel.hidden = !st.fuxa || active.length === 0;
+    clear(host);
+    if (!st.fuxa || !active.length) {
+      if (st.fuxa) host.appendChild(el('p', 'empty', 'Sin restricciones de sesión.'));
+      return;
+    }
+    var now = Date.now() / 1000;
+    active.forEach(function (r) {
+      var row = el('div', 'row cls-blocked');
+      var ops = (r.operations || []).map(function (op) { return fuxaReasons[op] || op; }).join(', ');
+      var left = typeof r.expires === 'number' ? Math.max(0, Math.round(r.expires - now)) : null;
+      var path = el('span', 'path', ops || 'operación restringida');
+      path.title = fuxaReasons[r.reason] || r.reason || '';
+      add(row, el('span', null, hms(r.ts || r.expires)), el('span', 'rt deny', 'Restringida'),
+        path, el('span', null, left == null ? '—' : 'vence en ' + left + ' s'));
+      host.appendChild(row);
+    });
+  }
+
+  async function pollFuxaRequests() {
+    var host = $('fuxa-requests');
+    try {
+      var response = await fetch('/fuxa/requests', { cache: 'no-store' });
+      if (!response.ok) throw new Error('Request feed unavailable');
+      var feed = await response.json();
+      clear(host);
+      if (!feed.available || !feed.requests.length) {
+        host.appendChild(el('p', 'empty', feed.available ?
+          'Esperando peticiones al gateway de FUXA.' : 'Gateway no disponible.'));
+      }
+      feed.requests.slice(0, 15).forEach(function (request) {
+        var row = el('div', 'row cls-' + request.class);
+        var status = request.status == null ? '—' : request.status;
+        var labels = { suspect: 'Sospechosa', blocked: 'Bloqueada', clean: 'Sin señales', uninspected: 'Sin cobertura' };
+        var verdict = verdictLabels[request.verdict];
+        var classification = el('span', 'rt', verdict || labels[request.class] || labels.uninspected);
+        var reason = fuxaReasons[request.reason];
+        if (request.class === 'suspect' || request.class === 'blocked') {
+          classification.title = reason || 'El servidor rechazó el acceso (' + status + ')';
+        }
+        var requestText = (request.transport === 'websocket' ? 'WS' : request.method) + ' ' + request.path;
+        var path = el('span', 'path', reason ? requestText + ' · ' + reason : requestText);
+        if (reason) path.title = path.textContent;
+        add(row, el('span', null, hms(request.ts)),
+          classification, path,
+          el('span', null, status), el('span', null, request.ms + ' ms'));
+        host.appendChild(row);
+      });
+    } catch {
+      clear(host);
+      host.appendChild(el('p', 'empty', 'No se pudo cargar el tráfico del gateway.'));
+    } finally {
+      window.setTimeout(pollFuxaRequests, 2000);
+    }
   }
 
   function render() {
     dirty = false;
-    [renderFuxa, renderScore, renderIncidents, renderProd, renderAudits, renderAttacks, renderTicker].forEach(function (f) {
+    [renderFuxa, renderScore, renderIncidents, renderProd, renderAudits, renderAttacks, renderTicker, renderRestrictions].forEach(function (f) {
       try { f(); } catch (e) { /* one broken panel must not blank the rest */ }
     });
   }
@@ -624,6 +773,8 @@
       var h;
       try { h = JSON.parse(m.data); } catch (e) { return; }
       if (!h || typeof h.gen !== 'string') return;
+      var subtitle = typeof h.subtitle === 'string' ? h.subtitle : '';
+      if (projectSubtitle !== subtitle) { projectSubtitle = subtitle; schedule(); }
       var stale = st.lastSeq > 0 && ((gen !== null && h.gen !== gen) || (typeof h.seq === 'number' && h.seq < st.lastSeq));
       gen = h.gen;
       if (stale) { resetState(); connect(); }

@@ -29,9 +29,9 @@
       prodAlerts: [],
       ticker: [], tickerByRid: dict(),
       counters: { prod: 0, detonated: 0, deny: 0, total: 0 },
-      sessions: dict(), pool: null, fuxa: null,
+      sessions: dict(), restrictions: dict(), pool: null, fuxa: null,
       upstream: null, switches: [], deploy: null, lastOpened: null,
-      archive: { seen: 0, open: 0, contained: 0, cured: 0, dismissed: 0, audit: 0, prod: [] },
+      archive: { seen: 0, open: 0, contained: 0, cured: 0, dismissed: 0, rolledBack: 0, audit: 0, prod: [] },
       lastSeq: 0, lastTs: 0, events: 0, ignored: 0
     };
   }
@@ -213,8 +213,16 @@
 
     switch (ev.type) {
       case 'request.classified':
+        var current = ev.src === 'fuxa' && rid && st.tickerByRid[rid];
+        if (current) {
+          if (d['class'] !== 'suspect') current.cls = str(d['class']);
+          if (d.status != null) current.status = str(d.status);
+          if (d.reason) current.reason = str(d.reason);
+          current.ts = Math.max(current.ts, ts);
+          break;
+        }
         pushTicker(st, rid, { ts: ts, method: str(d.method), path: str(d.path), cls: str(d['class']),
-          reasons: Array.isArray(d.reasons) ? d.reasons.slice(0, 6).map(String) : [], route: null, status: null, verdict: null, ms: null });
+          reasons: Array.isArray(d.reasons) ? d.reasons.slice(0, 6).map(String) : [], route: null, status: d.status == null ? null : str(d.status), reason: str(d.reason), verdict: null, ms: null });
         break;
       case 'request.routed':
         st.counters.total++;
@@ -247,7 +255,16 @@
         if (sid(d.session)) st.sessions[sid(d.session)] = true;
         break;
       case 'session.released':
-        if (sid(d.session)) delete st.sessions[sid(d.session)];
+        if (sid(d.session)) {
+          delete st.sessions[sid(d.session)];
+          delete st.restrictions[sid(d.session)];
+        }
+        break;
+      case 'session.restricted':
+        if (sid(d.session)) {
+          st.restrictions[sid(d.session)] = { ts: ts, operations: Array.isArray(d.operations) ? d.operations.map(String) : [],
+            reason: str(d.reason), expires: num(d.expires) };
+        }
         break;
       case 'canary.started':
         st.canary = { ts: ts, release: str(d.release), weight: num(d.weight) };
@@ -296,6 +313,7 @@
              one shown and timed. Detection (oracles, t.identified, t.found) belongs to the incident, not the run. */
           inc.runs = (inc.runs || 1) + 1;
           inc.attempts = []; inc.poc = null; inc.pr = null; inc.merged = null; inc.deploy = null; inc.prod = null;
+          inc.awaitingReview = false;
           inc.verify = null; inc.closed = null; inc.rule = null; inc.ruleExpired = null;
           inc.t = { seen: inc.t.seen, identified: inc.t.identified, oracle: inc.t.oracle, found: inc.t.found };
         }
@@ -326,6 +344,12 @@
         inc = ensure(st, id, ts); a = attemptOf(inc, d.attempt, ts);
         a.source = str(d.source); a.ts = ts;
         if (inc.t.patchStart == null) inc.t.patchStart = ts;
+        touch(inc);
+        break;
+      case 'fuxa.review':
+        if (!id) break;
+        inc = ensure(st, id, ts);
+        inc.awaitingReview = true;
         touch(inc);
         break;
       case 'patch.diff':
@@ -363,6 +387,7 @@
           target.deploy.release = str(d.release);
           if (!done) { target.deploy.startTs = ts; target.t.deployStart = ts; }
           else {
+            target.awaitingReview = false;
             target.deploy.doneTs = ts; target.deploy.ok = !!d.ok;
             target.deploy.rolled_back = !!d.rolled_back; target.deploy.detail = text(d.detail); target.t.deploy = ts;
             target.deploy.canary = canaryOf(d.canary);
@@ -482,6 +507,21 @@
 
   function visible(inc) { return !!(inc.opened || inc.oracles.length || inc.origin === 'audit'); }
 
+  function phpLocation(inc) {
+    function isPhpFrame(frame) {
+      return frame && typeof frame.file === 'string' && /\.php$/i.test(frame.file) &&
+        Number.isInteger(frame.line) && frame.line > 0;
+    }
+    if (isPhpFrame(inc.sink)) return inc.sink;
+    for (var oracle of inc.oracles) {
+      for (var event of oracle.data.events) {
+        var frame = event.stack.find(isPhpFrame);
+        if (frame) return frame;
+      }
+    }
+    return null;
+  }
+
   function pushTicker(st, rid, entry) {
     entry.rid = rid;
     st.ticker.unshift(entry);
@@ -498,6 +538,7 @@
     var outcome = inc.closed && inc.closed.outcome;
     if (outcome === 'patched' || (inc.verify && inc.verify.blocked) ||
         (!inc.verify && inc.merged && inc.deploy && inc.deploy.doneTs && inc.deploy.ok)) return 'cured';
+    if (inc.fuxa && outcome === 'rolled_back') return 'rolledBack';
     if (outcome === 'not_reproducible') return 'dismissed';
     if (inc.rule && !inc.ruleExpired) return 'contained';
     return 'open';
@@ -558,7 +599,14 @@
     if (inc.fuxa) {
       var deploy = inc.deploy;
       push('detect', inc.fuxa.synthetic ? 'Evidencia simulada' : 'Violación observada', t0(inc));
+      if (inc.oracles.length) push('analysis', 'Análisis', inc.oracles[0].ts);
+      if (inc.rule) push('rule', inc.ruleExpired ? 'Regla retirada' : 'Regla activa', t.rule);
       push('patch', 'Parche local', t.diff || t.patchStart);
+      for (i = 0; i < GATES.length; i++) {
+        var gate = a && a.gates[GATES[i]];
+        if (gate && gate.state !== 'pending') push('gate:' + GATES[i], GATES[i], gate.ts, gate.state === 'pass' ? 'done' : 'fail');
+      }
+      if (inc.awaitingReview) push('review', 'Pendiente de aprobación', null, 'active');
       if (deploy) push('deploy', deploy.rolled_back ? 'Reversión' : 'Redespliegue', deploy.doneTs || deploy.startTs,
         deploy.doneTs ? (deploy.ok || deploy.rolled_back ? 'done' : 'fail') : 'active');
       if (!inc.fuxa.timed) out.forEach(function (stage) { stage.dt = null; });
@@ -636,7 +684,7 @@
 
   function scoreboard(st) {
     var ar = st.archive;
-    var s = { seen: ar.seen, open: ar.open, contained: ar.contained, cured: ar.cured, dismissed: ar.dismissed, audit: ar.audit };
+    var s = { seen: ar.seen, open: ar.open, contained: ar.contained, cured: ar.cured, dismissed: ar.dismissed, rolledBack: ar.rolledBack, audit: ar.audit };
     s.pending = pendingAttacks(st).length; s.seen += s.pending; s.open += s.pending;
     for (var i = 0; i < st.order.length; i++) {
       var inc = st.incidents[st.order[i]];
@@ -652,6 +700,7 @@
     s.ruleMedian = median(rt); s.ruleN = rt.length;
     s.prod = st.counters.prod; s.detonated = st.counters.detonated; s.deny = st.counters.deny; s.total = st.counters.total;
     s.captive = Object.keys(st.sessions).length;
+    s.restricted = Object.keys(st.restrictions).length;
     s.free = st.pool ? st.pool.free : null; s.busy = st.pool ? st.pool.busy : null; s.size = st.pool ? st.pool.size : null;
     return s;
   }
@@ -699,7 +748,7 @@
     stages: stages, t0: t0, queueTime: queueTime, timeToRule: timeToRule, timeToDiff: timeToDiff, timeToMerged: timeToMerged,
     timeToProd: timeToProd, timeToVerified: timeToVerified, displayOrder: displayOrder, routeMatches: routeMatches,
     attackKind: attackKind, decodeB64: decodeB64, isGithubUrl: isGithubUrl, prLabel: prLabel, attemptStatus: attemptStatus,
-    auditLine: auditLine, auditText: auditText, visible: visible, pendingAttacks: pendingAttacks
+    auditLine: auditLine, auditText: auditText, visible: visible, pendingAttacks: pendingAttacks, phpLocation: phpLocation
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ImmuneState = api;

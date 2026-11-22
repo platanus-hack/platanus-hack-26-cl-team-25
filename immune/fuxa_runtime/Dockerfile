@@ -7,5 +7,6 @@ COPY source/server/package*.json ./
 RUN npm ci --no-audit --no-fund
 COPY source/server /app/server
 COPY source/client/dist /app/client/dist
-COPY observe.cjs start.cjs gateway.cjs check.cjs read-events.cjs plant.cjs plant.svg /immune/
+COPY *.cjs plant.svg /immune/
+RUN install -d -o node -g node -m 0700 /lab
 USER node

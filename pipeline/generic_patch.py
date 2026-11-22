@@ -32,7 +32,9 @@ MAX_EDITABLE = 3
 CLASS_RULES = {
     "sqli": """The attacker's value reaches an SQL statement by string concatenation or interpolation. Make
 the statement parameterised with the placeholder style of the database driver the code already uses
-(for node-postgres: `$1, $2, ...` and a values array passed to the same query call). Keep the SQL text
+(for node-postgres: `$1, $2, ...` and a values array passed to the same query call; for PHP code on
+OpenEMR-style helpers: `?` placeholders with the binds array of the same `sqlStatement` / `sqlQuery` /
+`QueryUtils::*` / ADOdb `Execute` call; for PDO / mysqli: prepared statements). Keep the SQL text
 constant and keep the exact matching semantics (if the value was wrapped in `%` for LIKE/ILIKE, put
 the `%` into the bound value, not into the SQL text). Do not escape, strip or reject quotes by hand.""",
     "traversal": """The attacker's value is joined to a directory and the resulting path is opened without checking
@@ -54,12 +56,13 @@ deliverable: when you finish, your changes become a diff that automatic gates ch
 properties, the attack replayed against the patched app, the app's own test suite, and replay of real
 legitimate traffic). Nothing in your reply is applied; keep it to two or three sentences.
 
-## The bug (observed from outside the process: no stack trace is available)
+## The bug ({stack_note})
 
 - Class: {vuln_class}
 - Endpoint: {method} {route}
 - Parameter: {param}
 - Observed at the sink: {sink}
+- Where in the code (innermost first): {stack}
 
 Files you may edit (edits to any other file are refused): {editable}
 They were located from the route, the parameter and the observed sink; read other files if you need
@@ -168,10 +171,39 @@ def _owner_tables(inc: dict, cfg) -> list:
         return []
 
 
+def stack_frames(incident: dict) -> list:
+    """Evidence stack frames ({file, line, func}) of the incident, innermost (the sink) first; empty without a
+    tracer. Evidence stacks are stored outermost first."""
+    out = []
+    for e in (incident.get("evidence") or {}).get("events") or []:
+        for fr in reversed(e.get("stack") or []):
+            if isinstance(fr, dict) and fr.get("file") and fr not in out:
+                out.append(fr)
+    return out
+
+
+def stack_files(incident: dict, cfg, files: list) -> list:
+    """Release-relative source files named by the evidence stack (app frames only), innermost first."""
+    workdir = ""
+    try:
+        workdir = str(((cfg.raw or {}).get("app") or {}).get("workdir") or "").rstrip("/")
+    except Exception:  # noqa: BLE001
+        pass
+    known = set(files)
+    out = []
+    for fr in stack_frames(incident):
+        f = str(fr["file"])
+        rel = f[len(workdir) + 1:] if workdir and f.startswith(workdir + "/") else f.lstrip("/")
+        if rel in known and rel not in out:
+            out.append(rel)
+    return out
+
+
 def locate(workdir: str, incident: dict, cfg) -> tuple[list, dict]:
-    """-> (editable files, {file: score detail}) ranked from the incident (no stack frames)."""
+    """-> (editable files, {file: score detail}) ranked from the incident (stack frames first when recorded)."""
     cls = incident.get("vuln_class") or "other"
     files = _sources(workdir, cfg.app.source_dirs)
+    from_stack = stack_files(incident, cfg, files)
     route_toks = _segments(incident.get("route") or "")
     param = (incident.get("param") or {}).get("name") or ""
     frags = _statement_fragments(incident) if cls == "sqli" else []
@@ -215,7 +247,9 @@ def locate(workdir: str, incident: dict, cfg) -> tuple[list, dict]:
         if cls == "idor" and route_toks and route_toks[-1] in src and re.search(r"\bSELECT\b", src):
             s += 2
         route_score[f], sink_score[f], why[f] = r, s, notes
-    chosen = []
+    chosen = list(from_stack[:MAX_EDITABLE])
+    for f in chosen:
+        why.setdefault(f, []).insert(0, "evidence stack")
     by_route = sorted((f for f in files if route_score.get(f)), key=lambda f: (-route_score[f], f))
     by_sink = sorted((f for f in files if sink_score.get(f)), key=lambda f: (-sink_score[f], -route_score.get(f, 0), f))
     for f in by_sink[:2] + by_route[:1] + by_sink[2:]:
@@ -243,7 +277,12 @@ def render(incident: dict, editable: list, feedback, attempt: int) -> str:
     elif cls == "idor":
         sink = "response contained data of user %s, requested by user %s" % (d.get("marker_owner"), d.get("requester"))
     lang = sorted({LANG.get(os.path.splitext(f)[1].lower(), "") for f in editable} - {""}) or ["an unknown language"]
+    frames = stack_frames(incident)
+    stack = "; ".join("%s:%s %s" % (f.get("file"), f.get("line"), f.get("func")) for f in frames[:6]) or "(not available)"
+    note = "call stack recorded by the shadow clone's tracer" if frames else \
+        "observed from outside the process: no stack trace is available"
     return PROMPT.format(language=" / ".join(lang), vuln_class=cls, method=incident.get("method", "?"),
+                         stack=stack, stack_note=note,
                          route=incident.get("route", "?"),
                          param="%s (in %s)" % (param.get("name"), param.get("in")) if param.get("name") else "(none)",
                          sink=sink or "(unknown)", editable=", ".join("`%s`" % e for e in editable) or "(none found)",

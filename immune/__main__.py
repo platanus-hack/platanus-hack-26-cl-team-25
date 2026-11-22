@@ -50,7 +50,7 @@ def say(msg: str) -> None:
 
 
 def python() -> str:
-    venv = os.path.join(HOME, ".venv", "bin", "python")
+    venv = os.path.join(os.environ.get("IMMUNE_VENV_DIR") or os.path.join(HOME, ".venv"), "bin", "python")
     return venv if os.path.exists(venv) else sys.executable
 
 
@@ -123,6 +123,7 @@ def compose_env(cfg: icfg.Config, sec_file: str, run_id: str) -> dict:
         "IMMUNE_AUTH": json.dumps(cfg.auth.to_dict(), separators=(",", ":")),
         "IMMUNE_PORT_GATEWAY": str(cfg.ports["gateway"]), "IMMUNE_PORT_ADMIN": str(cfg.ports["admin"]),
         "IMMUNE_PORT_DASHBOARD": str(cfg.ports["dashboard"]),
+        "DASHBOARD_SUBTITLE": "Clínica Delta · OpenEMR 8.2.0" if cfg.name == "openemr" else "",
         "IMMUNE_UID": str(os.getuid()), "IMMUNE_GID": str(os.getgid()),
     })
     return env

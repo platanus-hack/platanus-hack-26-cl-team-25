@@ -103,7 +103,9 @@ def editable_files(incident: dict, workdir: str, source_dirs: list[str] | None =
         cands.append(incident["sink"])
     files = []
     for fr in cands:
-        f = os.path.normpath(str(fr.get("file") or ""))
+        # Stack paths are POSIX-relative; normpath only validates the shape, and
+        # the comparison against source_dirs must stay slash-based on Windows too.
+        f = os.path.normpath(str(fr.get("file") or "")).replace(os.sep, "/")
         if any(f.startswith(d + "/") for d in dirs) and f.endswith(".py") and f not in files \
                 and os.path.isfile(os.path.join(workdir, f)):
             files.append(f)

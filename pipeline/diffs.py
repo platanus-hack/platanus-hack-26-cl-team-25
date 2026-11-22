@@ -119,6 +119,25 @@ def _digest(release_dir: str, paths: list) -> dict:
     return out
 
 
+def _normalize_line_endings(release_dir: str, targets: list) -> None:
+    """Rewrite CRLF target files as LF before applying.
+
+    The pipeline is LF-canonical (diffs are built from text-mode reads). On a
+    checkout or fixture with CRLF files, `git apply` would reject the patch for
+    byte reasons alone; normalizing the work copy first keeps Windows behaving
+    like Linux. On an LF checkout this is a no-op."""
+    for p in targets:
+        path = os.path.join(release_dir, p)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        if b"\r\n" in data or data.count(b"\r"):
+            with open(path, "wb") as f:
+                f.write(data.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+
+
 def apply(diff: str, release_dir: str, timeout: float = 30) -> None:
     """Apply in place with `git apply`. Raises DiffError.
 
@@ -131,6 +150,7 @@ def apply(diff: str, release_dir: str, timeout: float = 30) -> None:
         diff += "\n"
     release_dir = os.path.realpath(release_dir)
     targets = sorted({c.path for c in parse(diff) if c.path})
+    _normalize_line_endings(release_dir, targets)
     before = _digest(release_dir, targets)
     env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(release_dir),
                GIT_DIR=os.path.join(release_dir, ".no-such-git-dir"), GIT_CONFIG_NOSYSTEM="1")

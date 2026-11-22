@@ -191,14 +191,37 @@ def _net_key(d):
     return (d.get("family"), d.get("address"), d.get("port"))
 
 
-def sql_events(statements, ins, constants) -> list[dict]:
+def sql_events(statements, ins, constants, dialect: str = "sqlite") -> list[dict]:
     """Taint check (shadow.sqltaint) of the request inputs against successfully executed statements.
-    No stack frames are available from outside the process."""
-    return sqltaint.check([(s, []) for s in statements], ins, constants)
+    No stack frames are available from outside the process (a tracer may add them afterwards, see phptrace)."""
+    return sqltaint.check([(s, []) for s in statements], ins, constants, dialect)
 
 
-def extract_inputs(path, query, headers, body):
-    return shadow_inputs.extract(path, query, headers, body, None)
+def extract_inputs(path, query, headers, body, spec=None, method="GET"):
+    """Request inputs. With the app's OpenAPI (``spec``), literal segments of a matched route are the app's own
+    text, not input: only its path parameters count. Unmatched paths keep every segment."""
+    params, literal = None, set()
+    if spec is not None:
+        try:
+            op, params = spec.match(method, path)
+        except Exception:  # noqa: BLE001
+            op, params = None, None
+        if op is not None:
+            literal = {i for i, (name, _x) in enumerate(_segments(op)) if name is None}
+    ins = shadow_inputs.extract(path, query, headers, body, params or None)
+    if not literal:
+        return ins
+    drop = {"path[%d]" % i for i in literal}
+    return [x for x in ins if not (x[0] == "path" and x[1] in drop)]
+
+
+def _segments(op):
+    """[(param name or None, text)] of a matched operation's template."""
+    out = []
+    for seg in (op.template or "").strip("/").split("/"):
+        m = re.fullmatch(r"\{([^}*]+)\*?\}", seg)
+        out.append((m.group(1), seg) if m else (None, seg))
+    return out
 
 
 def decoded_body(headers: dict, body: bytes) -> bytes:

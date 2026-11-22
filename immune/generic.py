@@ -9,13 +9,22 @@ Config keys this runtime reads beyond contracts/product.md §2/§6 (each an exte
   app.bind_env: HOST              env var carrying the bind address (prod 0.0.0.0, clones 127.0.0.1, so
                                   nothing reaches the app in a clone except through the observer)
   app.warmup_paths: [...]         extra benign GETs for the observer's warm-up
-  database.url_env                env var through which the app gets its Postgres URL
+  database.kind: postgres|mysql   which proxy the clones run (immune/dbkind.py)
+  database.url_env                env var through which the app gets its database URL
+  database.env: {NAME: template}  or env vars built from {host} {port} {user} {password} {database} {url}
+                                  (apps that take host/port/user separately, e.g. OpenEMR's MYSQL_*)
   data.prod_url_env: NAME         env var (of `immune up`) holding the real prod URL, as reachable from
                                   the prod network
-  data.demo_postgres: {database, user, seed_command}
-                                  without that env var: a Postgres container (postgres:16-alpine) on the
-                                  prod network, seeded once by running seed_command in the app image
+  data.demo_postgres / data.demo_mysql: {database, user, seed_command, seed_privileged}
+                                  without that env var: a database container (postgres:16-alpine / the
+                                  pinned MariaDB) on the prod network, seeded once by running seed_command in
+                                  the app image (seed_privileged: true runs it with a writable filesystem and
+                                  the image's own user, for installers that write config files)
   shadow.profile: module          <project>/.immune/<module>.py, loaded by the observer (identity hooks)
+  shadow.tracer: {kind: php-xdebug, dir, exclude}
+                                  clones run <image>-trace (the release image + Xdebug, never prod); the
+                                  observer reads each request's call trace and puts the app's file:line
+                                  in the evidence stack (sidecar/phptrace.py)
 """
 from __future__ import annotations
 
@@ -24,7 +33,9 @@ import secrets
 import time
 from dataclasses import dataclass, field
 
-PG_IMAGE = "postgres:16-alpine"
+from . import dbkind
+
+PG_IMAGE = dbkind.PG_IMAGE
 SIDECAR_IMAGE = "immune-sidecar:1"
 
 
@@ -47,9 +58,28 @@ class Facts:
     profile_module: str = ""
     prod_url_env: str = ""
     demo: dict = field(default_factory=dict)
+    db_kind: str = "postgres"
+    db_env: dict = field(default_factory=dict)
+    tracer: dict = field(default_factory=dict)
 
     def image(self, release: str) -> str:
         return "%s:%s" % (self.image_repo, release)
+
+    def trace_image(self, release: str) -> str:
+        """The shadow-only image of a release with the call tracer (clones only; prod never runs it)."""
+        return "%s:%s-trace" % (self.image_repo, release)
+
+    @property
+    def db(self) -> dbkind.DbKind:
+        return dbkind.of(self.db_kind)
+
+    def db_env_for(self, url: str) -> dict:
+        """database.env templates, plus url_env=<url> when url_env is configured (or nothing else is)."""
+        url_env = self.url_env if (self.url_env_set or not self.db_env) else ""
+        return self.db.app_env(url, url_env, self.db_env)
+
+    url_env_set: bool = False   # database.url_env was configured explicitly
+    openapi_in_profile: str = ""  # the OpenAPI's path inside .immune/ (mounted at /profile in the observer)
 
     def profile_file(self) -> str:
         return self.profile_module.replace(".", "/") + ".py" if self.profile_module else ""
@@ -78,15 +108,25 @@ def facts(cfg) -> Facts:
               url_env=cfg.database.url_env or "DATABASE_URL", allowed_file_roots=list(cfg.app.allowed_file_roots),
               warmup_paths=[str(x) for x in (a.get("warmup_paths") or [])], profile_module=cfg.shadow.profile,
               prod_url_env=str(d.get("prod_url_env") or ""),
-              demo=dict(d.get("demo_postgres") or {}) if isinstance(d.get("demo_postgres"), dict) else {})
+              db_kind=cfg.database.kind, db_env=dict(getattr(cfg.database, "env", {}) or {}),
+              tracer=dict(getattr(cfg.shadow, "tracer", {}) or {}))
+    f.url_env_set = bool(cfg.database.url_env)
+    try:
+        rel = os.path.relpath(os.path.realpath(cfg.openapi), os.path.realpath(cfg.dot_immune)).replace(os.sep, "/")
+        f.openapi_in_profile = rel if cfg.openapi and not rel.startswith("..") else ""
+    except (ValueError, AttributeError):
+        f.openapi_in_profile = ""
+    demo_key = "demo_mysql" if f.db_kind == "mysql" else "demo_postgres"
+    f.demo = dict(d.get(demo_key) or {}) if isinstance(d.get(demo_key), dict) else {}
     f.source_dirs = [f.workdir.rstrip("/") + "/" + s for s in cfg.app.source_dirs]
     errs = []
     if cfg.app.image and not b:
         errs.append("app.image without app.build is not supported yet (fleet needs one image per release)")
-    if cfg.database.kind != "postgres":
-        errs.append("database.kind must be postgres for the generic runtime (only Postgres has a proxy)")
+    if cfg.database.kind not in dbkind.KINDS:
+        errs.append("database.kind must be one of %s for the generic runtime (only those have a proxy)"
+                    % ", ".join(dbkind.KINDS))
     if not f.prod_url_env and not f.demo:
-        errs.append("data.prod_url_env or data.demo_postgres is required")
+        errs.append("data.prod_url_env or data.%s is required" % demo_key)
     if f.context.startswith("/") or ".." in f.context.split("/"):
         errs.append("app.build.context must be release-relative")
     if errs:
@@ -116,7 +156,8 @@ def prod_url(cfg, f: Facts | None = None, env=None) -> str:
         pass
     if vals.get("DEMO_DB_URL"):
         return vals["DEMO_DB_URL"]
-    raise GenericError("no prod database: export %s or configure data.demo_postgres" % (f.prod_url_env or "<url env>"))
+    raise GenericError("no prod database: export %s or configure data.demo_%s"
+                       % (f.prod_url_env or "<url env>", f.db_kind))
 
 
 def demo_db_name(cfg) -> str:
@@ -126,12 +167,24 @@ def demo_db_name(cfg) -> str:
 def write_demo_env(cfg, f: Facts) -> str:
     os.makedirs(cfg.rt("stack"), exist_ok=True)
     path = demo_env_path(cfg)
-    pw = secrets.token_hex(12)
-    url = "postgres://%s:%s@proddb:5432/%s" % (f.demo.get("user") or cfg.name, pw, f.demo.get("database") or cfg.name)
+    pw, root_pw = secrets.token_hex(12), secrets.token_hex(12)
+    url = f.db.url(f.demo.get("user") or cfg.name, pw, "proddb", f.demo.get("database") or cfg.name)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
-        fh.write("DEMO_DB_PASSWORD=%s\nDEMO_DB_URL=%s\n" % (pw, url))
+        fh.write("DEMO_DB_PASSWORD=%s\nDEMO_DB_URL=%s\nDEMO_DB_ROOT_PASSWORD=%s\n" % (pw, url, root_pw))
     return url
+
+
+def demo_root_password(cfg) -> str:
+    try:
+        with open(demo_env_path(cfg)) as fh:
+            for line in fh:
+                k, _, v = line.strip().partition("=")
+                if k == "DEMO_DB_ROOT_PASSWORD":
+                    return v
+    except OSError:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------------------- immune up / down
@@ -140,7 +193,7 @@ def cmd_up(cfg, reset: bool) -> int:
     and its image -> prod database (demo: started + seeded) -> shadow seed from prod -> fleet /reset -> pipeline."""
     from . import __main__ as cli
     from fleet import generic as fg
-    from . import shadowdata_pg
+    from . import shadowdata_mysql, shadowdata_pg
     f = facts(cfg)
     t_all = time.time()
     sec = cli.stack_secrets(cfg)
@@ -164,6 +217,10 @@ def cmd_up(cfg, reset: bool) -> int:
     t = time.time()
     fg.build_image(cfg, f, cfg.release_dir("t0"), "t0")
     cli.say("built %s in %.1fs" % (f.image("t0"), time.time() - t))
+    if f.tracer:
+        t = time.time()
+        fg.build_trace_image(cfg, f, "t0")
+        cli.say("built %s (shadow-only call tracer) in %.1fs" % (f.trace_image("t0"), time.time() - t))
     prodnet = cfg.network("prodnet")
     if f.prod_url_env and os.environ.get(f.prod_url_env):
         url = os.environ[f.prod_url_env]
@@ -174,7 +231,7 @@ def cmd_up(cfg, reset: bool) -> int:
         fg.start_demo_db(cfg, f, url, prodnet)
         cli.say("demo prod database %s up and seeded in %.1fs" % (demo_db_name(cfg), time.time() - t))
     t = time.time()
-    rep = shadowdata_pg.build(cfg, url, prodnet)
+    rep = (shadowdata_mysql if f.db_kind == "mysql" else shadowdata_pg).build(cfg, url, prodnet)
     cli.say("shadow seed: %s rows, canaries %s, %d bytes (%.1fs)" % (rep["tables"], rep["canary_rows"], rep["bytes"],
                                                                    time.time() - t))
     tok = sec["ADMIN_TOKEN"]

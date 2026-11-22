@@ -8,10 +8,26 @@ import pytest
 import yaml
 
 from immune import config as icfg
-from immune import deploycmd
-from immune.initsteps import docker
+from immune import deploycmd, doctor, init
+from immune.initsteps import detect, docker
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def test_init_detects_php_mysql_without_writing_sqlite_configuration(tmp_path, capsys):
+    (tmp_path / "index.php").write_text("<?php $db = new mysqli($host, $user, $password);")
+    detected = detect.detect(str(tmp_path))
+    assert (detected["runtime"], detected["framework"], detected["database_kind"]) == ("generic", "php", "mysql")
+    assert init.main(["--project", str(tmp_path), "--yes"]) == 1
+    assert "PHP + MySQL" in capsys.readouterr().out
+    assert not (tmp_path / ".immune").exists()
+
+
+def test_pinned_dockerfile_bases_ignore_stage_and_unpinned_images(tmp_path):
+    dockerfile = tmp_path / "Dockerfile"
+    image = "example/php:1@sha256:" + "a" * 64
+    dockerfile.write_text(f"FROM --platform=linux/amd64 {image} AS base\nFROM base\nFROM php:latest\nFROM {image}\n")
+    assert doctor._pinned_bases(str(dockerfile)) == [image]
 
 
 def _cfg(tmp_path, compose=True):

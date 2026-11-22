@@ -1,0 +1,33 @@
+# OpenEMR 8.2.0 (tag v8_2_0, commit 6125a2fd8089c8bcc3848071c1293c60e27a7585) for Inmune's generic runtime.
+#
+# Base: the official image, pinned by digest. Its PHP sources were verified byte-identical to the tag
+# (5254 files of interface/ library/ src/ apis/ portal/ controllers/ oauth2/ templates/ gacl/ ccr/ sql/).
+# This file only adds what fleet's sandbox needs (read-only root filesystem, no capabilities, non-root,
+# writable /tmp only) and copies the release's sources over the docroot, so a patched release (only files
+# under app.source_dirs may change) is exactly the image plus the patch. OpenEMR's own code is not modified.
+FROM openemr/openemr:8.2.0-2026-11-21@sha256:98004b0a072a340e64ce6a4f06f92bda967af2a75c738eba01b07731a4ea49f8
+
+ARG OE=/var/www/localhost/htdocs/openemr
+USER root
+
+COPY --chown=apache:apache interface   ${OE}/interface
+COPY --chown=apache:apache library     ${OE}/library
+COPY --chown=apache:apache src         ${OE}/src
+COPY --chown=apache:apache apis        ${OE}/apis
+COPY --chown=apache:apache portal      ${OE}/portal
+COPY --chown=apache:apache controllers ${OE}/controllers
+COPY --chown=apache:apache oauth2      ${OE}/oauth2
+COPY --chown=apache:apache templates   ${OE}/templates
+COPY --chown=apache:apache gacl        ${OE}/gacl
+COPY --chown=apache:apache ccr         ${OE}/ccr
+COPY --chown=apache:apache sql         ${OE}/sql
+COPY --chown=apache:apache version.php controller.php index.php ${OE}/
+COPY immune-runtime /immune
+
+RUN sh /immune/build.sh
+
+USER apache
+WORKDIR ${OE}
+EXPOSE 8080
+ENTRYPOINT []
+CMD ["/immune/start.sh"]

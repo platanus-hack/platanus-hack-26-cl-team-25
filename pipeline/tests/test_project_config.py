@@ -48,7 +48,7 @@ def errors(tmp_path, text, **kw):
 def test_root_demo_config():
     c = icfg.load(ROOT)
     assert c.name == "tienda" and c.app.release_paths == ["victim"] and c.app.source_dirs == ["victim/app"]
-    assert c.runtime_dir == os.path.join(ROOT, "runtime") and c.data.prod_db == os.path.join(ROOT, "runtime/data/prod/app.db")
+    assert c.runtime_dir == os.path.join(ROOT, "runtime") and c.data.prod_db == os.path.join(ROOT, "runtime", "data", "prod", "app.db")
     assert c.openapi == os.path.join(ROOT, "contracts", "openapi.yaml") and c.auth.kind == "immune-token"
     assert c.scenarios == "sim.scenarios" and c.tests_command.startswith("python -m pytest victim/tests")
     assert c.ports == {"gateway": 8080, "admin": 8081, "dashboard": 8090, "fleet": 8070}
@@ -196,8 +196,9 @@ def test_patcher_workspace_and_edit_scope(tmp_path):
         assert editable_files(inc, ws.work, ["pkg/core"]) == ["pkg/core/a.py"]
         st = claude_cli.settings_for(ws.work, ["pkg/core/a.py"])
         allow, deny = st["permissions"]["allow"], st["permissions"]["deny"]
-        assert [a for a in allow if a.startswith("Edit(")] == ["Edit(/%s/pkg/core/a.py)" % os.path.realpath(ws.work)]
-        assert "Edit(/%s/pkg/tests/**)" % os.path.realpath(ws.work) in deny
+        assert [a for a in allow if a.startswith("Edit(")] == \
+            ["Edit(/%s/pkg/core/a.py)" % os.path.realpath(ws.work).replace(os.sep, "/")]
+        assert "Edit(/%s/pkg/tests/**)" % os.path.realpath(ws.work).replace(os.sep, "/") in deny
         assert [a for a in claude_cli.settings_for(ws.work, [])["permissions"]["allow"] if a.startswith("Edit(")] == []
 
 

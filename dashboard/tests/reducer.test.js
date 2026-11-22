@@ -26,6 +26,11 @@ let t = 1000;
 const mk = (type, data, o = {}) => Object.assign({ type, ts: (t += 1), run: 'r', src: 's', rid: null, incident: null, data }, o);
 const b64 = (s) => Buffer.from(s).toString('base64');
 const sink = { file: 'app/routes/files.py', line: 27 };
+const phpFrame = { file: 'library/sql.inc.php', line: 99 };
+const phpEvidence = [{ data: { events: [{ stack: [sink, phpFrame] }] } }];
+assert.deepStrictEqual(S.phpLocation({ sink, oracles: phpEvidence }), phpFrame);
+assert.deepStrictEqual(S.phpLocation({ sink: phpFrame, oracles: [] }), phpFrame);
+assert.strictEqual(S.phpLocation({ sink, oracles: [] }), null);
 const oracle = (rid, o = {}) => mk('oracle.fired', Object.assign({
   clone: 'c', rid, mode: 'L2', release: 'r0', verdict: 'oracle', status: 200,
   request: { method: 'GET', path: '/api/download', query: 'file=../x', headers: {}, body_b64: b64('<img src=x onerror=alert(1)>') },
@@ -330,7 +335,7 @@ assert.ok(/idor tras p2: \? candidatos/.test(S.auditLine(s4)));
   const d = S.newState();
   const I = { incident: 'inc-r' };
   const run = (ok) => {
-    S.reduce(d, mk('incident.opened', { incident: 'inc-r', vuln_class: 'idor', route: '/api/orders/{id}' }, I));
+    S.reduce(d, mk('incident.opened', { incident: 'inc-r', vuln_class: 'idor', route: '/api/orders/{id}', sink: phpFrame }, I));
     S.reduce(d, mk('rule.active', { id: 'rule-r', incident: 'inc-r', route: '/api/orders/{id}' }, I));
     S.reduce(d, mk('patch.attempt', { incident: 'inc-r', attempt: 1, source: ok ? 'llm' : 'fallback' }, I));
     S.reduce(d, mk('patch.diff', { incident: 'inc-r', attempt: 1, diff: ok ? '+x' : '' }, I));
@@ -341,7 +346,10 @@ assert.ok(/idor tras p2: \? candidatos/.test(S.auditLine(s4)));
     S.reduce(d, mk('upstream.switched', { release: 'abc', addr: 'prod-b:8000' }));
     S.reduce(d, mk('incident.closed', { incident: 'inc-r', outcome: 'patched' }, I));
   };
-  run(false); run(true);
+  run(false);
+  assert.strictEqual(d.incidents['inc-r'].closed.outcome, 'rule_only');
+  assert.deepStrictEqual(S.phpLocation(d.incidents['inc-r']), phpFrame);
+  run(true);
   const i = d.incidents['inc-r'];
   assert.strictEqual(i.runs, 2);
   assert.strictEqual(i.attempts.length, 1); assert.strictEqual(i.attempts[0].status, 'accepted');

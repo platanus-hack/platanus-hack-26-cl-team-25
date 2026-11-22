@@ -1,0 +1,305 @@
+# Shadow-data classification of OpenEMR 8.2.0: all 283 tables of the installed schema (71 rewritten).
+# Generated from the installed database by examples/openemr/gen_columns.py, reviewed by hand
+# (contracts/product.md §4).
+#
+# OpenEMR is ACL-based: any clinician with the right ACL may open any patient, so patient data is NOT
+# owner-scoped (an owner rule there would flag legitimate access). Patient PHI is still never copied to the
+# shadow: identity fields and free text of every patient-linked table (a pid / patient_id column) are
+# private without owner (synthetic values, no marker); audit trails are secret (random). Per-user owned data
+# (account notes, password hashes, MFA secrets) is owner-scoped by users.id. The rest is reference and
+# configuration data, copied verbatim.
+users_table: users
+user_id_column: id
+login_column: username
+admin_values: [admin]
+tables:
+  addresses: {public: true}
+  amc_misc_data: {public: true}
+  amendments: {private: [amendment_desc]}
+  amendments_history: {public: true}
+  api_log: {secret: [request_body, response, request_url]}
+  api_refresh_token: {public: true}
+  api_token: {secret: [token]}
+  ar_activity: {private: [follow_up_note]}
+  ar_session: {private: [description]}
+  audit_details: {public: true}
+  audit_master: {private: [comments, ip_address]}
+  automatic_notification: {public: true}
+  background_services: {public: true}
+  batchcom: {private: [msg_text]}
+  benefit_eligibility: {public: true}
+  billing: {private: [code_text]}
+  calendar_external: {public: true}
+  care_team_member: {public: true}
+  care_teams: {private: [team_name, note]}
+  categories: {public: true}
+  categories_seq: {public: true}
+  categories_to_documents: {public: true}
+  ccda: {private: [ccda_data]}
+  ccda_components: {public: true}
+  ccda_field_mapping: {public: true}
+  ccda_sections: {public: true}
+  ccda_table_mapping: {public: true}
+  chart_tracker: {public: true}
+  claims: {private: [submitted_claim]}
+  clinical_notes_documents: {public: true}
+  clinical_notes_procedure_results: {public: true}
+  clinical_plans: {public: true}
+  clinical_plans_rules: {public: true}
+  clinical_rules: {private: [patient_dob_usage, patient_ethnicity_usage, patient_health_status_usage, patient_gender_identity_usage, patient_language_usage, patient_race_usage, patient_sex_usage, patient_sexual_orientation_usage, patient_sodh_usage]}
+  clinical_rules_log: {private: [value, new_value]}
+  code_types: {public: true}
+  codes: {public: true}
+  codes_history: {public: true}
+  contact: {public: true}
+  contact_address: {public: true}
+  contact_relation: {public: true}
+  contact_telecom: {public: true}
+  customlists: {public: true}
+  dated_reminders: {private: [dr_message_text]}
+  dated_reminders_link: {public: true}
+  direct_message_log: {public: true}
+  document_template_profiles: {public: true}
+  document_templates: {private: [template_name]}
+  documents: {public: true}
+  documents_legal_categories: {public: true}
+  documents_legal_detail: {public: true}
+  documents_legal_master: {public: true}
+  drug_inventory: {public: true}
+  drug_sales: {private: [notes]}
+  drug_templates: {public: true}
+  drugs: {public: true}
+  dsi_source_attributes: {public: true}
+  edi_sequences: {public: true}
+  eligibility_verification: {public: true}
+  email_queue: {public: true}
+  employer_data: {private: [name, street, street_line_2, postal_code, city, occupation, industry]}
+  enc_category_map: {public: true}
+  erx_narcotics: {public: true}
+  erx_rx_log: {public: true}
+  erx_ttl_touch: {public: true}
+  esign_signatures: {public: true}
+  export_job: {public: true}
+  extended_log: {secret: [description]}
+  external_encounters: {public: true}
+  external_procedures: {public: true}
+  facility: {public: true}
+  facility_user_ids: {public: true}
+  fee_schedule: {public: true}
+  fee_sheet_options: {public: true}
+  form_care_plan: {private: [codetext, description, note_related_to, reason_description]}
+  form_clinical_instructions: {private: [instruction]}
+  form_clinical_notes: {private: [codetext, description, note_related_to]}
+  form_dictation: {private: [dictation, additional_notes]}
+  form_encounter: {private: [reason, billing_note, encounter_type_description]}
+  form_eye_acuity: {public: true}
+  form_eye_antseg: {private: [OSCONJ, ODCONJ, ODCORNEA, OSCORNEA, ODAC, OSAC, ODLENS, OSLENS, ODIRIS, OSIRIS, PUPIL_COMMENTS, ANTSEG_COMMENTS]}
+  form_eye_base: {public: true}
+  form_eye_biometrics: {public: true}
+  form_eye_external: {private: [RUL, LUL, RLL, LLL, RBROW, LBROW, RMCT, LMCT, RADNEXA, LADNEXA, RCAROTID, LCAROTID, RTEMPART, LTEMPART, RCNV, LCNV, RCNVII, LCNVII, EXT_COMMENTS]}
+  form_eye_hpi: {private: [HPI1, CC2, HPI2, QUALITY2, TIMING2, DURATION2, CONTEXT2, SEVERITY2, MODIFY2, ASSOCIATED2, LOCATION2, CC3, HPI3, QUALITY3, TIMING3, DURATION3, CONTEXT3, SEVERITY3, MODIFY3, ASSOCIATED3, LOCATION3]}
+  form_eye_locking: {private: [IMP, PLAN]}
+  form_eye_mag_dispense: {private: [RXCOMMENTS, COMMENTS]}
+  form_eye_mag_impplan: {public: true}
+  form_eye_mag_orders: {public: true}
+  form_eye_mag_prefs: {public: true}
+  form_eye_mag_wearing: {public: true}
+  form_eye_neuro: {private: [ACT5CCDIST, ACT1CCDIST, ACT2CCDIST, ACT3CCDIST, ACT4CCDIST, ACT6CCDIST, ACT7CCDIST, ACT8CCDIST, ACT9CCDIST, ACT10CCDIST, ACT11CCDIST, ACT1SCDIST, ACT2SCDIST, ACT3SCDIST, ACT4SCDIST, ACT5SCDIST, ACT6SCDIST, ACT7SCDIST, ACT8SCDIST, ACT9SCDIST, ACT10SCDIST, ACT11SCDIST, ACT1SCNEAR, ACT2SCNEAR, ACT3SCNEAR, ACT4SCNEAR, ACT5CCNEAR, ACT6CCNEAR, ACT7CCNEAR, ACT8CCNEAR, ACT9CCNEAR, ACT10CCNEAR, ACT11CCNEAR, ACT5SCNEAR, ACT6SCNEAR, ACT7SCNEAR, ACT8SCNEAR, ACT9SCNEAR, ACT10SCNEAR, ACT11SCNEAR, ACT1CCNEAR, ACT2CCNEAR, ACT3CCNEAR, ACT4CCNEAR, NEURO_COMMENTS, ODNPA, OSNPA, VERTFUSAMPS, DIVERGENCEAMPS, ODCOLOR, OSCOLOR, ODCOINS, OSCOINS]}
+  form_eye_postseg: {private: [ODDISC, OSDISC, ODCUP, OSCUP, ODMACULA, OSMACULA, ODVESSELS, OSVESSELS, ODVITREOUS, OSVITREOUS, ODPERIPH, OSPERIPH, ODCMT, OSCMT, RETINA_COMMENTS, DIL_MEDS]}
+  form_eye_refraction: {private: [CTL_COMMENTS]}
+  form_eye_ros: {private: [ROSGENERAL, ROSHEENT, ROSCV, ROSPULM, ROSGI, ROSGU, ROSDERM, ROSNEURO, ROSPSYCH, ROSMUSCULO, ROSIMMUNO, ROSENDOCRINE, ROSCOMMENTS]}
+  form_eye_vitals: {public: true}
+  form_functional_cognitive_status: {private: [codetext, description]}
+  form_group_attendance: {public: true}
+  form_groups_encounter: {public: true}
+  form_history_sdoh: {private: [food_insecurity_notes, housing_instability_notes, transportation_insecurity_notes, utilities_insecurity_notes, interpersonal_safety_notes, financial_strain_notes, social_isolation_notes, childcare_needs_notes, digital_access_notes, goals, interventions, disability_status_notes, disability_scale]}
+  form_history_sdoh_health_concerns: {public: true}
+  form_misc_billing_options: {private: [comments]}
+  form_observation: {private: [description, ob_reason_text, ob_value_code_description]}
+  form_questionnaire_assessments: {private: [response_id, copyright, response_meta, questionnaire_id, questionnaire, questionnaire_response, lform, lform_response]}
+  form_reviewofs: {private: [additional_notes]}
+  form_ros: {public: true}
+  form_soap: {private: [subjective, objective, assessment, plan]}
+  form_taskman: {public: true}
+  form_vital_details: {public: true}
+  form_vitals: {private: [note]}
+  form_vitals_calculation: {public: true}
+  form_vitals_calculation_components: {public: true}
+  form_vitals_calculation_form_vitals: {public: true}
+  forms: {public: true}
+  gacl_acl: {public: true}
+  gacl_acl_sections: {public: true}
+  gacl_acl_seq: {public: true}
+  gacl_aco: {public: true}
+  gacl_aco_map: {public: true}
+  gacl_aco_sections: {public: true}
+  gacl_aco_sections_seq: {public: true}
+  gacl_aco_seq: {public: true}
+  gacl_aro: {public: true}
+  gacl_aro_groups: {public: true}
+  gacl_aro_groups_id_seq: {public: true}
+  gacl_aro_groups_map: {public: true}
+  gacl_aro_map: {public: true}
+  gacl_aro_sections: {public: true}
+  gacl_aro_sections_seq: {public: true}
+  gacl_aro_seq: {public: true}
+  gacl_axo: {public: true}
+  gacl_axo_groups: {public: true}
+  gacl_axo_groups_map: {public: true}
+  gacl_axo_map: {public: true}
+  gacl_axo_sections: {public: true}
+  gacl_groups_aro_map: {public: true}
+  gacl_groups_axo_map: {public: true}
+  gacl_phpgacl: {public: true}
+  globals: {public: true}
+  gprelations: {public: true}
+  groups: {public: true}
+  history_data: {private: [coffee, tobacco, alcohol, sleep_patterns, exercise_patterns, seatbelt_use, counseling, hazardous_activities, recreational_drugs, history_mother, dc_mother, history_father, dc_father, history_siblings, dc_siblings, history_offspring, dc_offspring, history_spouse, dc_spouse, relatives_cancer, relatives_tuberculosis, relatives_diabetes, relatives_high_blood_pressure, relatives_heart_problems, relatives_stroke, relatives_epilepsy, relatives_mental_illness, relatives_suicide, additional_history, exams, usertext11, userarea11, userarea12]}
+  icd10_dx_order_code: {public: true}
+  icd10_gem_dx_10_9: {public: true}
+  icd10_gem_dx_9_10: {public: true}
+  icd10_gem_pcs_10_9: {public: true}
+  icd10_gem_pcs_9_10: {public: true}
+  icd10_pcs_order_code: {public: true}
+  icd10_reimbr_dx_9_10: {public: true}
+  icd10_reimbr_pcs_9_10: {public: true}
+  icd9_dx_code: {public: true}
+  icd9_dx_long_code: {public: true}
+  icd9_sg_code: {public: true}
+  icd9_sg_long_code: {public: true}
+  immunization_observation: {public: true}
+  immunizations: {private: [note, refusal_reason, reason_description]}
+  insurance_companies: {public: true}
+  insurance_data: {private: [plan_name, subscriber_lname, subscriber_mname, subscriber_fname, subscriber_relationship, subscriber_ss, subscriber_street, subscriber_postal_code, subscriber_city, subscriber_state, subscriber_country, subscriber_phone, subscriber_employer, subscriber_employer_street, subscriber_employer_postal_code, subscriber_employer_state, subscriber_employer_country, subscriber_employer_city, subscriber_sex, subscriber_street_line_2, subscriber_employer_street_line_2]}
+  insurance_numbers: {public: true}
+  insurance_type_codes: {public: true}
+  ip_tracking: {public: true}
+  issue_encounter: {public: true}
+  issue_types: {public: true}
+  jwt_grant_history: {public: true}
+  keys: {public: true}
+  lang_constants: {public: true}
+  lang_custom: {public: true}
+  lang_definitions: {public: true}
+  lang_languages: {public: true}
+  layout_group_properties: {public: true}
+  layout_options: {public: true}
+  lbf_data: {public: true}
+  lbt_data: {public: true}
+  list_options: {public: true}
+  lists: {private: [udi_data, comments]}
+  lists_medication: {public: true}
+  lists_touch: {public: true}
+  log: {secret: [comments, user_notes, checksum]}
+  log_comment_encrypt: {secret: [checksum, checksum_api]}
+  login_mfa_registrations: {owner: user_id, secret: [var1, var2]}
+  medex_icons: {public: true}
+  medex_outgoing: {public: true}
+  medex_prefs: {public: true}
+  medex_recalls: {public: true}
+  migrations: {public: true}
+  misc_address_book: {public: true}
+  module_acl_group_settings: {public: true}
+  module_acl_sections: {public: true}
+  module_acl_user_settings: {public: true}
+  module_configuration: {public: true}
+  modules: {public: true}
+  modules_hooks_settings: {public: true}
+  modules_settings: {public: true}
+  notes: {public: true}
+  notification_log: {private: [message, email_sender, email_subject, patient_info]}
+  notification_settings: {public: true}
+  oauth_clients: {secret: [client_secret, registration_token]}
+  oauth_trusted_user: {public: true}
+  onetime_auth: {private: [onetime_token, redirect_url, scope, profile, onetime_actions]}
+  onotes: {public: true}
+  onsite_documents: {private: [denial_reason, authorized_signature, patient_signature, file_name, template_data]}
+  onsite_mail: {public: true}
+  onsite_messages: {public: true}
+  onsite_online: {public: true}
+  onsite_portal_activity: {private: [narrative, table_action, table_args, checksum]}
+  onsite_signatures: {private: [sig_image, signature]}
+  openemr_module_vars: {public: true}
+  openemr_modules: {public: true}
+  openemr_postcalendar_categories: {public: true}
+  openemr_postcalendar_events: {public: true}
+  patient_access_onsite: {secret: [portal_pwd, portal_onetime]}
+  patient_birthday_alert: {public: true}
+  patient_care_experience_preferences: {private: [observation_code_text, value_text, note]}
+  patient_data: {private: [fname, lname, mname, DOB, street, street_line_2, postal_code, city, drivers_license, ss, phone_home, phone_biz, phone_contact, phone_cell, email, email_direct, mothersname, guardiansname, birth_fname, birth_lname, birth_mname, preferred_name, billing_note, occupation, name_history, guardianaddress, guardiancity, guardianphone, guardianworkphone, guardianemail, guardianpostalcode]}
+  patient_history: {private: [care_team_provider, care_team_facility, previous_name_prefix, previous_name_first, previous_name_middle, previous_name_last, previous_name_suffix]}
+  patient_portal_menu: {public: true}
+  patient_reminders: {public: true}
+  patient_settings: {public: true}
+  patient_tracker: {public: true}
+  patient_tracker_element: {public: true}
+  patient_treatment_intervention_preferences: {private: [observation_code_text, value_text, note]}
+  payment_gateway_details: {public: true}
+  payment_processing_audit: {private: [action_name, audit_data, revert_action_name, revert_audit_data]}
+  payments: {public: true}
+  person: {public: true}
+  person_patient_link: {private: [notes]}
+  pharmacies: {public: true}
+  phone_numbers: {public: true}
+  pnotes: {private: [body]}
+  preference_value_sets: {public: true}
+  prescriptions: {private: [note, drug_info_erx, indication, drug_dosage_instructions, diagnosis]}
+  prices: {public: true}
+  pro_assessments: {public: true}
+  procedure_answers: {public: true}
+  procedure_order: {private: [patient_instructions]}
+  procedure_order_code: {public: true}
+  procedure_order_relationships: {public: true}
+  procedure_providers: {public: true}
+  procedure_questions: {public: true}
+  procedure_report: {public: true}
+  procedure_result: {public: true}
+  procedure_specimen: {public: true}
+  procedure_type: {public: true}
+  product_registration: {public: true}
+  product_warehouse: {public: true}
+  questionnaire_repository: {public: true}
+  questionnaire_response: {private: [questionnaire_name, questionnaire, questionnaire_response, form_response]}
+  recent_patients: {public: true}
+  registry: {public: true}
+  report_itemized: {private: [item_details]}
+  report_results: {public: true}
+  rule_action: {public: true}
+  rule_action_item: {public: true}
+  rule_filter: {public: true}
+  rule_patient_data: {public: true}
+  rule_reminder: {public: true}
+  rule_target: {public: true}
+  sequences: {public: true}
+  session_tracker: {public: true}
+  shared_attributes: {private: [field_value]}
+  standardized_tables_track: {public: true}
+  supported_external_dataloads: {public: true}
+  syndromic_surveillance: {public: true}
+  template_users: {public: true}
+  therapy_groups: {public: true}
+  therapy_groups_counselors: {public: true}
+  therapy_groups_participant_attendance: {private: [meeting_patient_comment]}
+  therapy_groups_participants: {private: [group_patient_comment]}
+  track_events: {public: true}
+  transactions: {public: true}
+  user_settings: {public: true}
+  users: {owner: id, private: [info, notes, federaltaxid, federaldrugid, state_license_number], secret: [google_signin_email]}
+  users_facility: {public: true}
+  users_secure: {owner: id, secret: [password, password_history1, password_history2, password_history3, password_history4, login_work_area]}
+  uuid_mapping: {public: true}
+  uuid_registry: {public: true}
+  valueset: {public: true}
+  valueset_oid: {public: true}
+  verify_email: {public: true}
+  version: {public: true}
+  voids: {private: [other_info, reason, notes]}
+  x12_partners: {public: true}
+  x12_remote_tracker: {public: true}
+routes:
+  user_id: {table: users, column: id}
+why:
+  "users.info": "notas internas de la cuenta: sólo el propio usuario y administración"
+  "users_secure.password": "hash de contraseña (bcrypt / SHA-512 crypt)"
+  "patient_data.fname": "datos personales del paciente: la sombra nunca guarda PHI real"
+  "api_log.response": "la API devuelve fichas completas de pacientes"

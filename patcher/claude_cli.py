@@ -47,8 +47,9 @@ def timeout_s() -> float:
 
 
 def _rule_path(p: str) -> str:
-    # permission rules: "//abs/path" is an absolute filesystem path
-    return "/" + os.path.realpath(p)
+    # permission rules: "//abs/path" is an absolute filesystem path; forward
+    # slashes keep the rules identical across hosts.
+    return "/" + os.path.realpath(p).replace(os.sep, "/")
 
 
 def settings_for(workdir: str, editable: list[str], deny_dirs: list[str] | None = None) -> dict:
@@ -135,8 +136,12 @@ def run(prompt: str, workdir: str, editable: list[str], timeout: float | None = 
         out, err = proc.communicate(prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            # POSIX uses the process group; Windows has no killpg.
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except (ProcessLookupError, PermissionError, OSError):
             pass
         proc.communicate()
         return CliResult(False, f"timeout after {timeout:.0f}s", seconds=time.monotonic() - t0)
