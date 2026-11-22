@@ -204,8 +204,10 @@
 
     var stl = { pending: 'En curso', rejected: 'Rechazado', accepted: 'Aceptado' };
     inc.attempts.forEach(function (a) {
-      var result = inc.fuxa && inc.deploy && inc.deploy.doneTs
-        ? (inc.deploy.ok ? 'accepted' : 'rejected') : a.status;
+      // a finished deploy decides the attempt's result (its gates passed, or an external lab validated and
+      // deployed it out of band); a gate-rejected attempt stays rejected.
+      var result = a.status;
+      if (result !== 'rejected' && inc.deploy && inc.deploy.doneTs) result = inc.deploy.ok ? 'accepted' : 'rejected';
       var sa = section((inc.fuxa ? 'Parche local' : 'Parche') + (inc.attempts.length > 1 ? ', intento ' + a.attempt : ''), inc, a.diffTs || a.ts,
         result === 'accepted' ? 'done' : result === 'rejected' ? 'bad' : 'run');
       var ab = el('div', 'attempt ' + result);
