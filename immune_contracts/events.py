@@ -43,6 +43,7 @@ AUDIT_FINDING = "audit.finding"         # data: {incident, parent, route, param}
 AUDIT_DONE = "audit.done"               # data: {incident, checked, findings, seconds}
 # incident.opened also carries optional origin: live|audit and parent: <incident id>
 # sim
+PROD_ALERT = "prod.alert"               # data: {container, oracle: file|proc|net, detail, candidates, confirmed:[{method,path,query}], note}
 ATTACK_ATTEMPT = "attack.attempt"       # data: {vuln, ok: bool, saw_real_data: bool}
 
 TYPES = tuple(v for k, v in list(globals().items()) if k.isupper() and isinstance(v, str) and "." in v)

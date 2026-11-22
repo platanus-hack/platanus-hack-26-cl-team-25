@@ -26,6 +26,7 @@
       incidents: dict(), order: [], pendingOracles: [], rules: dict(),
       audits: dict(), auditOrder: [],
       attacks: dict(), attackOrder: [],
+      prodAlerts: [],
       ticker: [], tickerByRid: dict(),
       counters: { prod: 0, detonated: 0, deny: 0, total: 0 },
       sessions: dict(), pool: null, fuxa: null,
@@ -396,6 +397,11 @@
         }
         st.attacks[v].push({ ts: ts, ok: !!d.ok, saw: !!d.saw_real_data });
         if (st.attacks[v].length > ATTACK_MAX) st.attacks[v].shift();
+        break;
+      case 'prod.alert':   // oracles on production, alert only (sidecar/marker/prodwatch.py); no panel yet
+        st.prodAlerts.push({ ts: ts, container: str(d.container), oracle: str(d.oracle), note: str(d.note),
+                             candidates: num(d.candidates), confirmed: Array.isArray(d.confirmed) ? d.confirmed.length : 0 });
+        if (st.prodAlerts.length > 50) st.prodAlerts.shift();
         break;
       case 'fuxa.status':
         st.fuxa = d;
