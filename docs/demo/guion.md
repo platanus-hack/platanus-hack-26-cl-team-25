@@ -96,3 +96,10 @@ regla de contención, que sí es automática, no cambia código: solo fuerza que
 un parche ya desplegado hay que sacarlo, `immune rollback` vuelve a la release anterior por el mismo camino
 blue/green y deja el autopatch en `pr`; además hay rollback automático si sube la tasa de 5xx en los 20 segundos
 posteriores al cambio.
+
+**"¿Cuánto les cuesta esto a los clientes legítimos?"**
+En la corrida del 2026-11-22, 82 de 4551 requests de clientes recibieron un 404 ([../resultados.md](../resultados.md)).
+Casi todos por lo mismo: mientras la regla de un IDOR espera su parche, cubre todos los valores de la ruta, y el
+clon no tiene los objetos creados después de la semilla. Un cliente que pide su propio pedido nuevo recibe 404
+hasta que el parche se verifica, unos 70 segundos en el demo. Con `autopatch: pr`, dura hasta que una persona
+mergea. Está en [../limites.md](../limites.md); es lo primero que habría que resolver antes de un piloto.

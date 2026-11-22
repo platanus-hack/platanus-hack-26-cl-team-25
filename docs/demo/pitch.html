@@ -274,6 +274,7 @@ footer li{overflow-wrap:anywhere}
   <div class="cols">
     <div><h3>Verificado</h3><ul>
       <li>Ciclo completo sobre los 7 defectos plantados de la demo, 3 rondas (2026-11-21): 21 de 21 parchados. Medianas: regla a los 1.9 s, parche en producción a los 24.9 s, verificado a los 51.3 s.</li>
+      <li>Corrida posterior a las correcciones del 2026-11-22, con tráfico legítimo y un atacante automático: 7 de 7 parchados por el modelo en el primer intento, mediana de 45.2 s hasta producción. 392 intentos del atacante, ninguno con datos de producción.</li>
       <li>Detección y desvío al señuelo de tres clases: SQL injection, path traversal e IDOR.</li>
       <li>Segunda red (opcional, desactivada por defecto): un request que el filtro deja pasar se repite en el señuelo después de la respuesta y puede disparar un oráculo.</li>
       <li>Las validaciones rechazan 15 parches inadecuados y aceptan 7 correctos en el autotest (parches escritos a mano).</li>
@@ -283,12 +284,16 @@ footer li{overflow-wrap:anywhere}
       <li>El sistema aprende solo de lo que sus oráculos ven. Fallas de lógica de negocio y ataques de segundo orden no disparan ninguno.</li>
       <li>La detonación agrega latencia a los requests dudosos.</li>
       <li>La segunda red no frena la primera respuesta: corta la campaña, no la primera fuga.</li>
-      <li>Los tiempos son de una sola serie de 21 incidentes, en una máquina compartida, anteriores a las correcciones del 2026-11-22 y sin volver a medir; la lista de defectos estaba entonces al alcance del generador de parches.</li>
+      <li>Los defectos de las aplicaciones de demostración los plantó el equipo. Falta una prueba ciega con fallas plantadas por alguien de afuera.</li>
+      <li>Los tiempos son de pocas corridas en una máquina compartida. La serie de 21 incidentes es anterior a las correcciones del 2026-11-22.</li>
+      <li>Mientras la regla de un IDOR espera su parche, también niega a los dueños de objetos creados después de la semilla: 82 de 4551 requests legítimos en la última corrida.</li>
+      <li>Todavía no corre delante del servicio real de un cliente: el camino que funciona levanta una copia de la aplicación detrás del gateway.</li>
       <li>El caso de Apache es un defecto público: demuestra el mecanismo, no un descubrimiento a ciegas.</li>
     </ul></div>
     <div><h3>Principios</h3><ul>
       <li>El veredicto lo da la ejecución, no un puntaje. Un falso positivo cuesta latencia, no datos falsos.</li>
       <li>El modelo solo propone un diff. Deciden validaciones mecánicas.</li>
+      <li>En infraestructura crítica decide una persona: <code>immune init</code> deja el parche como pull request, y <code>immune rollback</code> vuelve a la versión anterior.</li>
       <li>Nunca se bloquea por IP ni por huella.</li>
       <li>Si la detonación falla, el tráfico sin señal sigue a producción; lo que coincide con una regla activa no.</li>
     </ul></div>
