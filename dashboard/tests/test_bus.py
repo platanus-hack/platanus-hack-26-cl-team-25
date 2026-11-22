@@ -46,7 +46,7 @@ def test_pipeline_audit_events_accepted(tmp_path):
                     (pbus.AUDIT_DONE, {"incident": "i1", "checked": 3, "findings": 1, "seconds": 1.5})):
         e = pbus.make(t, data, run="r", incident=data["incident"])
         assert c.post("/events", json=e, headers=H).status_code == 200, t
-    assert [e["type"] for e in c.get("/events", params={"type": "audit."}).json()["events"]] == list(pbus.EXTRA_TYPES)
+    assert [e["type"] for e in c.get("/events", params={"type": "audit."}).json()["events"]] == list(pbus.AUDIT_TYPES)
 
 
 def test_seq_monotonic_and_batch(tmp_path):
@@ -162,3 +162,144 @@ def test_sse_heartbeat(live, monkeypatch):
                 seen.append(line)
                 break
     assert seen
+
+
+# ---- bounds: page size, body size, events in memory, size of the store
+
+def test_get_events_is_always_a_page(tmp_path, monkeypatch):
+    import dashboard.server as srv
+    assert (srv.EVENTS_LIMIT, srv.EVENTS_LIMIT_MAX) == (1000, 5000)
+    monkeypatch.setenv("DASH_EVENTS_LIMIT", "3")
+    monkeypatch.setenv("DASH_EVENTS_LIMIT_MAX", "5")
+    c = client(tmp_path)
+    c.post("/events", json=[ev() for _ in range(12)], headers=H)
+    r = c.get("/events").json()                                   # no limit: the default page, not the whole history
+    assert [e["seq"] for e in r["events"]] == [1, 2, 3] and r["next"] == 3
+    for params in ({"limit": 0}, {"limit": -4}, {"limit": "x"}):
+        assert len(c.get("/events", params=params).json()["events"]) == 3, params
+    assert len(c.get("/events", params={"limit": 4}).json()["events"]) == 4
+    assert len(c.get("/events", params={"limit": 999999}).json()["events"]) == 5      # the maximum, also with the token
+    assert len(c.get("/events", params={"limit": 999999}, headers=H).json()["events"]) == 5
+    # a reader that follows `next` until it gets nothing (immune/metrics.py fetch) still reads everything, in order
+    seen, since = [], 0
+    while True:
+        r = c.get("/events", params={"since": since}).json()
+        if not r["events"]:
+            break
+        seen += [e["seq"] for e in r["events"]]
+        since = r["next"]
+    assert seen == list(range(1, 13))
+
+
+def test_default_page_holds_a_normal_run(tmp_path):
+    c = client(tmp_path)
+    c.post("/events", json=[ev() for _ in range(1200)], headers=H)
+    assert len(c.get("/events").json()["events"]) == 1000
+    assert len(c.get("/events", params={"limit": 100000}).json()["events"]) == 1200
+
+
+def test_post_body_size_is_capped(tmp_path, monkeypatch):
+    monkeypatch.setenv("DASH_MAX_BODY_MB", "1")
+    c = client(tmp_path)
+    big = ev("oracle.fired", pre_state_b64="A" * (1024 * 1024 + 10))
+    r = c.post("/events", json=big, headers=H)
+    assert r.status_code == 413 and r.json()["max_bytes"] == 1024 * 1024
+    assert c.post("/events", content=b"[" + b" " * (1024 * 1024 + 10) + b"]", headers=H).status_code == 413     # counted, not parsed
+
+    def chunks():                                                 # no content-length: counted while it is read
+        for _ in range(200):
+            yield b" " * 8192
+    assert c.post("/events", content=chunks(), headers=H).status_code == 413
+    assert c.get("/events").json()["events"] == [] and not (tmp_path / "e.jsonl").exists()
+    assert c.post("/events", json=big).status_code == 401         # the token is checked first
+    assert c.post("/events", json=ev("oracle.fired", pre_state_b64="A" * 500000), headers=H).status_code == 200
+
+
+def run_ev(run, type_="attack.attempt"):
+    e = ev(type_)
+    e["run"] = run
+    return e
+
+
+def test_memory_is_capped_and_the_store_keeps_everything(tmp_path, monkeypatch):
+    monkeypatch.setenv("DASH_MAX_EVENTS", "20")
+    app = create_app(str(tmp_path / "e.jsonl"), TOKEN)
+    c, bus = TestClient(app), app.state.bus
+    c.post("/events", json=ev(), headers=H)
+    gen = bus.gen
+    for _ in range(30):
+        c.post("/events", json=[ev() for _ in range(5)], headers=H)
+        assert len(bus.events) <= 20
+    assert bus.seq == 151 and len(bus._public) <= 20
+    seqs = [e["seq"] for e in c.get("/events").json()["events"]]
+    assert seqs == sorted(seqs) and seqs[-1] == 151 and seqs[0] > 100          # oldest first out
+    assert set(bus._public) <= set(seqs)                          # the redacted copies go with their events
+    assert bus.gen == gen                                         # pages are not told to start over on every eviction
+    assert c.get("/events", params={"since": 149}).json() == {"events": c.get("/events").json()["events"][-2:], "next": 151}
+    lines = (tmp_path / "e.jsonl").read_text().splitlines()
+    assert [json.loads(x)["seq"] for x in lines] == list(range(1, 152))        # the durable record is complete
+    again = create_app(str(tmp_path / "e.jsonl"), TOKEN).state.bus             # a restart loads within the same bound
+    assert len(again.events) <= 20 and again.events[-1]["seq"] == 151 and again.seq == 151 and again.gen == gen
+
+
+def test_eviction_keeps_what_the_page_needs_to_rebuild_the_current_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("DASH_MAX_EVENTS", "30")
+    app = create_app(str(tmp_path / "e.jsonl"), TOKEN)
+    c, bus = TestClient(app), app.state.bus
+    c.post("/events", json=[run_ev("old") for _ in range(25)], headers=H)
+    c.post("/events", json=[run_ev("new", "incident.opened"), run_ev("new", "rule.active")], headers=H)
+    c.post("/events", json=[run_ev("new", "request.routed") for _ in range(10)], headers=H)
+    # 1st: events of earlier runs
+    assert len(bus.events) <= 30 and [e["type"] for e in bus.events if e["run"] == "new"][:2] == ["incident.opened", "rule.active"]
+    assert sum(e["run"] == "new" for e in bus.events) == 12 and sum(e["run"] == "old" for e in bus.events) < 25
+    # 2nd: request traffic of the current run, before anything an incident is rebuilt from
+    for _ in range(20):
+        c.post("/events", json=[run_ev("new", "request.classified"), run_ev("new", "request.routed"), run_ev("new", "gate.result")], headers=H)
+    assert len(bus.events) <= 30 and not any(e["run"] == "old" for e in bus.events)
+    kinds = [e["type"] for e in bus.events]
+    assert kinds[:2] == ["incident.opened", "rule.active"] and kinds.count("gate.result") == 20
+    # 3rd: the bound holds even when the current run has nothing else left to give
+    c.post("/events", json=[run_ev("new", "gate.result") for _ in range(40)], headers=H)
+    assert len(bus.events) <= 30 and bus.events[-1]["seq"] == bus.seq
+    assert len((tmp_path / "e.jsonl").read_text().splitlines()) == bus.seq
+
+
+def test_stream_replays_what_is_in_memory_after_eviction(live, monkeypatch):
+    live.app.state.bus.max_events = 10
+    pub = httpx.Client(base_url=live.url, headers=H)
+    for _ in range(5):
+        pub.post("/events", json=[ev() for _ in range(5)])
+    kept = [e["seq"] for e in live.app.state.bus.events]
+    out = []
+    _read_sse(live.url + "/events/stream?since=0", len(kept), out)
+    assert [s for s, _ in out] == kept and kept[-1] == 25
+
+
+def test_store_rotates_by_size_and_one_generation_is_kept(tmp_path, monkeypatch):
+    import dashboard.server as srv
+    assert (srv.MAX_EVENTS, srv.STORE_MAX_MB, srv.MAX_BODY_MB) == (50000, 256, 32)
+    store, old = tmp_path / "e.jsonl", tmp_path / "e.jsonl.1"
+    app = create_app(str(store), TOKEN)
+    c, bus = TestClient(app), app.state.bus
+    bus.store_max = 2000                                          # bytes (DASH_STORE_MAX_MB is in MiB)
+    for _ in range(40):
+        c.post("/events", json=ev(), headers=H)
+    assert old.exists() and 0 < store.stat().st_size < 2000 + 400 and old.stat().st_size < 2000 + 400
+    on_disk = [json.loads(x)["seq"] for p in (old, store) for x in p.read_text().splitlines()]
+    assert on_disk == sorted(on_disk) and on_disk[-1] == 40 and len(on_disk) < 40          # only one old generation
+    assert [e["seq"] for e in bus.events] == list(range(1, 41))                            # rotation does not touch memory
+    again = create_app(str(store), TOKEN).state.bus                                        # a restart reads both files
+    assert [e["seq"] for e in again.events] == on_disk and again.seq == 40
+    assert c.post("/admin/clear", headers=H).status_code == 200
+    assert not old.exists() and store.read_text() == ""
+    assert create_app(str(store), TOKEN).state.bus.events == []
+
+
+def test_store_rotation_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("DASH_STORE_MAX_MB", "0")
+    app = create_app(str(tmp_path / "e.jsonl"), TOKEN)
+    assert app.state.bus.store_max == 0
+    c = TestClient(app)
+    for _ in range(5):
+        c.post("/events", json=ev(), headers=H)
+    assert not (tmp_path / "e.jsonl.1").exists() and len((tmp_path / "e.jsonl").read_text().splitlines()) == 5

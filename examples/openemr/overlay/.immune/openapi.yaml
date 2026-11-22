@@ -2,14 +2,14 @@
 # PHP scripts under interface/ and portal/). Do not edit by hand: re-run the script.
 openapi: 3.0.0
 info:
-  title: OpenEMR 8.2.0 (tag v8_2_0) as seen by Inmune's gateway
+  title: OpenEMR 8.2.0 (tag v8_2_0) as seen by Immune's gateway
   version: 8.2.0
 paths:
   /_immune/whoami:
     get:
       tags:
       - immune
-      summary: Session introspection (Inmune)
+      summary: Session introspection (Immune)
       responses:
         '200':
           description: '{id, role}'

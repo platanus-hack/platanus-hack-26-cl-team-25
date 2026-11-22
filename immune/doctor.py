@@ -9,7 +9,8 @@ Each check -> {"id", "name", "ok", "reason" (one line), "owner" (the init step t
 artefact: columns | profile | marks | config | none), "detail"}.
 
 Target code is never imported in this process: checks 2-5 drive shadow.harness in a clean child
-interpreter (immune.initsteps.harness_runner) on a fresh release copy; checks 1 and 7 run in
+interpreter (immune.initsteps.harness_runner) on a fresh release copy, ON THE HOST as the invoking user
+(immune.initsteps.hostrun: process separation, not a sandbox); checks 1, 7 and 8 run in
 `docker run --rm --network none` containers on immune-base:1.
 """
 from __future__ import annotations
@@ -27,12 +28,12 @@ import time
 import yaml
 
 from immune import _cfg, dbkind, generic, shadowdata
-from immune.initsteps import docker, openapi as oa, sandbox
+from immune.initsteps import docker, openapi as oa, hostrun
 
 NAMES = {1: "config, release, clone health", 2: "profile identity", 3: "legitimate GETs are clean",
          4: "synthetic canaries", 5: "L1 reset", 6: "no real data in the shadow", 7: "tests in the runner",
          8: "legit scenarios deterministic", 9: "pinned container images"}
-SECRET = sandbox.SHADOW_SECRET
+SECRET = hostrun.SHADOW_SECRET
 
 
 def _check(i, ok, reason, owner="none", detail=None, status=None, name=None):
@@ -137,7 +138,7 @@ def _job1(cfg, m, doc):
 
 def checks23(cfg, release, m, doc) -> list[dict]:
     job, uid, fresh = _job1(cfg, m, doc)
-    res = sandbox.harness(cfg, release, job)
+    res = hostrun.harness(cfg, release, job)
     if not res.get("ok"):
         err = "harness could not host the app: %s" % res.get("error")
         tail = (res.get("trace") or res.get("stderr_tail") or "")[-800:]
@@ -221,10 +222,10 @@ def checks45(cfg, release, m, cols) -> list[dict]:
                      "role": "user"})
     job = {"selftest": {"owner": target}, "requests": reqs,
            "reset_check": {"uid": int(m.get("seed_max_uid") or 0) + 777, "path": cfg.app.health}}
-    res = sandbox.harness(cfg, release, job)
+    res = hostrun.harness(cfg, release, job)
     if not res.get("ok"):
         err = res.get("error") or ""
-        gap = "CONTRACT_GAP: the harness cannot host the self-test shim (%s)" % err
+        gap = "the harness cannot host the self-test shim (%s)" % err
         return [_check(4, False, gap, "none", {"trace": (res.get("trace") or "")[-800:]}),
                 _check(5, False, "harness failed: %s" % err, "profile")]
     by = {r["name"]: r for r in res["results"]}
@@ -246,8 +247,8 @@ def checks45(cfg, release, m, cols) -> list[dict]:
     if rs.get("start_equals_seed") and rs.get("restored") and rs.get("mutated_by_L2"):
         c5 = _check(5, True, "L2 write (ensure_user) changed the db; the next L1 request restored the seed state")
     elif rs.get("start_equals_seed") and rs.get("restored"):
-        c5 = _check(5, True, "database equals the seed after an L1 request (ensure_user did not write in L2)",
-                    status="pass")
+        c5 = _check(5, True, "reset NOT exercised: ensure_user wrote nothing in L2, so the database equals the seed "
+                    "after an L1 request without any write having been undone", status="warn")
     else:
         c5 = _check(5, False, "reset: %s" % rs, "none", rs)
     return [c4, c5]
@@ -331,6 +332,12 @@ def check8(cfg, release) -> dict:
                       "none")
     return _check(8, True, "%s: %d scenarios, %d steps over %d paths, identical in two runs" % (
         cfg.scenarios, len(a), len(steps), len(routes)))
+
+
+def _project(arg: str | None) -> str:
+    """--project, else $IMMUNE_PROJECT, else the nearest parent holding .immune/config.yaml (as `immune up`)."""
+    from immune import config as icfg
+    return os.path.abspath(arg or os.environ.get("IMMUNE_PROJECT") or icfg.find_project())
 
 
 def run(project: str | None = None, only: list[int] | None = None) -> list[dict]:
@@ -459,6 +466,12 @@ def prereqs(openemr: bool = False) -> list[dict]:
     ok, why = _tool(["git", "--version"])
     add("git", ok, True, why, "building and applying patches", "install git")
     ok, why = _tool([_claude_bin(), "--version"])
+    if ok:
+        try:
+            from patcher.claude_cli import identity
+            why = "%s; credentials: %s" % (why, identity())
+        except Exception:  # noqa: BLE001
+            pass
     add("claude CLI", ok, False, why, "LLM steps of immune init, automatic patches",
         "install Claude Code (https://claude.com/claude-code) and log in once with `claude`, or set CLAUDE_BIN; "
         "without it: `immune init --no-llm`, and incidents stop at the blocking rule")
@@ -502,7 +515,7 @@ def main(argv=None) -> int:
                                            ("; optional not available: " + ", ".join(optional)) if optional else ""))
         return 0 if ok else 1
     only = [int(x) for x in a.only.split(",") if x.strip()] or None
-    checks = run(os.path.abspath(a.project) if a.project else None, only)
+    checks = run(_project(a.project), only)
     ok = all(c["ok"] for c in checks)
     if a.json:
         print(json.dumps({"ok": ok, "checks": checks}, indent=1, default=str))

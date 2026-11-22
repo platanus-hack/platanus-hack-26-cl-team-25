@@ -1,4 +1,4 @@
-"""Class self-audit ("memoria inmunológica", docs/plan-construccion.md §9d).
+"""Class self-audit ("memoria inmunológica", docs/arquitectura.md).
 
 After an incident of class C closes (patched or rule_only), every other operation x parameter of the
 project's OpenAPI document that class C could affect is probed with the regression battery of C — the

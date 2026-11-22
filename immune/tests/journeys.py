@@ -1,6 +1,6 @@
 """Acceptance journeys run through the harness with the GENERATED profile and shadow seed.
 
-    python -m immune.tests.journeys victim <project>      # VULNS.md requests + a legitimate journey
+    python -m immune.tests.journeys victim <project>      # docs/demo/respuestas/tienda.md requests + a legitimate journey
 """
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ import sys
 
 from immune import _cfg
 from immune.doctor import build_release
-from immune.initsteps import sandbox
+from immune.initsteps import hostrun
 
 
 def run(project: str, requests: list[dict]) -> list[dict]:
     cfg = _cfg.load(project)
     release = build_release(cfg)
-    res = sandbox.harness(cfg, release, {"requests": requests})
+    res = hostrun.harness(cfg, release, {"requests": requests})
     if not res.get("ok"):
         raise RuntimeError("harness failed: %s\n%s" % (res.get("error"), res.get("trace", "")[-2000:]))
     return res["results"]
@@ -28,7 +28,7 @@ def manifest(project: str) -> dict:
 
 
 def victim_requests(m: dict) -> tuple[list[dict], dict]:
-    """(requests, expected oracle per name) for victim/VULNS.md + a legitimate journey."""
+    """(requests, expected oracle per name) for docs/demo/respuestas/tienda.md + a legitimate journey."""
     legit = m["legit_users"][0]
     own = next(int(k) for k, v in m["ownership"]["orders"].items() if v == legit["id"])
     foreign_uid = next(u["id"] for u in m["legit_users"] if u["id"] not in (7,))
@@ -60,7 +60,7 @@ def victim_requests(m: dict) -> tuple[list[dict], dict]:
 
 
 def notas_requests(m: dict, project: str) -> tuple[list[dict], dict]:
-    """(requests, expected) for examples/notas: the 4 defects of its REVIEW_NOTES.md and the legitimate
+    """(requests, expected) for examples/notas: the 4 defects of docs/demo/respuestas/notas.md and the legitimate
     journeys of its tests/test_app.py, against the generated shadow seed."""
     import sqlite3
     cfg = _cfg.load(project)

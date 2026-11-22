@@ -70,6 +70,25 @@ def test_json_param_variants():
     assert len(set(emails)) >= 15
 
 
+def test_no_padding_with_copies_of_the_captured_request():
+    """Nothing to mutate (no parameter, no id in the path): no variants, not replays of the PoC."""
+    req = {"method": "GET", "path": "/api/health", "query": "", "headers": {}, "body_b64": ""}
+    ev = {"request": req, "uid": None, "role": None, "events": [{"oracle": "net", "detail": {}, "stack": []}]}
+    poc = {"requests": [dict(req, uid=None, role=None)], "expect": {"oracle": "net"}}
+    assert variants(poc, ev) == []
+    # one mutable query value under an oracle without payload families: still nothing equal to the PoC
+    req2 = dict(req, path="/api/items", query="tag=a")
+    poc2 = {"requests": [dict(req2, uid=None, role=None)], "expect": {"oracle": "net"}}
+    assert variants(poc2, dict(ev, request=req2)) == []
+
+
+@pytest.mark.parametrize("oracle,n", [("sql", 31), ("file", 26), ("owner", 26)])
+def test_variant_counts_for_the_demo_incidents(incidents, oracle, n):
+    inc = incidents[oracle]
+    vs = variants(inc["poc"], inc["evidence"])
+    assert len(vs) == n and inc["poc"]["requests"][0] not in vs
+
+
 def _fires(root, reqs):
     return [r["verdict"] == "oracle" for r in replay(root, reqs)]
 

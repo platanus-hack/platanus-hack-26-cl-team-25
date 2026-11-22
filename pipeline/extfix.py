@@ -1,6 +1,11 @@
-"""Patch stage for an external app (any language): LLM fix -> CI in a sandbox -> PR -> merge -> blue/green.
+"""Patch stage for an external app: LLM fix -> CI in a sandbox -> PR -> merge -> blue/green.
 
-Driven by a target file (labs/<lab>/target.yaml). One attempt:
+Written for the Grafana lab (labs/grafana-cve-2021-43798) and exercised only there. The target file
+(labs/<lab>/target.yaml) gives the repository, source dirs, build and test commands, routes and ports, but
+parts of this module are specific to that lab and to Go: the containers carry the label `immune.lab=grafana`
+and mount `grafana.ini` and the Grafana provisioning directory, the editable files are `*.go`, the policy
+gate recognises tests by the `_test.go` suffix, and `verify` reads the prod secret from `grafana.ini`.
+Another app needs those parts moved into the target file first. One attempt:
 
   workspace   git worktree of the current release commit
   propose     confined `claude -p` (Read everywhere, Edit only non-test files under source_dirs); never sees
@@ -410,7 +415,7 @@ class ExtFix:
                              timeout=kw.pop("timeout", 30), **kw)
 
     def blue_green(self, inc, release: str, artifact: str) -> dict:
-        d, app = self.t["deploy"], self.t["app"]
+        d = self.t["deploy"]
         st = self.state()
         old, new = st["active"], ("green" if st["active"] == "blue" else "blue")
         port, old_port = d["prod"][new], d["prod"][old]

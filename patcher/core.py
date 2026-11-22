@@ -1,4 +1,11 @@
-"""patcher.propose: an untrusted LLM proposes a diff, nothing else."""
+"""patcher.propose: an untrusted LLM proposes a diff, nothing else.
+
+The prompt is one template (prompts/fix.md, classes.md, feedback.md) for every runtime: `render` fills it
+with facts of the project (.immune/config.yaml: `app.source_dirs`, `database.kind`), of the files to edit
+(their language) and of the incident. Nothing in the templates names a particular application.
+`render_prompt` is the in-process Python runtime's view (stack frames and a sink line are known);
+`pipeline.generic_patch.render` is the any-language one (the bug is observed from outside the process).
+"""
 from __future__ import annotations
 
 import json
@@ -21,7 +28,24 @@ def _read(name: str) -> str:
         return f.read()
 
 
-def _class_rules(vuln_class: str) -> str:
+LANG = {".js": "JavaScript (Node.js)", ".mjs": "JavaScript (Node.js)", ".cjs": "JavaScript (Node.js)",
+        ".ts": "TypeScript", ".py": "Python", ".go": "Go", ".rb": "Ruby", ".php": "PHP", ".java": "Java",
+        ".cs": "C#", ".rs": "Rust", ".kt": "Kotlin", ".c": "C", ".cpp": "C++"}
+# what "parameterised" and "resolved path" look like, by (language, database.kind); "" = no hint
+PLACEHOLDERS = {("Python", "sqlite"): "`?` placeholders for sqlite3", ("Python", "postgres"): "`%s` for psycopg",
+                ("JavaScript (Node.js)", "postgres"): "for node-postgres: `$1, $2, ...` and a values array",
+                ("TypeScript", "postgres"): "for node-postgres: `$1, $2, ...` and a values array",
+                ("JavaScript (Node.js)", "sqlite"): "`?` placeholders", ("TypeScript", "sqlite"): "`?` placeholders"}
+RESOLVE = {"Python": "`os.path.realpath`, then e.g. `os.path.commonpath`", "JavaScript (Node.js)": "`path.resolve`",
+           "TypeScript": "`path.resolve`", "Go": "`filepath.Abs` after `filepath.EvalSymlinks`", "Ruby": "`File.realpath`",
+           "PHP": "`realpath`", "Java": "`toRealPath()`"}
+
+
+def languages(files: list) -> list:
+    return sorted({LANG.get(os.path.splitext(f)[1].lower(), "") for f in files} - {""})
+
+
+def _class_rules(vuln_class: str, langs: list | None = None, db_kind: str = "") -> str:
     sections, cur = {}, None
     for line in _read("classes.md").splitlines(keepends=True):
         m = re.fullmatch(r"## (\w+)\s*", line)
@@ -30,7 +54,10 @@ def _class_rules(vuln_class: str) -> str:
             sections[cur] = ""
         elif cur:
             sections[cur] += line
-    return (sections.get(vuln_class) or sections["other"]).strip()
+    ph = [PLACEHOLDERS[(l, db_kind)] for l in langs or [] if (l, db_kind) in PLACEHOLDERS]
+    rs = [RESOLVE[l] for l in langs or [] if l in RESOLVE]
+    return Template((sections.get(vuln_class) or sections["other"]).strip()).safe_substitute(
+        placeholder_hint=" (%s)" % "; ".join(ph) if ph else "", resolve_hint=" (%s)" % "; ".join(rs) if rs else "")
 
 
 def _clip(v):
@@ -112,33 +139,62 @@ def editable_files(incident: dict, workdir: str, source_dirs: list[str] | None =
     return files
 
 
-def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, editable: list[str]) -> str:
+def render(incident: dict, feedback: list[str] | None, attempt: int, editable: list[str], *, source_dirs: list[str],
+           db_kind: str, observed_how: str, bug_lines: list[str], editable_note: str, start: str,
+           default_language: str = "") -> str:
+    """The fix prompt. Everything derived from the request (the evidence record, the gates' feedback) goes
+    between nonce-delimited markers; `bug_lines` must not carry request text."""
     nonce = secrets.token_hex(8)
     evidence_json = json.dumps(_evidence_record(incident), indent=1, ensure_ascii=True, sort_keys=True)
     fb_text = "\n\n".join(_clip(str(f)) for f in (feedback or []) if str(f).strip())
     while nonce in evidence_json or nonce in fb_text:
         nonce = secrets.token_hex(8)
     param = incident.get("param") or {}
-    sink = incident.get("sink") or {}
-    frames = stack_frames(incident)
-    stack = "\n".join(f"  - {fr.get('file')}:{fr.get('line')} in {fr.get('func')}" for fr in frames) or "  (none)"
+    cls = incident.get("vuln_class") or "other"
+    langs = languages(editable) or ([default_language] if default_language else [])
     feedback_section = ""
     if fb_text:
         feedback_section = Template(_read("feedback.md")).safe_substitute(
             attempt=max(1, attempt - 1), nonce=nonce, feedback=fb_text)
     return Template(_read("fix.md")).safe_substitute(
-        vuln_class=incident.get("vuln_class", "other"),
+        language=" / ".join(langs) or "an unknown language",
+        source_dirs=", ".join(f"`{d}/`" for d in source_dirs) or "the current directory",
+        observed_how=observed_how,
+        vuln_class=cls,
         method=incident.get("method", "?"),
         route=incident.get("route", "?"),
         param=(f"{param.get('name')} (in {param.get('in')})" if param.get("name") else "(none)"),
-        sink=(f"{sink.get('file')}:{sink.get('line')}" if sink.get("file") else "(unknown)"),
-        stack=stack,
-        editable_files=", ".join(f"`{e}`" for e in editable) or ", ".join(f"`{d}/*.py`" for d in _source_dirs()),
-        class_rules=_class_rules(incident.get("vuln_class", "other")),
+        bug_lines="\n".join(bug_lines),
+        editable_files=", ".join(f"`{e}`" for e in editable) or "(none found)",
+        editable_note=editable_note,
+        class_rules=_class_rules(cls, langs, db_kind),
         nonce=nonce,
         evidence_json=evidence_json,
         feedback_section=feedback_section,
+        start=start,
     )
+
+
+def _project(cfg=None):
+    if cfg is None:
+        from immune import config as icfg
+        cfg = icfg.current()
+    return _source_dirs(cfg.app.source_dirs), cfg.database.kind
+
+
+def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, editable: list[str], cfg=None) -> str:
+    """Prompt for the in-process Python runtime: the instrumentation gives the stack and the sink line."""
+    dirs, db_kind = _project(cfg)
+    sink = incident.get("sink") or {}
+    frames = stack_frames(incident)
+    stack = "\n".join(f"  - {fr.get('file')}:{fr.get('line')} in {fr.get('func')}" for fr in frames) or "  (none)"
+    return render(
+        incident, feedback, attempt, editable, source_dirs=dirs, db_kind=db_kind, default_language="Python",
+        observed_how="from our own instrumentation",
+        bug_lines=["- Reported sink: " + (f"{sink.get('file')}:{sink.get('line')}" if sink.get("file") else "(unknown)"),
+                   "- Stack of the offending request (outermost first, file:line):", stack],
+        editable_note="" if editable else "No file of the stack is under " + ", ".join(f"`{d}/`" for d in dirs) + ".",
+        start="Start by reading the files in the stack, then make the edit.")
 
 
 def propose(release_dir: str, incident: dict, feedback: list[str] | None = None, attempt: int = 1) -> dict:

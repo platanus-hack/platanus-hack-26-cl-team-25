@@ -269,7 +269,7 @@ class Feed:
                 if deployed:
                     detail = "Validaciones superadas y revisión verificada en el gateway."
                 elif rolled_back:
-                    detail = f"Inmune restauró y verificó la revisión {record['previous']} después de un fallo."
+                    detail = f"Immune restauró y verificó la revisión {record['previous']} después de un fallo."
                 else:
                     detail = "Candidato rechazado. Consulta el registro del incidente para ver el motivo."
                 batch.append(event(events.DEPLOY_DONE, {

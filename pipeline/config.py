@@ -57,8 +57,7 @@ class Config:
     scenarios_module: str = "sim.scenarios"
     repo_target: str = "local"
     github_repo: str = ""
-    # runner
-    runner_mode: str = "docker"        # docker | local (local = host subprocess, tests only)
+    # runner (always a docker container: pipeline/runner.py)
     runner_image: str = "immune-base:1"
     runner_prefix: str = "immune-runner"
     runner_timeout_s: float = 240.0
@@ -73,6 +72,8 @@ class Config:
     deploy_timeout_s: float = 300.0
     patcher_timeout_s: float = 600.0
     verify_wait_s: float = 8.0
+    verify_capacity_retries: int = 4
+    verify_capacity_wait_s: float = 3.0
     reopen_cooldown_s: float = 300.0
     retry_cooldown_s: float = 60.0      # transient close: tried again after this, x4 per retry, capped at 1 h
     max_retries: int = 5
@@ -140,7 +141,6 @@ class Config:
             scenarios_module=env.get("SCENARIOS_MODULE", app.scenarios),
             repo_target=target,
             github_repo=env.get("GITHUB_REPO", app.repo.github),
-            runner_mode=env.get("RUNNER_MODE", "docker"),
             runner_image=env.get("RUNNER_IMAGE", "immune-base:1"),
             runner_prefix=env.get("RUNNER_PREFIX", app.prefix + "-runner"),
             runner_timeout_s=_f(env, "RUNNER_TIMEOUT_S", 240),
@@ -154,6 +154,8 @@ class Config:
             deploy_timeout_s=_f(env, "PIPELINE_DEPLOY_TIMEOUT_S", 300),
             patcher_timeout_s=_f(env, "PIPELINE_PATCHER_TIMEOUT_S", 600),
             verify_wait_s=_f(env, "PIPELINE_VERIFY_WAIT_S", 8),
+            verify_capacity_retries=int(_f(env, "PIPELINE_VERIFY_CAPACITY_RETRIES", 4)),
+            verify_capacity_wait_s=_f(env, "PIPELINE_VERIFY_CAPACITY_WAIT_S", 3),
             reopen_cooldown_s=_f(env, "PIPELINE_REOPEN_COOLDOWN_S", 300),
             retry_cooldown_s=_f(env, "PIPELINE_RETRY_COOLDOWN_S", 60),
             max_retries=_i(env, "PIPELINE_MAX_RETRIES", 5),

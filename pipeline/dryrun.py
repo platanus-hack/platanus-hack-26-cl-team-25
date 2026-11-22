@@ -1,8 +1,7 @@
 """End-to-end dry run of one incident with fakes: `python -m pipeline.dryrun [fixture.json ...]`
 
 Fake bus (SSE), fake gateway (admin + data plane), fake fleet; REPO_TARGET=local in a temp runtime;
-PATCHER_MODULE defaults to pipeline.stub_patcher; the runner is real (docker) unless RUNNER_MODE says
-otherwise. The fixture's oracle.fired event is posted to the fake bus and `python -m pipeline`'s loop
+PATCHER_MODULE defaults to pipeline.stub_patcher; the runner is real (docker). The fixture's oracle.fired event is posted to the fake bus and `python -m pipeline`'s loop
 follows it exactly as in production. Prints the ordered event sequence and the merged release dir.
 Exit 0 when every incident closed `patched` with the full event sequence.
 """

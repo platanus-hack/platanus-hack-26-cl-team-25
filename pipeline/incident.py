@@ -3,12 +3,28 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import parse_qsl, unquote
+from urllib.parse import parse_qsl, quote, unquote
 
 from . import openapi, reqs
 
 CLASS_OF = {"sql": "sqli", "file": "traversal", "owner": "idor"}
 PREFERENCE = ("sql", "file", "owner")   # when several oracles fired
+ROUTE_MAX, NAME_MAX = 200, 100
+
+
+def safe_route(path: str) -> str:
+    """The route of a request no OpenAPI template matches: its path, made safe to show. It is attacker-chosen
+    text that reaches the patch prompt, the pull-request title and the commit message outside any fence, so
+    everything but unreserved URL characters is percent-encoded (no control character, newline, space,
+    backtick or `{}` placeholder survives) and the result is capped at ROUTE_MAX characters. An ordinary
+    path is returned unchanged."""
+    out = quote(str(path), safe="/%-._~!$&'()*+,;=:@")
+    return out[:ROUTE_MAX] or "/"
+
+
+def safe_name(name: str) -> str:
+    """A parameter name taken from the request (query key, JSON path): control characters dropped, capped."""
+    return "".join(ch for ch in str(name) if ch.isprintable())[:NAME_MAX]
 
 
 def primary_event(evidence: dict) -> dict | None:
@@ -94,13 +110,15 @@ def build(event: dict, spec: dict, manifest: dict | None = None) -> dict:
         raise ValueError("evidence without oracle events")
     kind = prim.get("oracle")
     rq = ev.get("request") or {}
-    method = str(rq.get("method") or "GET").upper()
+    method = re.sub(r"[^A-Z-]", "", str(rq.get("method") or "GET").upper())[:16] or "GET"
     path = str(rq.get("path") or "/")
     template, _op, _pp = openapi.find(spec, method, path)
-    route = template or path
+    route = template or safe_route(path)
     req = {"method": method, "path": path, "query": rq.get("query") or "", "body_b64": rq.get("body_b64") or "",
            "headers": rq.get("headers") or {}}
     param = derive_param(kind, prim, req, template, manifest)
+    if param:
+        param["name"] = safe_name(param["name"])
     stack = prim.get("stack") or []
     sink = {"file": stack[-1]["file"], "line": int(stack[-1]["line"])} if stack else {"file": "", "line": 0}
     return {

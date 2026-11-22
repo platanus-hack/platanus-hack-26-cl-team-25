@@ -18,7 +18,8 @@ import os
 import sqlite3
 import sys
 import threading
-import weakref
+
+from immune_contracts import wire
 
 ORIG_CONNECT = sqlite3.connect
 
@@ -44,7 +45,6 @@ class RequestRecord:
         self.events = []       # file/proc/net events, already final
         self._keys = set()
         self.file_stacks = {}  # realpath -> stack captured at FileResponse(...) construction
-        self.conns = []        # weakrefs of connections opened during the request
 
     def add(self, oracle, detail, stack):
         key = (oracle, repr(sorted(detail.items())))
@@ -139,11 +139,11 @@ def _hook(event, args):
             _on_file(rec, event, args)
         elif rec is not None and not STATE.learning:
             if event in PROC_EVENTS:
-                rec.add("proc", {"event": event, "args": _short(args[:2] if event != "os.system" else args)},
+                rec.add(wire.ORACLE_PROC, {"event": event, "args": _short(args[:2] if event != "os.system" else args)},
                         capture_stack(1))
             else:
                 addr = args[1] if event in ("socket.connect", "socket.sendto", "socket.sendmsg") and len(args) > 1 else args[:2]
-                rec.add("net", {"event": event, "address": _short(addr)}, capture_stack(1))
+                rec.add(wire.ORACLE_NET, {"event": event, "address": _short(addr)}, capture_stack(1))
     except Exception:  # never break the app because of the oracle
         pass
     finally:
@@ -175,7 +175,7 @@ def _on_file(rec, event, args):
     detail = {"path": path, "realpath": real}
     if event != "open":
         detail["op"] = event
-    rec.add("file", detail, stack)
+    rec.add(wire.ORACLE_FILE, detail, stack)
 
 
 # ---------------------------------------------------------------- sqlite3
@@ -264,14 +264,7 @@ def connect(*args, **kwargs):
                 kwargs[name] = val
             del args[5:]
     kwargs["factory"] = _mix(ConnectionMixin, kwargs.get("factory"), Connection)
-    conn = ORIG_CONNECT(*args, **kwargs)
-    rec = STATE.current
-    if rec is not None:
-        try:
-            rec.conns.append(weakref.ref(conn))
-        except TypeError:
-            pass
-    return conn
+    return ORIG_CONNECT(*args, **kwargs)
 
 
 # ---------------------------------------------------------------- install

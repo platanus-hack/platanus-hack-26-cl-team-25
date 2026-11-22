@@ -50,9 +50,8 @@ def is_catchall(seg) -> bool:
     return isinstance(seg, tuple) and len(seg) > 1
 
 
-def match_template(segments: list, raw_path: str) -> dict | None:
-    """Match a raw (percent-encoded) path against template segments. Returns decoded path params."""
-    parts = raw_path.strip("/").split("/") if raw_path.strip("/") else []
+def _match_parts(segments: list, parts: list) -> dict | None:
+    """Match already-decoded path segments against template segments."""
     if segments and is_catchall(segments[-1]):          # {name*}: one or more trailing segments
         n = len(segments) - 1
         if len(parts) <= n:
@@ -68,10 +67,41 @@ def match_template(segments: list, raw_path: str) -> dict | None:
         if isinstance(seg, tuple):
             if part == "":
                 return None
-            params[seg[0]] = unquote(part)
-        elif unquote(part) != seg:
+            params[seg[0]] = part
+        elif part != seg:
             return None
     return params
+
+
+def _split(path: str) -> list:
+    return path.strip("/").split("/") if path.strip("/") else []
+
+
+def path_readings(raw_path: str) -> list:
+    """The segment lists an upstream server may route a raw (percent-encoded) path on.
+
+    First the reference one: decode once, then split (uvicorn unquotes the whole path before starlette
+    routes, so '%2F' IS a separator and '%252F' is the literal text '%2F'). Then, only when it differs,
+    split first and decode each segment (servers that route on the raw path, e.g. Express, where '%2F'
+    stays inside one parameter). They differ only when the path carries an encoded slash.
+    """
+    decoded = _split(unquote(raw_path))
+    raw = [unquote(p) for p in _split(raw_path)]
+    return [decoded] if raw == decoded else [decoded, raw]
+
+
+def match_template(segments: list, raw_path: str) -> dict | None:
+    """Match a raw (percent-encoded) path against template segments. Returns decoded path params.
+
+    A path matches if ANY reading an upstream may route on matches (see path_readings), the reference
+    reading first: a gateway that splits before decoding lets '/api%2Fproducts' pass as an unknown route
+    while the app serves '/api/products'.
+    """
+    for parts in path_readings(raw_path):
+        params = _match_parts(segments, parts)
+        if params is not None:
+            return params
+    return None
 
 
 @dataclass
@@ -128,18 +158,24 @@ class Spec:
             return cls(None)
 
     def match(self, method: str, raw_path: str) -> tuple[Operation | None, dict]:
+        return next((m for m in self.match_readings(method, raw_path) if m is not None), (None, {}))
+
+    def match_readings(self, method: str, raw_path: str) -> list:
+        """One entry per reading of the path (see path_readings), the reference reading first: the
+        (operation, params) it routes to, or None. Entries that differ mean gateway and upstream could
+        disagree on the route; the classifier flags that."""
         method = "GET" if method.upper() == "HEAD" else method.upper()
-        candidates = [raw_path]
-        if len(raw_path) > 1 and raw_path.endswith("/"):
-            candidates.append(raw_path.rstrip("/") or "/")
-        for cand in candidates:
+        out = []
+        for parts in path_readings(raw_path):
+            hit = None
             for op in self.ops:
-                if op.method != method:
-                    continue
-                params = match_template(op.segments, cand)
-                if params is not None:
-                    return op, params
-        return None, {}
+                if op.method == method:
+                    params = _match_parts(op.segments, parts)
+                    if params is not None:
+                        hit = (op, params)
+                        break
+            out.append(hit)
+        return out
 
 
 # ---------------------------------------------------------------- value checks

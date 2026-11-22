@@ -1,4 +1,4 @@
-"""Clone pool and captive sessions (contracts/README.md §6 step 8, v1.1: lazy binding).
+"""Clone pool and captive sessions (contracts/README.md §6.3 step 8; binding is lazy).
 
 Clone states: free -> busy (one request) -> free | captive (bound to a session) -> retired.
 Captive sessions exist independently of clones: a session confirmed by an L1
@@ -40,7 +40,6 @@ class Captive:
     since: float
     last_used: float
     clone: str | None = None          # bound clone id, None until bound
-    bound_since: float | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)   # serialises binding for this session
 
 
@@ -98,7 +97,7 @@ class Pool:
         if clone.session is not None:
             cap = self.captive.get(clone.session)
             if cap is not None and cap.clone == clone.id:
-                cap.clone, cap.bound_since = None, None
+                cap.clone = None
         clone.session = None
         clone.state = RETIRED
 
@@ -112,7 +111,7 @@ class Pool:
     def bound_clone(self, cap: Captive) -> Clone | None:
         c = self.clones.get(cap.clone) if cap.clone else None
         if c is None or c.state != CAPTIVE or c.session != cap.session:
-            cap.clone, cap.bound_since = None, None
+            cap.clone = None
             return None
         return c
 
@@ -207,7 +206,7 @@ class Pool:
             return False
         now = time.time()
         clone.state, clone.session, clone.since, clone.last_used = CAPTIVE, cap.session, now, now
-        cap.clone, cap.bound_since = clone.id, now
+        cap.clone = clone.id
         return True
 
     def touch(self, cap: Captive, clone: Clone | None = None) -> None:

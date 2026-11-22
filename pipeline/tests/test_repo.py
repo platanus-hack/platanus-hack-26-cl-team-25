@@ -213,7 +213,7 @@ def test_orchestrator_falls_back_to_local_when_github_fails(tmp_path, t0):
     inc = {"incident": "inc-1", "vuln_class": "sqli", "method": "GET", "route": "/api/products",
            "param": {"in": "query", "name": "q"}, "sink": {"file": "f", "line": 1}, "evidence": {"request": {}, "events": []},
            "evidence_rid": "x", "log": []}
-    p._pr_body = lambda inc: "body"
+    p._pr_body = lambda inc, attempt, source: "body"
     d = fixes.build_diff(t0, fixes.SQLI_GOOD)
     ch = p._open_change(inc, 1, d, _patched(t0, d), None)
     assert ch.url.startswith("file://") and isinstance(p.repo, repo.LocalRepo)

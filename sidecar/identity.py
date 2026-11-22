@@ -74,10 +74,6 @@ class Identity:
         self.profile = profile
         self.command = command
 
-    def has_mapping(self) -> bool:
-        p = self.profile
-        return bool(self.command) or (p is not None and (hasattr(p, "identity_headers") or hasattr(p, "mint_token")))
-
     def headers_for(self, env, uid: int, role: str) -> dict:
         p = self.profile
         if p is not None and hasattr(p, "identity_headers"):
@@ -124,16 +120,29 @@ class Identity:
         return None, None
 
     def markers(self, env, path: str | None) -> dict:
+        """{marker: owner uid} for the owner oracle. Markers that are configured (a profile ``load_markers`` or a
+        markers path) but cannot be loaded are an error: the sidecar must not start with the owner oracle off
+        without anyone having asked for that. Not configured at all is the only way to run without it."""
         p = self.profile
+        if p is not None and hasattr(p, "load_markers"):
+            src = "profile load_markers"
+        elif path:
+            src = path
+        else:
+            log.warning("no markers configured (no profile load_markers, no markers_path/MARKERS_PATH): "
+                        "owner oracle off")
+            return {}
         try:
             if p is not None and hasattr(p, "load_markers"):
-                return {str(k): int(v) for k, v in (p.load_markers(env) or {}).items()}
+                out = {str(k): int(v) for k, v in (p.load_markers(env) or {}).items()}
+                if not out:
+                    log.warning("profile load_markers returned no markers: owner oracle off")
+                return out
             if path:
                 with open(path) as f:   # {marker: {"path": …}} entries are file markers (observer.load_file_markers)
                     return {str(k): int(v) for k, v in json.load(f).items() if not isinstance(v, dict)}
         except Exception as e:
-            log.warning("markers not loaded (%r): owner oracle disabled", e)
-        return {}
+            raise RuntimeError(f"markers configured ({src}) but not loadable: {e!r}") from e
 
     def public_paths(self, configured) -> list:
         p = self.profile

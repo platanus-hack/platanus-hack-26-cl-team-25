@@ -1,6 +1,6 @@
 """Sidecar in front of an unmodified shadow ScadaBR (CVE-2026-8602, authorization oracle).
 
-Speaks the same clone protocol as `shadow/` and `sidecar/marker/` (contracts/README.md §5), so the gateway
+Speaks the same clone protocol as `shadow/` and `python -m sidecar` (contracts/README.md §5), so the gateway
 cannot tell them apart:
 
 1. strip the x-imm-* request headers, forward the request to the shadow ScadaBR with the exact target;

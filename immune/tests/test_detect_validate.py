@@ -153,14 +153,39 @@ def public_paths():
     ("open('/tmp/x', 'w')", "open() may only read"),
     ("os.system('id')", ".system() is not allowed"),
     ("from . import y", "relative imports"),
+    ("o = open\no('/tmp/x', 'w')", "open may only be called"),            # aliasing a builtin
+    ("getattr(os, 'sys' + 'tem')('id')", "getattr() is not allowed"),
+    ("g = getattr", "getattr() is not allowed"),
+    ("__import__('subprocess')", "__import__() is not allowed"),
+    ("f = eval", "eval() is not allowed"),
+    ("exec('1')", "exec() is not allowed"),
+    ("import os as o\no.system('id')", ".system() is not allowed"),
+    ("m = os\nm.system('id')", "module os may only be used as os.<name>"),
+    ("f = os.system", ".system() is not allowed"),                        # not only when called
+    ("from os import system", "from os import system is not allowed"),
+    ("os.remove('/tmp/x')", ".remove() is not allowed"),
+    ("os.open('/tmp/x', os.O_WRONLY)", ".open() is not allowed"),
+    ("json.os.system('id')", "reaching module os through another object"),
+    ("(1).__class__.__base__.__subclasses__()", ".__subclasses__ is not allowed"),
 ])
 def test_profile_static_policy_rejects(snippet, needle):
     errs = validate.profile_static(GOOD + "\n" + snippet + "\n", "shop")
     assert any(needle in e for e in errs), errs
 
 
+PLAIN_METHODS = """
+def helper(env, conn, items):
+    name = env["APP_STATIC"].replace("//", "/")
+    items.remove(name)
+    conn.execute("DELETE FROM sessions").fetchall()
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name).replace(os.sep, "/")
+"""
+
+
 def test_profile_static_policy_accepts():
     assert validate.profile_static(GOOD, "shop") == []
+    # .replace() / .remove() of strings and lists are not file-system calls
+    assert validate.profile_static(GOOD + PLAIN_METHODS, "shop") == []
     assert validate.profile_static("def f(:\n", "shop")[0].startswith("profile.py: syntax error")
 
 

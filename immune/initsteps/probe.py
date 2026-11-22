@@ -1,4 +1,4 @@
-"""Child-process probe (run through immune.initsteps.sandbox, never imported by the installer).
+"""Child-process probe (run through immune.initsteps.hostrun, never imported by the installer).
 
 Job (stdin JSON): {"op": "inspect"|"call"|"openapi", "profile": module, "asgi": "mod:attr", "arg": ...}
 Prints one JSON line on the real stdout.

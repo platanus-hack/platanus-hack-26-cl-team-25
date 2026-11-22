@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
 
@@ -31,7 +32,7 @@ def create_app(cfg: Config | None = None, fleet: Fleet | None = None) -> FastAPI
     app.state.fleet = fleet
 
     def auth(x_admin_token: str = Header(None)):
-        if not cfg.admin_token or x_admin_token != cfg.admin_token:
+        if not cfg.admin_token or not hmac.compare_digest((x_admin_token or "").encode(), cfg.admin_token.encode()):
             raise HTTPException(401, "unauthorized")
 
     def run(fn, *a):

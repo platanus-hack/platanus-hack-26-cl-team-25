@@ -1,1 +1,1 @@
-"""Automatic remediation pipeline (WP5)."""
+"""Automatic remediation pipeline. See pipeline/README.md."""

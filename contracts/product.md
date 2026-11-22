@@ -1,228 +1,651 @@
-# Product contract (v1): `immune` on any project
+# Product contract
 
-Owned by the orchestrator. Extends `contracts/README.md` (which stays valid for wire protocol, events, gateway decisions, gates).
-Goal: the system no longer assumes the built-in `victim/` app. Everything app-specific comes from `<project>/.immune/`.
+Reference for running Immune on a project: the `.immune/` directory, the schema of `config.yaml`, the `immune`
+command line, the generic runtime for apps that are not Python ASGI, and the behaviour of a stack under
+failure. The wire protocols between the processes are in `contracts/README.md`. Every entry describes the code
+as it is; the truth for `config.yaml` is the loader, `immune/config.py` (`from_dict`).
 
 ## 1. Layout
 
-- `IMMUNE_HOME`: this repository (the tool). Mounted read-only at `/opt/immune` in every container; `PYTHONPATH=/app:/opt/immune`.
-- `PROJECT_DIR`: the protected app's repository (any path). The built-in demo uses `IMMUNE_HOME` itself as project (package `victim`).
-- `<project>/.immune/config.yaml` — the only source of app-specific facts (schema below).
-- `<project>/.immune/runtime/` — all runtime state (what `runtime/` is today): `releases/<id>/` (a full copy of the paths in `app.release_paths`), `data/`, `recordings/`, `bus/`, `logs/`, `repo/`, `pipeline/`. For the built-in demo keep `runtime/` at the repo root (config key `runtime_dir`).
-- A release is mounted read-only at `/app` in prod, clone and runner containers; working directory `/app`.
+| Name | Meaning |
+|---|---|
+| Immune home | this repository. Mounted read-only at `/opt/immune` in every container that runs Immune code |
+| project | the repository of the protected app, any path. The built-in demo uses this repository itself as its project (app in `victim/`, config in `.immune/config.yaml`) |
+| `<project>/.immune/config.yaml` | the only source of app-specific facts (section 2) |
+| `<runtime>` | all state of the stack: `runtime_dir` of `config.yaml`, default `<project>/.immune/runtime`. The built-in demo sets it to `runtime` at the repository root. Layout: `contracts/README.md` section 2 |
+| release | a full copy of the paths in `app.release_paths`, at `<runtime>/releases/<id>/`. `t0` is the release a stack starts from. Mounted read-only at `/app` in production, clone and runner containers |
 
-## 2. `.immune/config.yaml`
+The project a command acts on is, in this order: `--project DIR`; the environment variable `IMMUNE_PROJECT`;
+the nearest directory at or above the current one that holds `.immune/config.yaml`; the Immune home
+(`immune/config.py`, `find_project`). One command differs: `--project` of `immune init` defaults to the current
+directory.
+
+Files of a project's `.immune/` directory:
+
+| File | Written by | Purpose |
+|---|---|---|
+| `config.yaml` | `immune init`, or by hand | section 2 |
+| `openapi.yaml` | `immune init` | the app's OpenAPI document with the `x-owner-scoped` and `x-sensitive` marks |
+| `profile.py` | `immune init` | shadow profile (`contracts/README.md` section 4.4) |
+| `scenarios.py` | `immune init` | generated legitimate journeys for the `legit` gate |
+| `shadow/columns.yaml` | `immune init`, or by hand | column classification for the shadow data (section 4) |
+| `shadow/auth.yaml`, `shadow/marks.yaml`, `shadow/detect.yaml`, `shadow/schema.json`, `shadow/openapi.base.json` | `immune init` | intermediate results of init |
+| `context/schema.md` | `immune init` | the database schema and the shapes of its values (never the values), given to the LLM steps as context |
+| `deploy/`, `DEPLOY.md` | `immune init` | artefacts of the experimental `immune deploy` (section 5) |
+| `report.md` | `immune init` | what init found, assumed and could not verify |
+| `.gitignore` | `immune init` | ignores `runtime/` and `deploy/immune.env`; an existing file is kept |
+| `runtime/` | `immune up` | `<runtime>` when `runtime_dir` is not set |
+
+## 2. `config.yaml`
+
+Example (the built-in demo, `.immune/config.yaml`):
 
 ```yaml
 version: 1
-name: tienda                      # slug; container names are immune-<name>-...
-runtime_dir: runtime              # relative to the project; default .immune/runtime
+name: tienda
+runtime_dir: runtime
 app:
-  runtime: python-asgi            # python-asgi | generic (see §6)
-  release_paths: [victim]         # files/dirs copied into a release (relative to project)
-  source_dirs: [victim/app]       # where an automatic fix may edit
-  asgi: victim.app.main:app       # python-asgi only
+  runtime: python-asgi
+  release_paths: [victim]
+  source_dirs: [victim/app]
+  asgi: victim.app.main:app
   port: 8000
   health: /health
-  env:                            # extra env for the app; values may use {db} {static} {secret}
+  static: victim/static
+  env:
     APP_DB: "{db}"
-    APP_STATIC: "/app/victim/static"
+    APP_STATIC: "{static}"
     APP_SECRET: "{secret}"
-  frozen_time_env: APP_NOW        # optional: env var that freezes the app clock (unix seconds)
+  frozen_time_env: APP_NOW
 database:
-  kind: sqlite                    # sqlite | postgres (generic runtime)
-  path_env: APP_DB                # env var through which the app receives the db path
+  kind: sqlite
+  path_env: APP_DB
 data:
-  prod_db: runtime/data/prod/app.db          # the live database (directory is mounted)
-  seed_command: "python -m victim.seed --out-prod {prod_db} --out-shadow {shadow_db} --manifest {manifest} --markers {markers} --seed 1"
-                                  # optional. If absent, shadow data is derived from prod_db with `shadow.columns` (see §4)
+  prod_db: runtime/data/prod/app.db
+  seed_command: "python -m victim.seed --out-prod {prod_db} --out-shadow {shadow_db} --manifest {manifest} --markers {markers} --seed {seed}"
 auth:
-  kind: immune-token              # immune-token | jwt-hs256 | introspect | none
-  # jwt-hs256: secret_env, uid_claim (default sub), role_claim (optional), admin_values ([admin])
-  # introspect: path (/api/me), uid_field (id), role_field (role), admin_values ([admin]), cache_s (30)
-  #   the gateway calls <path> on PROD with the client's credentials (Authorization and Cookie headers) and caches by credential hash
-openapi: contracts/openapi.yaml   # relative to project; may be generated by init
+  kind: immune-token
+openapi: contracts/openapi.yaml
 shadow:
-  profile: victim.shadow_profile  # python module importable from /app or from <project>/.immune (mounted at /app/.immune, on sys.path)
-  columns: .immune/shadow/columns.yaml       # optional, see §4
+  profile: victim.shadow_profile
 tests:
-  command: "python -m pytest victim/tests -q -p no:cacheprovider"   # run in the runner with cwd /app; exit 0 = pass. Optional.
-scenarios: sim.scenarios          # optional python module with SCENARIOS (contracts/interfaces.md)
+  command: "python -m pytest victim/tests -q -p no:cacheprovider"
+scenarios: sim.scenarios
 repo:
-  target: local                   # local | github
-  github: null                    # owner/name
-autopatch: merge                  # off | pr | merge   (pr: open the PR and stop; merge: also merge and deploy)
-mode: enforce                     # observe | enforce
+  target: local
+  t0_tag: victim-t0
+autopatch: merge
+mode: enforce
 pool_size: 4
-aftercheck: false                 # true: second net for requests classified clean (§3b)
+ports: {gateway: 8080, admin: 8081, dashboard: 8090, fleet: 8070}
 ```
 
-Loader: `immune.config.load(project_dir) -> Config` (dataclass, validated, absolute paths resolved). **Every component gets its app facts from this object** — no `victim` literals outside `victim/`, the root `.immune/config.yaml` and tests.
+Relative paths are resolved against the project directory. An invalid file is rejected with every error
+listed, each with its key (`ConfigError`); the CLI then exits with status 2.
 
-## 3. Behaviour changes
+### Top level
 
-- **Without `tests.command`**: gate `tests` is reported as `skipped`, and `autopatch` is capped at `pr`.
-- **Without `scenarios`**: gate `legit` replays the gateway recording (`recordings/requests.jsonl`, clean requests to prod, GET only, most recent 200) against unpatched and patched code and compares status + body; with no coverage of the patched route the gate fails "no coverage" → `autopatch` capped at `pr`.
-- **`mode: observe`**: the gateway classifies and detonates exactly as in enforce, but every client response comes from prod; nothing is denied or diverted; rules are recorded but not enforced. Events carry `"observe": true`. `immune report` summarises what would have happened.
-- **`autopatch: pr`**: the pipeline stops after the gates and the PR; closes the incident as `rule_only` with `outcome_detail: "pr_open"`; the rule stays.
-- Policy gate: allowed edit area = `app.source_dirs`.
-- Stack frames: paths relative to the release root (`/app`), only frames under `app.release_paths`.
+| Key | Type | Default | Validation and meaning |
+|---|---|---|---|
+| `version` | integer | 1 | only `1` is accepted |
+| `name` | string | required | lower-case slug `[a-z0-9][a-z0-9-]{0,30}`. Containers, networks and units are named `immune-<name>-...` |
+| `runtime_dir` | path | `.immune/runtime` | may not overlap any `app.release_paths` entry |
+| `openapi` | path | required | the file must exist |
+| `scenarios` | Python module name | empty | module with `SCENARIOS` (`contracts/interfaces.md`). Empty: the `legit` gate replays recorded requests (section 3) |
+| `autopatch` | `off` \| `pr` \| `merge` | `merge` | `off`: rule only. `pr`: open the pull request and stop. `merge`: merge and deploy. Capped at `pr` without `tests.command` |
+| `mode` | `observe` \| `enforce` | `enforce` | initial gateway mode (`contracts/README.md` section 6.5) |
+| `pool_size` | integer | 4 | 0 to 32; number of clones |
+| `aftercheck` | boolean | `false` | section 3b |
+| `ports` | mapping | `{gateway: 8080, admin: 8081, dashboard: 8090, fleet: 8070}` | only these four keys; each 1 to 65535; all distinct. Every port is bound on `127.0.0.1` |
 
-## 3b. After-check (`aftercheck: true`, env `GW_AFTERCHECK=1`)
+### `app`
 
-A second net for what the classifier calls clean. Off by default; enforce mode only.
+| Key | Type | Default | Validation and meaning |
+|---|---|---|---|
+| `runtime` | `python-asgi` \| `generic` | `python-asgi` | `generic`: section 6 |
+| `release_paths` | list of relative paths | required | files and directories copied into a release. Each must exist in the project; `.immune` and `.git` are refused |
+| `source_dirs` | list of relative paths | required | where an automatic fix may edit; each must be inside a `release_paths` entry |
+| `asgi` | `module:attribute` | required for `python-asgi` | ASGI entry of the app |
+| `port` | integer | 8000 | port the app listens on in its container |
+| `health` | path | `/health` | must start with `/` |
+| `env` | mapping of name to scalar | empty | environment of the app. Values may use `{db}`, `{static}` and `{secret}`; any other placeholder is an error |
+| `static` | relative path | empty | release-relative directory that `{static}` expands to; required when `{static}` is used |
+| `frozen_time_env` | variable name | empty | variable that freezes the app's clock (unix seconds); set in runner jobs |
+| `image` | string | empty | generic runtime; accepted by the loader, but a project without `app.build` is refused by `immune/generic.py` (`facts`) |
+| `build` | `{context, dockerfile}` | empty | generic runtime: how the app image is built from a release. `context` is release-relative |
+| `command` | list or string | empty | generic runtime, required: the app's command |
+| `allowed_file_roots` | list of paths | empty | generic runtime: directories, as seen by the app, that it may open files in |
+| `workdir` | path | `/app` | generic runtime: where the image keeps the release |
+| `bind_env` | variable name | empty | generic runtime: variable carrying the bind address (`0.0.0.0` in production, `127.0.0.1` in clones) |
+| `warmup_paths` | list of paths | empty | generic runtime: extra harmless `GET`s for the observer's warm-up |
 
-- The request goes to prod and the client gets prod's answer with no added latency. **The first request is not stopped.**
-- After the response is sent, the gateway replays the same request in an L1 clone (one worker, so at most one clone is
-  busy with after-checks). The oracles that judge it are the clone's: nothing is added to the prod process.
-- If an oracle fires: the clone pushes evidence as for any detonation (`oracle.fired`, so the incident, rule and fix
-  follow as usual); the session is captive from its next request (`session.captured`, reason `aftercheck`), unless
-  the identity is trusted; `/_admin/prodlog` gains `"aftercheck": "oracle"`; and a line
-  `{"rid", "aftercheck": "oracle", "method", "path", "query", "uid", "session"}` is appended to the recording, which
-  removes that path + query + uid from the legitimate-traffic corpus of gate `legit`.
-- Budget: identical requests (method, target, body, uid) are checked once per release (LRU of 4096); at most 256
-  pending, beyond that new ones are dropped; a check that finds no free clone within 2 s is given up. Counters in
-  `/_admin/stats` → `aftercheck: {queued, checked, oracle, duplicate, dropped, no_clone}`.
-- Limits: side effects of the first request on prod are not undone; a request that depends on objects created after
-  the seed may not reproduce in the clone; under load, coverage is whatever the budget allows.
+Placeholders in `app.env`: `{db}` is the database path (or the database URL for the generic runtime),
+`{secret}` is `PROD_APP_SECRET` in production and `SHADOW_APP_SECRET` in clones, `{static}` is
+`/app/<app.static>`.
+
+### `database` and `data`
+
+| Key | Type | Default | Validation and meaning |
+|---|---|---|---|
+| `database.kind` | `sqlite` \| `postgres` \| `mysql` | `sqlite` | `postgres` and `mysql` only with `app.runtime: generic`, which accepts only those two (`immune/dbkind.py`). `mysql` runs MariaDB and requires `database.env` or `database.url_env` |
+| `database.path_env` | variable name | `APP_DB` | variable through which the app receives its SQLite path |
+| `database.url_env` | variable name | empty | generic runtime: variable through which the app receives its database URL. When neither it nor `database.env` is set, `DATABASE_URL` is used (`immune/generic.py`, `Facts.db_env_for`) |
+| `database.env` | mapping of name to template | empty | generic runtime: variables for apps that take the connection in parts. A template may use `{host}`, `{port}`, `{user}`, `{password}`, `{database}` and `{url}`; any other placeholder is an error |
+| `data.prod_db` | path | required for `sqlite` | the live database file; its directory is mounted read-write at `/data` in production |
+| `data.seed_command` | shell command | empty | builds production and shadow data. Placeholders: `{prod_db}`, `{shadow_db}`, `{manifest}`, `{markers}`, `{seed}`. Empty: the shadow data is derived from `data.prod_db` (section 4) |
+| `data.insert_canaries` | boolean | `false` | also insert the canary rows into the production database (section 4) |
+| `data.prod_url_env` | variable name | empty | generic runtime: variable of `immune up` holding the real production database URL, as reachable from the production network |
+| `data.demo_postgres`, `data.demo_mysql` | `{database, user, seed_command, seed_privileged}` | empty | generic runtime: without that variable, a database container of `database.kind` on the production network, seeded once by `seed_command` run in the app image. `seed_privileged: true` runs that command with a writable root filesystem and Docker's default capabilities instead of read-only with none. `data.prod_url_env` or the demo key of the configured kind is required |
+
+### `auth`
+
+How the gateway resolves the identity of a request (`immune/auth.py`).
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `kind` | `immune-token` \| `jwt-hs256` \| `introspect` \| `none` | `immune-token` | see below |
+| `secret_env` | variable name | required for `jwt-hs256` | variable holding the HS256 secret of production tokens |
+| `uid_claim`, `role_claim` | string | `sub`, empty | `jwt-hs256`: claims holding the user id and the role |
+| `admin_values` | list | `[admin]` | role values that mean admin |
+| `path` | path | `/api/me` | `introspect`: route of production that answers who the caller is |
+| `uid_field`, `role_field` | string | `id`, `role` | `introspect`: fields of that JSON answer (dotted paths allowed) |
+| `cache_s` | number | 30 | `introspect`: how long an answer is cached per credential |
+
+| Kind | Resolution |
+|---|---|
+| `immune-token` | `Authorization: Bearer <token>` in the format of `immune_contracts/authtoken.py`, verified with `PROD_APP_SECRET` |
+| `jwt-hs256` | `Authorization: Bearer <JWT>`, `alg` exactly `HS256`, `exp` and `nbf` honoured |
+| `introspect` | the gateway calls `path` on production with the client's `Authorization` and `Cookie` headers (opaque server-side sessions) |
+| `none` | every client is anonymous |
+
+A user id is always an integer; a non-integer subject is treated as anonymous.
+
+### `shadow`, `tests`, `repo`, `audit`
+
+| Key | Type | Default | Validation and meaning |
+|---|---|---|---|
+| `shadow.profile` | Python module name | required for `python-asgi` | shadow profile, importable from `/app` or from `<project>/.immune` (`contracts/README.md` section 4.4). For the generic runtime: a module in `.immune/` with the identity hooks the observer loads |
+| `shadow.columns` | path | `.immune/shadow/columns.yaml` | section 4 |
+| `shadow.tracer` | `{kind, dir, exclude}` | empty | generic runtime only. `kind`: `php-xdebug` (the only value). `dir`: where the traces are written in a clone, default `/tmp/immune-trace`, must be under `/tmp/`. `exclude`: path fragments not traced, default `[/vendor/]`. Clones then run the trace image and evidence carries stack frames (section 6) |
+| `tests.command` | shell command | empty | run in the runner with the release as working directory; exit status 0 passes |
+| `repo.target` | `local` \| `github` | `local` | where fixes become pull requests (`contracts/README.md` section 9) |
+| `repo.github` | `owner/name` | empty | required when `repo.target` is `github` |
+| `repo.t0_tag` | tag name | `immune-t0` | tag of the `t0` tree in the repository target |
+| `audit.enabled` | boolean | `true` for `python-asgi`, `false` for `generic` | class audit after a closed incident (section 8) |
+| `audit.max_jobs` | integer | 40 | 0 to 1000; judge jobs per audit |
+| `audit.max_seconds` | integer | 120 | 0 to 3600; time budget per audit |
+
+Loader: `immune.config.load(project_dir) -> Config` (validated dataclass, absolute paths). Every component
+takes its app-specific facts from that object. `immune mode` and `immune autopatch` rewrite one top-level key
+in place and keep the comments (`set_key`).
+
+Keys the loader does not validate. They are read from the raw file by the component named, so a misspelt key
+is ignored without an error:
+
+| Key | Read by | Meaning |
+|---|---|---|
+| `app.workdir`, `app.bind_env`, `app.warmup_paths` | `immune/generic.py`, `facts` | listed in the `app` table above |
+| `data.prod_url_env`, `data.demo_postgres`, `data.demo_mysql` | `immune/generic.py`, `facts` | listed in the `database` and `data` table above |
+| `auth.login` | `pipeline/verify.py`, `login_session` | with `auth.kind: introspect`: how the pipeline logs a seeded account in for the verification through the gateway. `{path, form, user_env, password_env, default_user, default_password}`; `form` values may use `{login}` and `{password}` |
+| `legit.normalize` | `pipeline/generic.py`, `legit_normalize` | generic runtime: list of regular expressions; every match in a response body is replaced by `<normalized>` before the `legit` gate compares the replayed requests |
+
+## 3. Behaviour that depends on the configuration
+
+| Configuration | Behaviour | Source |
+|---|---|---|
+| no `tests.command` | the `tests` gate is published as passed with detail `skipped: ...` and `skipped: true`; autopatch is capped at `pr` | `pipeline/gates.py`, `gate_tests`; `immune/config.py`, `effective_autopatch` |
+| no `scenarios` | the `legit` gate replays the gateway recording instead: clean `GET` requests forwarded to production with status 200, the most recent per path, query and uid, at most 200, from the last 8 MB of the recording. Status and body must be identical on the unpatched and the patched release. With no recorded request, or none covering the patched route, the gate reports "no coverage" and autopatch is capped at `pr`; the patch is not rejected | `pipeline/gates.py`, `gate_legit_replay` |
+| `scenarios` set, module cannot be imported | the `legit` gate fails | `pipeline/runner_entry.py`, `job_scenarios` |
+| `scenarios` set, patched route not covered | the gate rejects the patch, unless the module declares `PARTIAL_COVERAGE = True` (the modules `immune init` generates do): then autopatch is capped at `pr` | `pipeline/gates.py`, `gate_legit` |
+| `mode: observe` | the gateway classifies and detonates as in `enforce`; every response comes from production; events carry `observe: true`; `immune report` summarises what `enforce` would have done | `contracts/README.md` section 6.5 |
+| `autopatch: pr` | the pipeline stops after the gates and the pull request; the incident closes `rule_only` with `outcome_detail: pr_open`; the rule stays | `pipeline/orchestrator.py` |
+| `autopatch: off` | the pipeline stops after the rule; the incident closes `rule_only` with `outcome_detail: autopatch_off` | `pipeline/orchestrator.py` |
+
+The `policy` gate allows edits only under `app.source_dirs`. Stack frames in evidence are relative to the
+release root and limited to `app.release_paths`. The pipeline re-reads `config.yaml` at the start of each
+incident, so a change of `autopatch` applies to the next incident.
+
+## 3b. After-check (`aftercheck: true`)
+
+A second net for requests the classifier calls clean. Off by default; active in `enforce` mode only
+(`gateway/core.py`, `_after_enqueue`, `_aftercheck`). `immune up` passes the setting as `GW_AFTERCHECK`.
+
+- The request goes to production and the client gets production's answer. The first request is not stopped.
+- After the response is sent, the gateway replays the same request in a clone in mode `L1`. One worker does
+  this, so at most one clone is busy with after-checks.
+- If an oracle fires: the clone pushes evidence as for any detonation (`oracle.fired`); the session is
+  captive from its next request (`session.captured`, reason `aftercheck`) unless the identity is trusted;
+  `GET /_admin/prodlog` gains `"aftercheck": "oracle"`; and a line is appended to the recording that removes
+  that path, query and uid from the recorded-request corpus of the `legit` gate.
+- Budget: identical requests (method, target, body, uid) are checked once per release (the last 4096 are
+  remembered); at most 256 are pending, further ones are dropped; a check that finds no free clone within
+  2 s is given up. Requests answered 502 or 504 are not checked. Counters:
+  `aftercheck: {queued, checked, oracle, duplicate, dropped, no_clone}` in `GET /_admin/stats`.
+- Limits: the effects of the first request on production are not undone; a request that depends on objects
+  created after the seed may not reproduce in the clone; under load, coverage is what the budget allows.
 
 ## 4. Shadow data without a seed command
 
-`.immune/shadow/columns.yaml`:
+When `data.seed_command` is empty, `immune.shadowdata.build(config)` derives the shadow data from
+`data.prod_db`, which it opens read-only, guided by `columns.yaml`:
 
 ```yaml
 users_table: users            # table holding identities
 user_id_column: id
 role_column: role             # optional
+login_column: email           # optional: column used to log in (manifest legit_users)
+secret_column: password_hash  # optional: password hash column
 tables:
   users:   {owner: id,      private: [email, name, address, phone], secret: [password_hash]}
   orders:  {owner: user_id, private: [note, shipping_address]}
+  order_items: {owner: {via: order_id, table: orders}}   # owner through a foreign key
   products: {public: true}
-routes:                       # OpenAPI path parameter -> table/column, for ownership and canaries
+routes:                       # OpenAPI path parameter -> table and column
   order_id: {table: orders, column: id}
   user_id:  {table: users, column: id}
 ```
 
-`immune.shadowdata.build(config) ` reads `data.prod_db` (read-only), writes the shadow seed: same schema, same ids and foreign keys; `private` values replaced by plausible synthetic text embedding the owner's marker (`MK` + 10 chars); `secret` values replaced by random strings of the same shape; `public` copied. It also writes `manifest.json` (`seed_max_uid`, `ownership`, `canaries` — it inserts 2 canary users and 2 canary rows per owner-scoped table **into the shadow seed and, when `data.insert_canaries: true`, into prod**) and `markers.json`. No real private value may appear in the shadow database (checked by `immune doctor`).
+| Output | Content |
+|---|---|
+| `<runtime>/data/shadow/seed.db` | same schema, ids and foreign keys. `private` values replaced by synthetic text carrying the owner's marker; `secret` values replaced by random strings of the same shape; `public` tables copied; 2 canary users and 2 canary rows per owner-scoped table |
+| `<runtime>/data/manifest.json` | `seed_max_uid`, `seed_max_<table>_id`, `legit_users`, `admin`, `canaries`, `ownership`, and `groups` and `group_routes` when declared (`contracts/README.md` section 4.3) |
+| `<runtime>/data/markers.json` | marker to owner uid; also written as `<runtime>/data/shadow/markers.json` |
 
-## 5. CLI (`immune`, a console entry `bin/immune` → `python -m immune`)
+The output is deterministic for a given seed. With `data.insert_canaries: true` the canary rows are also
+inserted into the production database, the only case in which it is written. `immune doctor` check 6 samples
+200 values per private or secret column and fails if any appears in the shadow seed.
 
-```
-immune init [--project DIR] [--yes] [--no-llm]   analyse the project, write .immune/, verify, print deploy instructions
-immune doctor [--project DIR] [--json]            run the verification checks (also run by init)
-immune up [--project DIR]                         start the stack, or bring back whatever is missing of a stack that already ran (§11)
-immune reset [--project DIR]                      back to t0: fresh data, t0 in production, no incidents
-immune down | status [--project DIR]              stop everything / health summary (exit 1 when not healthy)
-immune deploy [--project DIR]                     apply generated deploy artifacts (.immune/deploy/) or print the manual steps
-immune report [--project DIR]                     summary from the bus/recordings: detonations, verdicts, incidents, would-have in observe
-immune autopatch off|pr|merge ; immune mode observe|enforce
-immune anticipate ...                             alias of `python -m anticipate`
-```
+For the generic runtime the equivalent is `immune/shadowdata_pg.py` (Postgres) or
+`immune/shadowdata_mysql.py` (MySQL). Each writes the dump `<runtime>/data/shadow/seed.sql` and, under
+`<runtime>/data/shadow/pginit/` or `<runtime>/data/shadow/myinit/`, a copy of it (`seed.dump`) and the init
+script that loads it into each clone database (`01-seed.sh`).
 
-`install.sh` at the repo root: checks Docker and Python ≥ 3.12, creates the venv from `deploy/requirements.txt`, builds/pulls the images, symlinks `bin/immune` into `~/.local/bin`. Idempotent.
+Limit: manifest keys assume English plural table names (`<x>_id` maps to table `<x>s`).
 
-`immune init` steps (each prints one status line; `--no-llm` skips LLM steps and leaves TODOs in the report):
-1. detect runtime, framework, entry (`asgi`), port, health route, tests command, how it is deployed (compose/Dockerfile/k8s/systemd/unknown);
-2. OpenAPI: FastAPI → import the app in a `--network none` container and dump `app.openapi()`; otherwise look for a spec file;
-3. database: find the SQLite file / env var; dump the schema;
-4. **LLM**: propose `shadow/columns.yaml` (classification + routes) from schema + OpenAPI;
-5. **LLM**: write `.immune/profile.py` (the shadow profile of `contracts/README.md` §4) and the `auth` block, from the auth code;
-6. **LLM**: mark `x-owner-scoped` / `x-sensitive` in `.immune/openapi.yaml`;
-7. build shadow data (§4);
-8. `doctor`; on failures feed the failing checks back to the LLM step that owns them, up to 3 rounds;
-9. write `.immune/deploy/` (compose file with gateway in front, or manifests) + `.immune/DEPLOY.md`, and `.immune/report.md`;
-10. final line: `READY: <exact command>` or `NEEDS ATTENTION:` + a short list.
-LLM steps use the confined CLI of `patcher/claude_cli.py` (Read only on a copy of the project, Edit only under `.immune/`).
+## 5. Command line
 
-`immune doctor` checks (each pass/fail with a one-line reason):
-1. config valid; release builds; app starts in a clone container with the wrapper and answers health;
-2. profile: `ensure_user` + `mint_token` produce an identity the app accepts on an authenticated route;
-3. one legitimate GET per parameter-free OpenAPI route → verdict `clean` (or `inconclusive` only for 401/404);
-4. **synthetic canaries**: the wrapper's self-test endpoint (enabled only with env `SHADOW_SELFTEST=1`, never in normal clones) performs, inside the clone, a string-built query containing a tainted input, an open outside the allowed roots, and a response containing another owner's marker; each oracle must fire;
-5. L1 reset returns the database to the seed state;
-6. no real private value from prod (sample of 200 values per private column) appears in the shadow seed;
-7. tests command passes in the runner (or "no tests: autopatch capped at pr").
+`bin/immune` runs `python -m immune` with the repository's virtual environment. `install.sh` creates that
+environment, builds the images and links `bin/immune` into `~/.local/bin`; installation is described in
+`docs/operacion.md`.
 
-## 6. Generic runtime (any language) — `app.runtime: generic`
+| Command | Options | Behaviour | Exit status |
+|---|---|---|---|
+| `immune up` | `--project DIR` | start the stack; if the project has a run on disk, resume it (section 11) | 0; 1 on failure; 2 on invalid config |
+| `immune reset` | `--project DIR` | back to `t0`: fresh data, `t0` in production, no incidents, new run id | same |
+| `immune down` | `--project DIR` | stop host processes and remove the stack's containers | 0 |
+| `immune status` | `--project DIR` | health summary | 0 when healthy; 1 when anything is unhealthy, including an unreachable fleet |
+| `immune report` | `--project DIR`, `--json` | summary from the bus store and the recording: classes, routes, detonations, verdicts, oracles, incidents, what `enforce` would have done in observe mode | 0 |
+| `immune mode observe\|enforce` | `--project DIR` | rewrite `mode` in `config.yaml` and switch the running gateway | 0 |
+| `immune autopatch off\|pr\|merge` | `--project DIR` | rewrite `autopatch` in `config.yaml`; read by the pipeline at the start of each incident | 0 |
+| `immune rollback` | `--project DIR`, `--to RELEASE`, `--keep-autopatch` | fleet `/deploy` of the previous release (or RELEASE); `autopatch merge` -> `pr` unless `--keep-autopatch`; re-posts the rules of the fixes the target release lacks | 0; 1 deploy not completed |
+| `immune init` | `--project DIR` (default: current directory), `--yes`, `--no-llm`, `--prod-db PATH`, `--seed N` | analyse a project and write its `.immune/` | 0 `READY`; 1 `NEEDS ATTENTION` |
+| `immune doctor` | `--project DIR`, `--json`, `--only 1,2` | run the verification checks | 0 when all pass; 1 otherwise |
+| `immune doctor --prereqs` | `--json`, `--openemr` | check host prerequisites only; `--openemr` also requires `immune-sidecar:1` and the images of `examples/openemr/` | 0 when every required one is present |
+| `immune deploy` | `--project DIR`, `--dry-run`, `--experimental` | experimental; see below | see below |
+| `immune anticipate` | `list`; `check TARGET`; `run TARGET [--model M] [--out DIR]`; `recheck RESULT_DIR` | same as `python -m anticipate` | |
+| `immune fuxa COMMAND` | `--runtime DIR`; commands in `immune/README.md` | the FUXA runtime (`immune/fuxa.py`, `fleet/fuxa.py`). It does not read `config.yaml` and does not use the gateway, fleet API or pipeline of this contract | 0; 1 on an error |
 
-The app runs unmodified from its own image/command; oracles are observed from outside by a sidecar in the clone container:
+### `immune up`, `reset`, `down`, `status`
+
+`immune up` on a `python-asgi` project without a run (`immune/__main__.py`, `cmd_up`): generate or read the secrets
+(section 7), stop anything left of the stack, check that the four ports are free on `127.0.0.1` (it fails
+with the port and its config key otherwise), seed (`seed`: data, shadow data, release `t0`, run id), start the
+compose services, start the fleet, `POST /reset` with `t0` and `pool_size`, set the gateway mode, start the
+pipeline. Environment variables: `POOL_SIZE` overrides `pool_size` for this start, `NO_PIPELINE=1` skips the
+pipeline, `T0_REF` builds `t0` from a git ref instead of the working tree, `IMMUNE_NO_SYSTEMD=1` disables
+systemd units. The generic runtime starts through `immune/generic.py` (`cmd_up`), which also builds the app
+image and the databases and does not check that the ports are free.
+
+`immune reset` never deletes a production database it cannot regenerate: when there is no
+`data.seed_command` and `data.prod_db` lies under `<runtime>/data`, that file and its SQLite journal files are
+kept and everything else under `data/` is rebuilt. When `data.seed_command` exists and `data.prod_db` lies
+outside `<runtime>` and already exists, the seed command writes its production output to a temporary file
+that is discarded.
+
+`immune status` prints the containers, the host processes, the gateway and dashboard health, the release in
+production, the size of the clone pool and the number of active rules. It reports `NOT HEALTHY` and exits 1
+when a host process is not running or is restarting, the gateway, the dashboard or the fleet is unreachable,
+no release is in production, or the clone pool is below its size.
+
+### `immune init`
+
+Supported scope: Python ASGI apps that expose `openapi()` (FastAPI) and keep their data in one SQLite file.
+For any other app `init` generates nothing; the profile is written by hand (`examples/tareas-node/.immune/`,
+`examples/openemr/overlay/.immune/`). When init detects a PHP project that uses MySQL (`immune/initsteps/detect.py`) it
+writes nothing (`immune/init.py`, `run_php_mysql`): without an existing `.immune/config.yaml` it ends
+`NEEDS ATTENTION`; with one it runs the doctor checks of the MySQL path (1 and 9, below) and ends `READY` when
+they pass.
+
+| Step | What it does | LLM |
+|---|---|---|
+| 1 | detect runtime, framework, ASGI entry, port, tests command and deploy style | no |
+| 2 | dump the OpenAPI document by importing the app; find the health route | no |
+| 3 | find the SQLite database and dump its schema | no |
+| 4 | classify columns: `shadow/columns.yaml` | yes |
+| 5 | write `profile.py` and the `auth` block | yes |
+| 6 | mark `x-owner-scoped` and `x-sensitive` in `openapi.yaml` | yes |
+| 7 | build the shadow data (section 4) and the generated scenarios | no |
+| 8 | run the doctor; failing checks are fed back to the step that owns them, up to 3 rounds | on failures |
+| 9 | write `deploy/`, `DEPLOY.md` and `report.md` | no |
+| 10 | print `READY: immune up --project <dir>` or `NEEDS ATTENTION:` with a list | no |
+
+`--no-llm` keeps the heuristic drafts of steps 4 to 6. Init switches to it by itself, with a message, when
+the `claude` CLI is not found. When the LLM fails on a step and the heuristic draft validates, init can still
+end `READY` and prints `NOTE: LLM unavailable for step(s) ...`. LLM steps use the confined CLI of
+`patcher/claude_cli.py`.
+
+Where init runs code of the project:
+
+- The OpenAPI dump (`immune/initsteps/openapi.py`, `dump`) imports the app and calls `openapi()` in a
+  `--network none` container when `docker` and the image `immune-base:1` are available. When they are not, or
+  when that container run returns no document, it does the same in a separate host process as the invoking
+  user. When that fails too, or the app is not FastAPI, it reads a spec file from the project (`openapi.yaml`,
+  `openapi.yml`, `openapi.json`, `swagger.yaml`, `swagger.json`).
+- The generated `profile.py` is checked against a static deny-list and then imported on the host as the
+  invoking user; the profile validation and doctor checks 2 to 5 run on the host in a separate process
+  (`immune/initsteps/hostrun.py`).
+- Doctor checks 1, 7 and 8 run in containers with `--network none`.
+
+The host process is process separation, not a sandbox.
+
+### `immune doctor`
+
+| Check | Passes when | Runs in |
+|---|---|---|
+| 1 config, release, clone health | the config is valid, the release is complete and the app answers its health path inside a clone container | container |
+| 2 profile identity | `ensure_user` and `mint_token` produce an identity the app accepts on an authenticated route | host process |
+| 3 legitimate GETs are clean | legitimate `GET`s on the parameter-free routes get a clean or expected verdict | host process |
+| 4 synthetic canaries | a string-built SQL statement, an open outside the allowed roots and a foreign marker each fire their oracle, through self-test routes that exist only with `SHADOW_SELFTEST=1` | host process |
+| 5 L1 reset | after an `L2` write, the next `L1` request restores the database to the seed state | host process |
+| 6 no real data in the shadow | no sampled real private value appears in the shadow seed; skipped when the data comes from `data.seed_command` and the project has no `columns.yaml` | the CLI process (reads the two databases, runs no project code) |
+| 7 tests in the runner | `tests.command` exits 0 in a `--network none` container of `immune-base:1` with the release mounted read-only (`immune/initsteps/docker.py`, not the pipeline's runner); without one the check warns "autopatch capped at pr" | container |
+| 8 legit scenarios deterministic | two runs of the `scenarios` module in the pipeline's runner give identical output and cover at least one route; without one the check warns | container |
+| 9 pinned container images | every image the stack needs is in the local Docker image store: the base images the project's Dockerfile pins by digest, the database image, `immune-base:1` and `immune-sidecar:1`. Nothing is pulled; a `FROM` line without a digest is not checked | the CLI process (`docker image inspect`) |
+
+Checks 1 to 8 are the checks of a `python-asgi` project. For `app.runtime: generic` with
+`database.kind: mysql` the doctor runs only check 1, reduced to "the generic configuration loads and the
+Dockerfile can be read", and check 9; the others are reported `skip` when asked for with `--only`
+(`immune/doctor.py`, `_mysql_checks`). Check 9 runs for no other kind of project.
+
+`--json` prints `{"ok", "checks": [{"id", "name", "ok", "status", "reason", "owner", "detail"}]}`, where
+`status` is `pass`, `fail`, `warn` or `skip`. `--prereqs --json` prints `{"ok", "prereqs": [...]}`.
+
+### `immune deploy`
+
+Experimental and not a working protection path (`immune/deploycmd.py`). It reads the compose override that
+`immune init` wrote under `.immune/deploy/` and:
+
+| Invocation | Behaviour |
+|---|---|
+| `immune deploy --dry-run` | prints the `docker compose` command and exits 0 |
+| `immune deploy` | prints the command and what does not work, starts nothing, exits 2 |
+| `immune deploy --experimental` | runs the command and returns its exit status |
+| any of the above when init wrote no compose override | prints `DEPLOY.md` (manual steps) and exits 0; exits 1 when there are no deploy artefacts at all |
+
+The gateway that command starts has no clone pool and no event bus: it proxies requests to the app. No request
+is detonated, no incident is opened, no rule is written and no patch is produced from the traffic it sees.
+The working path is `immune up`, which runs production itself from releases. Placing the gateway in front of
+a service that is already deployed is not built.
+
+## 6. Generic runtime (`app.runtime: generic`)
+
+For apps in any language. The app runs unmodified from its own image; the oracles observe it from outside the
+process (`sidecar/`). Full example: `examples/tareas-node/.immune/config.yaml`; the keys specific to this
+runtime, abridged from it:
 
 ```yaml
 app:
   runtime: generic
-  image: my-app:1.2          # or build: {context: ., dockerfile: Dockerfile}
-  command: ["node", "server.js"]
+  release_paths: [server.js, package.json, src, Dockerfile]
+  source_dirs: [src]
+  build: {context: ., dockerfile: Dockerfile}
+  command: [node, server.js]
   port: 3000
   health: /health
-  allowed_file_roots: [/app/public]
+  allowed_file_roots: [/app/files]
+  bind_env: HOST
 database: {kind: postgres, url_env: DATABASE_URL}
+data:
+  demo_postgres: {database: tareas, user: tareas, seed_command: [node, db/seed.js]}
 ```
 
-- The clone container's entrypoint is `/opt/immune/sidecar` (python) which starts the app as a **traced child** (`strace -f -e trace=openat,execve,connect`, no extra kernel features), fronts it with the wrapper's HTTP logic (same wire protocol, one request at a time, buffered response, verdict headers, evidence push), and for `postgres` runs a wire-protocol proxy between the app and a per-clone Postgres started from a template; SQL statements seen by the proxy feed the same taint check as today.
-- Oracles: `file` (openat outside allowed roots, after a warm-up allowlist), `proc` (execve), `net` (connect to anything but the proxy/loopback), `sql` (proxy), `owner` (markers in the body). No stack frames: evidence `stack` is `[]`, and the patch generator locates the sink from route, parameter and observed statement/path.
-- Reset: `DROP DATABASE` + `CREATE DATABASE … TEMPLATE seed`.
+Requirements checked by `immune/generic.py` (`facts`): `app.build` is present, `database.kind` is `postgres`
+or `mysql`, and `data.prod_url_env` or the demo key of that kind (`data.demo_postgres`, `data.demo_mysql`) is
+set. A second example, PHP with MySQL, is `examples/openemr/overlay/.immune/config.yaml`.
 
-## 7. Rules for work packages
+The observer speaks the clone protocol of `contracts/README.md` section 5: one request at a time, buffered
+response, verdict headers, signed evidence push.
 
-Same as `contracts/README.md` §10, plus: the existing acceptance and unit suites must keep passing; the built-in demo (`immune up` in this repo) must behave exactly as `deploy/demo.sh` does today, including the three live remediation flows.
+| Oracle | Observed through | Fires when |
+|---|---|---|
+| `file` | `strace` on the app's processes; the response body | default rule: a successful open outside `allowed_file_roots`, after a warm-up allowlist. With `protected_paths` in the observer's configuration: an open of a protected path, failed attempts included. Also when a planted file marker appears in the response |
+| `proc` | `strace` | a successful `execve`, or a fork whose child does not `execve`, during the request, except programs matching `exec_allow` |
+| `net` | `strace` | a connection outside loopback that was not seen during warm-up (loopback covers the database proxy), or anything to port 53, except destinations matching `net_allow` |
+| `sql` | a wire-protocol proxy between the app and the per-clone database (`sidecar/pgproxy.py`, `sidecar/mysqlproxy.py`), or the database's statement log (`sidecar/sqllog.py`) | the same taint check as the in-process oracle on the statement text; and, when a structure baseline was learnt, a statement whose structure is outside it (`reason: new_structure`) |
+| `owner` | the response body | another owner's marker, as in-process |
 
-## 8. Self-audit and corpus ("memory")
+`strace` follows `openat`, `openat2`, `open`, `creat`, `execve`, `execveat`, `connect`, `sendto`, `sendmsg`,
+`fork`, `vfork`, `clone` and `clone3` (`sidecar/tracer.py`, `SYSCALLS`). The Postgres proxy checks the text of
+`Q` (simple query) and `Parse` messages and answers `SSLRequest` and `GSSENCRequest` with `N`, so TLS between
+the app and its database is refused inside a clone; `Bind` parameters are not taint-checked. The exact rules of
+each source, the configuration keys of the observer (`sidecar/config.py`) and their limits are in
+`sidecar/README.md`.
 
-Config block `audit: {enabled: true, max_jobs: 40, max_seconds: 120}` (default on for `python-asgi`, off for `generic`).
-When an incident of class C closes, the pipeline runs the regression battery of class C (the inputs of the `properties` gate plus the corpus) against every other compatible operation × parameter of the OpenAPI document, on the current release, in the isolated judge only. Each oracle hit opens an incident with `origin: audit` and `parent`, which follows the normal flow. One audit per class per release. Events: `audit.started`, `audit.finding`, `audit.done`.
-Corpus: `<runtime>/corpus/<class>.jsonl`, confirmed parameter values only, deduplicated, 500 per class; kept across `reset`.
+Fail-closed rules of the observer (`sidecar/server.py`, `sidecar/identity.py`):
+
+| Condition | Behaviour |
+|---|---|
+| the tracer is not running when a request arrives | the request is not sent to the app; the observer answers 503 with verdict `inconclusive` |
+| the tracer dies while a request is in flight | the verdict is `inconclusive`, never `clean` |
+| markers are configured (a profile `load_markers` or a markers path) but cannot be loaded | the observer refuses to start |
+| no markers are configured | the observer starts with the owner oracle off and logs a warning |
+| the app does not answer (connection error or timeout) | 502, verdict `inconclusive` |
+
+Differences from the in-process runtime: without `shadow.tracer`, evidence has an empty `stack` and the
+incident has no sink file, so the patch generator locates the defect from route, parameter and the observed
+statement or path; with `shadow.tracer` (PHP with Xdebug) the stack holds the app's `file:line` frames of the
+request (`sidecar/phptrace.py`) and the generator starts from those files (`pipeline/generic_patch.py`,
+`locate`). `pre_state_b64` is `null`; an `L1` reset restores the clone database from the template `seed`;
+there are no fallback diffs; the class audit is off by default; and the `policy` gate is lexical for non-Python
+sources.
+Not observed: reads on already-open file descriptors, `rename`, `unlink`, `mmap`, `io_uring`, in-process
+databases. See `sidecar/README.md`.
+
+## 7. Secrets
+
+`immune/__main__.py`, `stack_secrets`. Every project, the built-in demo included, gets its own secrets.
+
+| Fact | Value |
+|---|---|
+| File | `<runtime>/secrets.env`, mode 0600 |
+| Keys | `PROD_APP_SECRET`, `SHADOW_APP_SECRET`, `ADMIN_TOKEN`, `BUS_TOKEN` |
+| Generated | on the first `immune up`, `immune reset` or `immune status`, each as 16 random bytes in hex |
+| Override | a variable of the same name in the environment of `immune` wins over the file |
+| Stack started before the file existed | the values its containers run with are taken from `<runtime>/stack/containers.env` |
+| `jwt-hs256` | the HS256 secret is read from the variable named by `auth.secret_env`, or from the same key in `secrets.env`; `immune up` fails without it |
+| Copies | `<runtime>/stack/containers.env` (env file of the compose services, 0600) and `<runtime>/stack/fleet.supervise.json`, `<runtime>/stack/pipeline.supervise.json` (0600) |
+| Generic runtime | the demo database password is in `<runtime>/stack/demo-db.env` (0600); each clone database gets random passwords, written to `<runtime>/stack/clones/<clone>.json` (0600) |
+
+`deploy/demo.env` holds placeholders; when they are still read is stated in `contracts/README.md` section 3.
+`immune init` writes `.immune/.gitignore` so that `runtime/` and `deploy/immune.env` stay out of git.
+
+## 8. Class audit and corpus
+
+`pipeline/audit.py`, `pipeline/corpus.py`. Config block `audit: {enabled, max_jobs, max_seconds}` (section 2).
+
+When an incident of class `sqli`, `traversal` or `idor` closes `patched` or `rule_only`, the pipeline probes
+the other operations and parameters of the OpenAPI document that the class could affect, on the release in
+production, inside the runner only (never production, never the live clones). The probes are the inputs of
+the `properties` gate plus the class corpus.
+
+| Fact | Value |
+|---|---|
+| Candidates for `sqli`, `traversal` | query, path and form parameters and JSON string leaves whose schema is a string; enum, integer, number and boolean schemas are skipped |
+| Candidates for `idor` | path parameters and integer or `*id` query parameters, probed as a new user above `seed_max_uid` |
+| Selection | by schema shape; no route names are involved |
+| Frequency | one audit per class per release |
+| Finding | an incident with `origin: audit` and `parent`, which follows the normal flow |
+| Events | `audit.started`, `audit.finding`, `audit.done` |
+| Budget | `max_jobs` judge jobs and `max_seconds` per audit |
+
+Corpus: `<runtime>/corpus/<class>.jsonl` holds the parameter values an oracle confirmed (the PoC value and
+each variant that fired on the unpatched release), deduplicated, at most 500 per class, values of at most 1000
+characters. Only the value of the affected parameter is stored. It is kept across `immune reset`.
 
 ## 9. Group-shared access
 
-`columns.yaml`: `tables.<t>.shared_via: {table, member, group}` and `routes.<param>.access: owner|members`. The manifest carries `groups` and `group_routes`; `shadow/sharing.json` sits next to the seed. The owner oracle does not fire for markers of members of the addressed group when the requester belongs to it. `immune init` also generates `.immune/scenarios.py` (legitimate GET journeys) and `doctor` check 8 verifies it is deterministic.
+For resources that several users may legitimately read (a team's notes).
 
-## 10. Generic runtime as built
+| Where | Declaration |
+|---|---|
+| `columns.yaml`, table | `tables.<t>.shared_via: {table, member, group}`: the membership table, its member column and its group column |
+| `columns.yaml`, route | `routes.<param>.access: members`: every member of the addressed group may read |
 
-Per clone: app container (project image, `--cap-drop ALL`), private Postgres, and the observer (`immune-sidecar:1`) sharing the app's network and PID namespaces with `SYS_PTRACE` as its only capability. Extra config keys: `app.build`, `app.workdir`, `app.bind_env`, `app.warmup_paths`, `data.prod_url_env`, `data.demo_postgres`. `pre_state_b64` is null for Postgres.
+Effects: the manifest carries `groups` and `group_routes`, which the gateway uses for
+`owner_scoped:mismatch` (`contracts/README.md` section 6.2); `<runtime>/data/shadow/sharing.json` tells the
+owner oracle not to fire for markers of members of the addressed group when the requester belongs to it
+(`shadow/core.py`, `co_members`, read from the clone's own database). Without a declaration nothing changes.
 
-## 11. Operation: restarts, failures, limits (as built and tested live)
+## 10. Generic runtime: containers
 
-**`up` never goes back to t0.** If the project has a run on disk (`<runtime>/run_id` and `stack/fleet-state.json` agree, and the recorded release exists), `immune up` resumes it: same release in production, same containment rules, open incidents continue. Only `immune reset` returns to t0. For `app.runtime: generic` a run is resumed only while its containers still exist (`immune down` removes that runtime's images and demo database).
+`fleet/generic.py`. Per clone `<n>`, three containers on the clone network:
 
-**Host processes are supervised and outlive the session that started them.** `fleet` and `pipeline` run under `python -m immune.supervise <spec.json>`, which restarts them (1 s, doubling to 30 s). With a systemd user manager the supervisor is a transient unit `immune-<project>-<fleet|pipeline>.service`; without one it is a detached process (`IMMUNE_NO_SYSTEMD=1` forces that). A process started from a terminal, SSH or agent session without this dies when that session's cgroup is closed. Files: `<runtime>/stack/<name>.supervise.json` (0600, holds the stack secrets), `<runtime>/logs/<name>.pid` (supervisor), `<name>.pid.child` (process), `<name>.log` (appended within a run, emptied by `reset`).
+| Container | Image | Settings |
+|---|---|---|
+| `immune-<name>-clone-<n>-db` | `postgres:16-alpine`, or the digest-pinned `mariadb:11.8.8` for `database.kind: mysql` (`immune/dbkind.py`) | data on tmpfs, durability off, `--cap-drop ALL`, read-only root; its init script creates the role `app` and the template database `seed` from the shadow dump (for MySQL also the database `clone`); random passwords per clone |
+| `immune-<name>-clone-<n>` | `immune-<name>-app:<release>`, or `immune-<name>-app:<release>-trace` with `shadow.tracer` | the app, `--cap-drop ALL`, read-only root, bound to `127.0.0.1` through `app.bind_env`, database address pointing at the proxy (`127.0.0.1:5432` or `127.0.0.1:3306`). The trace image adds Xdebug to the release image and never runs in production |
+| `immune-<name>-clone-<n>-obs` | `immune-sidecar:1` | shares the app's network and PID namespaces; `--cap-drop ALL --cap-add SYS_PTRACE`, the only added capability in the system; serves the clone protocol on port 8000 and runs the proxy |
 
-**State that survives a restart** (all under `<runtime>/`, valid only for the run that wrote it):
+The gateway addresses the clone as `immune-<name>-clone-<n>:8000`. A clone whose observer or database is not
+running is replaced as a whole. Production is the same image on the production network. Each release is a
+new image tag, built by `immune up` for `t0` and by the fleet on `/deploy`. `immune down` removes the app
+images, the demo database and the stack's networks.
+
+The pipeline judges patches for this runtime on throw-away triples of the same shape
+(`pipeline/generic.py`), each on its own internal network.
+
+## 11. Operation: restarts, failures, limits
+
+### Resume
+
+`immune up` does not go back to `t0` when the project has a run on disk. A run can be resumed when
+`<runtime>/run_id` and `<runtime>/stack/fleet-state.json` agree and the recorded release directory exists
+(`immune/__main__.py`, `existing_run`). The resumed stack keeps the release in production, the rules and the
+open incidents. Only `immune reset` returns to `t0`. For the generic runtime a run is resumed only while its
+production container still exists, because `immune down` removes that runtime's images and demo database.
+
+Nothing starts the stack at boot. After a host reboot, `immune up` resumes it.
+
+### Supervised host processes
+
+`fleet` and `pipeline` run under `python -m immune.supervise <spec.json>` (`immune/supervise.py`), which
+restarts its child when it exits: after 1 s, doubling up to 30 s, back to 1 s once the child has stayed up for a minute. On
+`SIGTERM` it stops the child (`SIGKILL` after 10 s) and exits.
+
+| Host | How the supervisor runs |
+|---|---|
+| with a systemd user manager | transient unit `immune-<name>-fleet.service` or `immune-<name>-pipeline.service` (`systemd-run --user`, `Restart=on-failure`) |
+| without one, or with `IMMUNE_NO_SYSTEMD=1` | a detached process in its own session |
+
+Either way the processes outlive the terminal or SSH session that ran `immune up`. Files:
+with `<process>` being `fleet` or `pipeline`: `<runtime>/stack/<process>.supervise.json` (0600),
+`<runtime>/logs/<process>.pid` (supervisor), `<runtime>/logs/<process>.pid.child` (process),
+`<runtime>/logs/<process>.log` (appended within a run; deleted by `immune reset` for `python-asgi`).
+
+### State that survives a restart
+
+All under `<runtime>`, valid only for the run that wrote it:
 
 | Process | File | Holds | On start |
 |---|---|---|---|
-| gateway | `stack/gateway-state.json` | upstream, mode, rules with absolute expiry | restored before the first request |
-| fleet | `stack/fleet-state.json` | live colour, release, pool size, clone counter | `adopt()`: keeps running prod and clones (clone keys are read back from the containers), restarts prod if absent; if both colours run, the gateway's upstream decides |
-| pipeline | `pipeline/state.json` | incidents, queue, last bus seq | an incident left open is redone from the start |
+| gateway | `stack/gateway-state.json` | upstream, mode, rules with absolute expiry (none for a rule without TTL) | restored before the first request; expired rules are dropped. A running canary and the per-rule counters are not restored |
+| fleet | `stack/fleet-state.json` | live colour, release, pool size, clone counter | `Fleet.adopt`: keeps the running production container and clones (clone keys are read back from the containers), starts production again if it is absent; if both colours run, the gateway's upstream decides |
+| pipeline | `pipeline/state.json` | incidents, queue, last bus sequence number | an incident left open is redone from the start |
+| dashboard | `bus/events.jsonl`, `bus/events.jsonl.1` | every event | both files are loaded into memory, up to `DASH_MAX_EVENTS` |
 
-**Watchdogs in the fleet reconcile loop** (every `reconcile_s`): the live prod container is recreated if removed and has Docker restart policy `unless-stopped`; `gateway` and `dashboard` containers are started if found stopped; dead clones are replaced.
+### Fleet reconcile loop
 
-**Pipeline under failure.**
-- `POST /deploy` that loses its connection is not a failed deploy: the client waits for the fleet (90 s), reads `/state`, and either confirms the release is live or asks again (3 attempts).
-- An incident closed `rule_only` for a reason that may not hold later gets `outcome_detail: transient` (generator unreachable or silent on every attempt, repository or merge unavailable, deploy unreachable, internal error) and is queued again after `retry_cooldown_s` × 4^n, capped at 1 h, `max_retries` times (env `PIPELINE_RETRY_COOLDOWN_S` 60, `PIPELINE_MAX_RETRIES` 5). A patch rejected by the gates is not transient.
-- The rule of an incident closed without a deployed fix is renewed before its TTL ends and re-posted if the gateway lost it. `seconds_to_rule` is the first time the rule was active, across retries.
+Every `RECONCILE_S` (1 s), `Fleet.reconcile_once`: the live production container is recreated if it was
+removed (Docker restarts a crashed one: restart policy `unless-stopped`); the `gateway` and `dashboard`
+containers are started if found stopped; clones that are not running, and clones the gateway reports as
+`retired`, are destroyed and replaced; the pool is registered again when it changed; the gateway upstream is
+corrected if it does not point at the live colour.
 
-**Deploy watch.** A new release is rolled back when, since the switch, production answered 5xx at a rate above `max(2 × rate of the release it replaced, that rate + 2 %)`. With an old release that never failed, one 5xx is enough. Requests the gateway refuses itself (below) are not production errors.
+### Pipeline under failure
 
-**Gateway input limits.** Answered by the gateway, never forwarded, never counted as production errors: target not starting with `/` → 400; `Content-Length` over 10 MB or a body growing past it → 413; body not completed within 30 s → 408; bytes that cannot be put on the wire as sent → 400. To production: a refused connection is retried once for any method; a pooled connection the upstream had closed is retried once for GET/HEAD/OPTIONS only.
+- A `POST /deploy` that loses its connection is not a failed deploy: the client waits up to 90 s for the
+  fleet, reads `GET /state`, and either confirms the release is live or asks again, 3 attempts in total
+  (`pipeline/clients.py`, `Fleet.deploy`).
+- An incident closed for a reason that may not hold later gets `outcome_detail: transient`: the patch
+  generator was unavailable or proposed nothing on every attempt, the repository target or the merge was
+  unavailable, the fleet was unreachable for the deploy, or the pipeline raised an internal error. It is
+  queued again after `PIPELINE_RETRY_COOLDOWN_S` (60 seconds) multiplied by 4 per retry, capped at 1 h, at most
+  `PIPELINE_MAX_RETRIES` (5) times. A patch rejected by the gates is not transient.
+- An internal error after the rule was posted closes `rule_only`; before any rule it closes `error`, because
+  nothing contains the incident.
+- The rule of an incident closed `rule_only` is posted again if the gateway lost it (`Pipeline.keep_rules`).
+  By default it has no TTL; when `PIPELINE_RULE_TTL_S` is set, it is also renewed when a quarter of its TTL
+  remains. `seconds_to_rule` is the first time the rule was active, across retries.
+- Events the bus could not take are kept and sent again (`contracts/README.md` section 10.4).
 
-**Bounded disk.** Recording: `requests.jsonl` rotates to `.1` at `RECORD_MAX_MB` (256); the legit gate reads the tail of both. Releases: after a deploy only t0, the live one, any still mounted by a container and the 5 newest are kept. Not bounded yet: the bus log `bus/events.jsonl`.
+### Deploy canary and watch
 
-**`immune up` fails early** with the port and its config key when a port of the stack is held by something else.
+Before the switch, the fleet sends `CANARY_WEIGHT` (0.2) of the production traffic to the new release for up
+to `CANARY_S` (8 s) and stops the deploy if that side is clearly worse than the release in production in 5xx
+or 4xx answers. After the switch, a new release is rolled back when production served at least
+`DEPLOY_MIN_REQUESTS` (20) requests, at least one was answered 5xx, and the 5xx rate is above
+`max(2 x rate of the release it replaced, that rate + 0.02)`. With too few requests for either comparison the
+deploy stands and is reported `traffic_validated: false`. Requests the gateway refuses itself (below) are not
+production errors. The full rules and the result fields are in `contracts/README.md` section 8.
 
-Measured on the built-in app, one run each, under 20 requests/s of legitimate traffic (2026-11-21):
+### Gateway input limits
+
+Answered by the gateway, never forwarded, never counted as production errors: a target that does not start
+with `/` is 400; a `Content-Length` above 10 MiB or a body growing past it is 413; a body not completed within
+30 s is 408; a request that cannot be put on the wire as sent is 400. To production, a refused connection is
+retried once for any method; a pooled connection the upstream had closed is retried once for `GET`, `HEAD`
+and `OPTIONS` only.
+
+### Bounded disk and memory
+
+| What | Bound |
+|---|---|
+| recording `recordings/requests.jsonl` | rotates to `requests.jsonl.1` at `RECORD_MAX_MB` (256); the `legit` gate reads the tail of both |
+| bus store `bus/events.jsonl` | rotates to `events.jsonl.1` at `DASH_STORE_MAX_MB` (256); one old generation kept |
+| bus memory | `DASH_MAX_EVENTS` (50000) |
+| releases | after a deploy only `t0`, the live one, any still mounted by a container and the 5 newest are kept |
+| corpus | 500 values per class |
+| not bounded | `pipeline/events.jsonl` (the pipeline's own copy of its events) and the logs under `logs/` within a run |
+
+### Measured behaviour under injected failures
+
+Measured on 2026-11-21 on the built-in demo, one run per row, under 20 requests per second of legitimate
+traffic. No raw data is stored in the repository and the table has not been re-measured since that date. The
+measurements predate the deploy canary: with the canary on (the default), a release answering 500 is expected
+to be stopped before the switch instead of rolled back after it, and the times of the rows that include a
+deploy are expected to differ. The row "release answering 500" depends on the rollback rule above: at 20
+requests per second the minimum of 20 requests is reached in about 1 s.
 
 | Failure injected | Back to healthy | Requests failed |
 |---|---|---|
-| `kill -9` fleet / pipeline / fleet supervisor | 2.0 s / 1.3 s / 3.3 s | 0 |
-| gateway process crash; gateway container killed by hand | 2.0 s; 1.5 s | ~1.3 s of refused connections |
-| prod process crash; prod container removed | 1.3 s; 1.3 s | ~1.2 s of 502 |
-| clone crash or removal; dashboard/bus crash | 1.5–1.8 s | 0 |
+| `kill -9` of fleet / pipeline / fleet supervisor | 2.0 s / 1.3 s / 3.3 s | 0 |
+| gateway process crash; gateway container killed by hand | 2.0 s; 1.5 s | about 1.3 s of refused connections |
+| production process crash; production container removed | 1.3 s; 1.3 s | about 1.2 s of 502 |
+| clone crash or removal; dashboard crash | 1.5 to 1.8 s | 0 |
 | pipeline killed when an incident opens | incident patched (55 s) | 0 |
 | fleet killed during the deploy | incident patched (57 s) | 0 |
 | gateway crashed with a rule active | rule back on restart; incident patched (49 s) | 0.6 s |
 | release that does not start; release answering 500 | never takes traffic; rolled back | 0; 1.1 s of 500 |
-| generator down, no fallback | 3 defects contained by rules, retried, patched when it returned | 0 |
-| `immune down` then `immune up` | 4 s, patched release in production | — |
+| patch generator down, no fallback | 3 defects contained by rules, retried, patched when it returned | 0 |
+| `immune down` then `immune up` | 4 s, patched release in production | not applicable |
 
-Not covered: loss of the host or of Docker itself (after a reboot `immune up` resumes; nothing runs it at boot), the demo Postgres of the generic example (in memory, unsupervised: stands in for the customer's database), a client that holds thousands of slow connections (put a reverse proxy in front), and an attacker who raises the 5xx rate only during the 20 s watch window.
+### Not covered
 
+- Loss of the host or of Docker itself. Nothing starts the stack at boot.
+- The demo database of the generic examples: it keeps its data in memory and is not supervised. It stands in
+  for the customer's database.
+- A client that holds thousands of slow connections. A reverse proxy in front of the gateway is needed.
+- A release that fails only after the watch window, or that answers wrong content with a 2xx or 3xx status.
+- A deploy during which fewer than `CANARY_MIN_REQUESTS` requests reach the canary and fewer than
+  `DEPLOY_MIN_REQUESTS` arrive in the watch: it is not judged by traffic.
+- Events published by the fleet while the bus is down are lost.

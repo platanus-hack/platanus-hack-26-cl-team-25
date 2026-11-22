@@ -1,4 +1,4 @@
-"""Technique corpus (docs/plan-construccion.md §9d "Corpus de técnicas"): `<runtime>/corpus/<class>.jsonl`.
+"""Technique corpus (pipeline/README.md): `<runtime>/corpus/<class>.jsonl`.
 
 Every value the instrumentation confirmed — the incident's regression case and each variant that fired its
 oracle on the unpatched release — is appended for its class. Only the value of the affected parameter is

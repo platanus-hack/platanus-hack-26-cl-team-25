@@ -5,6 +5,7 @@ runtime/
 __pycache__/
 .pytest_cache/
 *.pyc
+node_modules/
 
 # OpenEMR 8.2.0 checkout prepared by examples/openemr/fetch.py
 examples/openemr/app/

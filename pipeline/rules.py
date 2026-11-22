@@ -41,7 +41,8 @@ def default_rule(inc: dict, spec: dict, ttl_s: int | None = None) -> dict:
 
 
 def finalize(rule: dict, inc: dict, spec: dict, ttl_s: int | None) -> tuple:
-    """-> (rule, note). Forces id/incident, validates against rule.schema.json, falls back if invalid."""
+    """-> (rule, note). Forces `incident`, defaults `id`, gives `ttl_s` to a rule that has none, requires the incident's method and route,
+    validates against rule.schema.json, falls back to default_rule if invalid."""
     note = ""
     try:
         if not isinstance(rule, dict):
@@ -49,7 +50,8 @@ def finalize(rule: dict, inc: dict, spec: dict, ttl_s: int | None) -> tuple:
         rule = dict(rule)
         rule.setdefault("id", "rule-%s" % inc["incident"])
         rule["incident"] = inc["incident"]
-        rule.setdefault("ttl_s", int(ttl_s) if ttl_s else None)
+        if rule.get("ttl_s") is None:      # the operator's PIPELINE_RULE_TTL_S applies to every rule without its own
+            rule["ttl_s"] = int(ttl_s) if ttl_s else None
         if rule.get("route") != inc["route"] or str(rule.get("method", "")).upper() != inc["method"]:
             raise ValueError("rule targets %s %s, incident is %s %s" % (rule.get("method"), rule.get("route"),
                                                                         inc["method"], inc["route"]))

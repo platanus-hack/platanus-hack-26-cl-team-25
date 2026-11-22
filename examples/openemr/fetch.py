@@ -1,4 +1,4 @@
-"""Prepare the OpenEMR 8.2.0 project for Inmune: examples/openemr/app
+"""Prepare the OpenEMR 8.2.0 project for Immune: examples/openemr/app
 
     python examples/openemr/fetch.py [--dest DIR] [--repo LOCAL_CLONE]
 
@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 
@@ -95,8 +94,8 @@ def main(argv=None):
     if git(dest, "status", "--porcelain", "--", ".immune", "immune-runtime", "Dockerfile.immune"):
         if head != COMMIT:
             git(dest, "reset", "-q", "--soft", COMMIT)
-        git(dest, "-c", "user.name=Inmune", "-c", "user.email=inmune@localhost.invalid", "commit", "-q", "-m",
-            "Inmune onboarding for OpenEMR 8.2.0 (no OpenEMR file changed)")
+        git(dest, "-c", "user.name=Immune", "-c", "user.email=inmune@localhost.invalid", "commit", "-q", "-m",
+            "Immune onboarding for OpenEMR 8.2.0 (no OpenEMR file changed)")
     git(dest, "tag", "-f", T0)
     verify(dest)
     print("OpenEMR %s (%s) ready at %s, tag %s" % (TAG, COMMIT[:12], dest, T0))

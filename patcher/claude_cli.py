@@ -10,6 +10,14 @@ Confinement is passed on every invocation (nothing is written to ~/.claude):
   --permission-prompts none  nobody can approve anything at runtime
   --settings <json>          allow: Read(<work>/**), Edit(<each editable file>) only (none if the
                              list is empty); deny: Edit of tests dirs, Write; disableAllHooks
+
+Environment (`child_env`): the CLI does not inherit the caller's environment. It gets an allowlist (PATH, HOME,
+locale, temp dir, proxy settings and the ANTHROPIC_* / CLAUDE_* provider settings), so the stack secrets the
+pipeline holds (ADMIN_TOKEN, BUS_TOKEN, app secrets, GH_TOKEN, ...) never reach the model's process.
+
+Identity: PATCHER_CLAUDE_CONFIG_DIR points the CLI at its own config/login directory (CLAUDE_CONFIG_DIR), and
+PATCHER_ANTHROPIC_API_KEY gives it its own API key, so the patcher need not run on the operator's Claude session.
+`identity()` says which one is in use (no caller prints it yet).
 """
 from __future__ import annotations
 
@@ -112,8 +120,46 @@ class CliResult:
     turns: int | None = None
 
 
+ENV_ALLOW = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM",
+             "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+             "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+             "XDG_DATA_HOME", "XDG_RUNTIME_DIR"}
+ENV_ALLOW_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_", "CLOUD_ML_", "VERTEX_")
+# provider settings that are still stack-owned secrets, never forwarded
+ENV_DENY = {"CLAUDE_BIN"}
+
+
+def child_env(base: dict | None = None) -> dict:
+    """Environment of the CLI process: an allowlist of `base` (default os.environ), plus the patcher identity."""
+    base = dict(os.environ if base is None else base)
+    env = {k: v for k, v in base.items()
+           if k not in ENV_DENY and (k in ENV_ALLOW or k.startswith(ENV_ALLOW_PREFIXES))
+           and not k.startswith("PATCHER_")}
+    cfg_dir = base.get("PATCHER_CLAUDE_CONFIG_DIR")
+    if cfg_dir:
+        env["CLAUDE_CONFIG_DIR"] = cfg_dir
+    key = base.get("PATCHER_ANTHROPIC_API_KEY")
+    if key:
+        env["ANTHROPIC_API_KEY"] = key
+        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    return env
+
+
+def identity(base: dict | None = None) -> str:
+    """Which credentials the patcher's CLI runs with (for `immune doctor`); never prints a secret."""
+    base = dict(os.environ if base is None else base)
+    if base.get("PATCHER_ANTHROPIC_API_KEY"):
+        return "own API key (PATCHER_ANTHROPIC_API_KEY)"
+    if base.get("PATCHER_CLAUDE_CONFIG_DIR"):
+        return "own Claude login (PATCHER_CLAUDE_CONFIG_DIR=%s)" % base["PATCHER_CLAUDE_CONFIG_DIR"]
+    if base.get("ANTHROPIC_API_KEY") or base.get("ANTHROPIC_AUTH_TOKEN"):
+        return "operator's API credentials from the environment (set PATCHER_ANTHROPIC_API_KEY to separate them)"
+    return ("operator's Claude Code login on this machine (set PATCHER_CLAUDE_CONFIG_DIR or "
+            "PATCHER_ANTHROPIC_API_KEY to give the patcher its own)")
+
+
 def _redact(s: str) -> str:
-    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "PATCHER_ANTHROPIC_API_KEY"):
         v = os.environ.get(var)
         if v:
             s = s.replace(v, f"<{var}>")
@@ -125,7 +171,7 @@ def run(prompt: str, workdir: str, editable: list[str], timeout: float | None = 
     """Run the CLI with cwd=workdir, prompt on stdin. Never raises for CLI problems."""
     timeout = timeout_s() if timeout is None else timeout
     cmd = command(workdir, editable, model_name)
-    env = dict(os.environ)  # ANTHROPIC_BASE_URL etc. pass through unchanged
+    env = child_env()  # allowlist: ANTHROPIC_BASE_URL etc. pass, stack secrets do not
     t0 = time.monotonic()
     try:
         proc = subprocess.Popen(cmd, cwd=workdir, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

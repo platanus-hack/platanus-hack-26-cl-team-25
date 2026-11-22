@@ -1,15 +1,12 @@
 """Incident lifecycle with a scripted validator (no app code), the stub patcher, local repo and HTTP fakes."""
 import copy
 import os
-import shutil
 
 import pytest
 
 from pipeline import diffs, stub_patcher
 from pipeline.bus import Publisher
 from pipeline.clients import Fleet, GatewayAdmin
-from pipeline.config import Config
-from pipeline.fakes import FakeBus, FakeFleet, FakeGateway
 from pipeline.gates import GATES
 from pipeline.orchestrator import Pipeline
 from pipeline.repo import LocalRepo
@@ -52,26 +49,6 @@ class ScriptedValidator:
             if g == "policy" and after_policy:
                 after_policy(work)
         return True, results, work
-
-
-@pytest.fixture()
-def env(tmp_path, monkeypatch):
-    rt = tmp_path / "runtime"
-    shutil.copytree(os.path.join(ROOT, "victim"), rt / "releases" / "t0" / "victim",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    b = FakeBus("bt")
-    gw = FakeGateway(b, "at")
-    fl = FakeFleet(b, str(rt), "at")
-    monkeypatch.delenv("STUB_PATCHER_PLAN", raising=False)
-    stub_patcher.calls.clear()
-    e = {"RUNTIME_DIR": str(rt), "RUN_ID": "t", "BUS_TOKEN": "bt", "ADMIN_TOKEN": "at", "PIPELINE_BUS_URL": b.url,
-         "GATEWAY_ADMIN_URL": gw.admin_url, "GATEWAY_URL": gw.data_url, "FLEET_URL": fl.url, "REPO_DIR": ROOT,
-         "PIPELINE_VERIFY_WAIT_S": "2", "MANIFEST_PATH_HOST": str(tmp_path / "none.json")}
-    cfg = Config.from_env(e)
-    yield {"cfg": cfg, "bus": b, "gw": gw, "fleet": fl, "rt": str(rt)}
-    b.stop()
-    gw.stop()
-    fl.stop()
 
 
 def make(env, validator=None, patcher=stub_patcher, audit=False):

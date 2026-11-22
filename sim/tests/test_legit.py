@@ -4,7 +4,6 @@ import socket
 import threading
 import time
 
-import pytest
 import uvicorn
 
 from .conftest import fresh_db, load_app

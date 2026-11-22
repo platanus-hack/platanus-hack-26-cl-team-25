@@ -3,7 +3,7 @@ import json, os
 import pytest
 
 from gateway.classifier import (CLEAN, EVIDENCE, SUSPECT, EnumTracker, Manifest, Rule, View, Who, classify,
-                                redact_json, redact_query)
+                                redact_json, redact_multipart, redact_path, redact_query)
 from gateway.spec import Spec
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -250,3 +250,99 @@ def test_group_route_ownership_uses_membership():
     # no declared relation: the one-owner lookup is unchanged
     assert _is_owner(MAN, "order_id", "12", 7) and not _is_owner(MAN, "order_id", "12", 3)
     assert Manifest.from_dict({"group_routes": {"team_id": "missing"}}).group_routes == {}
+
+
+# ---- encoded slashes: the gateway matches on the path the upstream routes on (uvicorn decodes, then starlette splits)
+@pytest.mark.parametrize("path", ["/api%2Fproducts", "/api%2fproducts", "%2Fapi%2Fproducts", "/api/products%2F"])
+def test_encoded_slash_cannot_hide_a_route_from_the_classifier(path):
+    from gateway.spec import match_template, split_template
+    assert match_template(split_template("/api/products"), path) == {}
+    r = c("GET", path, "q=x%27%20OR%20%271%27%3D%271")
+    assert r.cls == SUSPECT and "grammar:query.q" in r.reasons
+    assert c("GET", "/api%2Fproducts%2F1%27").reasons.count("schema:path.product_id:type") == 1
+
+
+def test_encoded_slash_cannot_hide_a_route_from_a_rule():
+    rule = Rule({"id": "r", "method": "GET", "route": "/api/products", "param": {"in": "query", "name": "q"},
+                 "grammar": r"[a-z]{1,10}", "scope": "param", "ttl_s": 60})
+    allr = Rule({"id": "a", "method": "GET", "route": "/api/orders/{order_id}", "scope": "all", "ttl_s": 60})
+    for path in ("/api%2Fproducts", "/api%2fproducts"):
+        assert c("GET", path, "q=a'b", rules=[rule]).rule_hit == ["r"]
+        assert c("GET", path, "q=usb", rules=[rule]).rule_hit == []
+    assert c("GET", "/api%2Forders%2F3", rules=[allr]).rule_hit == ["a"]
+    assert allr.applies("GET", "/api%2Forders%2F3") == {"order_id": "3"}
+    # a rule on an off-spec route is hit as well
+    off = Rule({"id": "o", "method": "GET", "route": "/internal/debug", "scope": "all", "ttl_s": 60})
+    assert c("GET", "/internal%2Fdebug", rules=[off], spec=OFF_SPEC).rule_hit == ["o"]
+
+
+def test_encoded_slash_readings_follow_the_upstream():
+    from gateway.spec import match_template, path_readings, split_template
+    prod, order = split_template("/api/products"), split_template("/api/orders/{order_id}")
+    # one decode only, as uvicorn does: '%252F' is the text '%2F', and '%5C' is a backslash, not a separator
+    assert match_template(prod, "/api%252Fproducts") is None and match_template(prod, "/api%5Cproducts") is None
+    assert c("GET", "/api%252Fproducts", "q=a'b").cls == CLEAN            # off-spec for the app too (404 there)
+    assert path_readings("/api/orders/3") == [["api", "orders", "3"]]     # no encoded slash: a single reading
+    # starlette splits '1%2F2' in two segments (404); a server that routes on the raw path serves order '1/2':
+    # the rule applies under either reading and the classifier checks the parameter of the one that matches
+    assert match_template(order, "/api/orders/1%2F2") == {"order_id": "1/2"}
+    r = c("GET", "/api/orders/1%2F2")
+    assert r.cls == SUSPECT and {"path:encoded_slash", "schema:path.order_id:type"} <= set(r.reasons)
+    assert "path:encoded_slash" in c("GET", "/api%2Fproducts", "q=usb").reasons
+    # inside a catch-all parameter an encoded slash changes nothing for anyone: same route, same value, clean
+    spec = Spec({"paths": {"/files/{path*}": {"get": {"parameters": [
+        {"name": "path", "in": "path", "schema": {"type": "string"}}]}}}})
+    assert spec.match("GET", "/files/img%2Fa.svg")[1] == spec.match("GET", "/files/img/a.svg")[1] == {"path": "img/a.svg"}
+    assert c("GET", "/files/img%2Fa.svg", who=ANON, spec=spec).cls == CLEAN
+    assert c("GET", "/a%2Fb", who=ANON, spec=OFF_SPEC).cls == CLEAN        # unknown under every reading
+
+
+# ---- owner-scoped routes and seeded identities: the manifest knows who owns what
+def test_seeded_user_on_someone_elses_object_is_suspect():
+    r = c("GET", "/api/orders/12", who=Who(uid=3, role="user", trusted=True))
+    assert "owner_scoped:mismatch:order_id" in r.reasons                    # order 12 belongs to uid 7 (a canary too)
+    man = Manifest.from_dict({"seed_max_uid": 60, "ownership": {"orders": {"5": 3, "6": 4}}})
+
+    def cls(path, who):
+        return classify(View("GET", path, "", {}, b""), VICTIM, who, man, [], "s")
+    other = cls("/api/orders/6", TRUSTED)
+    assert other.cls == SUSPECT and other.reasons == ["owner_scoped:mismatch:order_id"]
+    assert cls("/api/orders/6/invoice", TRUSTED).cls == SUSPECT
+    assert cls("/api/users/4/profile", TRUSTED).reasons == ["owner_scoped:mismatch:user_id"]
+    # their own objects, an object the manifest does not know (created after the seed) and admins stay clean
+    assert cls("/api/orders/5", TRUSTED).cls == CLEAN and cls("/api/orders/5/invoice", TRUSTED).cls == CLEAN
+    assert cls("/api/users/3/profile", TRUSTED).cls == CLEAN
+    assert cls("/api/orders/777", TRUSTED).cls == CLEAN
+    assert cls("/api/orders/6", ADMIN).cls == CLEAN
+    assert cls("/api/products/6", TRUSTED).cls == CLEAN                     # not owner-scoped
+    # untrusted identities keep their own reason
+    assert cls("/api/orders/6", UNTRUSTED).reasons == ["owner_scoped:untrusted"]
+
+
+def test_seeded_member_of_a_group_route():
+    spec = Spec({"paths": {"/teams/{team_id}/notes": {"get": {"x-owner-scoped": True, "parameters": [
+        {"name": "team_id", "in": "path", "schema": {"type": "integer"}}]}}}})
+    man = Manifest.from_dict({"seed_max_uid": 60, "groups": {"teams": {"1": [3, 5]}}, "group_routes": {"team_id": "teams"}})
+
+    def cls(path, uid):
+        return classify(View("GET", path, "", {}, b""), spec, Who(uid=uid, role="user", trusted=True), man, [], "s")
+    assert cls("/teams/1/notes", 3).cls == CLEAN and cls("/teams/1/notes", 5).cls == CLEAN
+    assert cls("/teams/1/notes", 4).reasons == ["owner_scoped:mismatch:team_id"]
+    assert cls("/teams/2/notes", 4).cls == CLEAN                            # a team the manifest does not know
+
+
+def test_redact_path_replaces_only_the_sensitive_segment():
+    assert redact_path("/api/reset/s3cr%65t/confirm", {"s3cret"}) == "/api/reset/<redacted>/confirm"
+    assert redact_path("/api/reset/other", {"s3cret"}) == "/api/reset/other"
+    assert redact_path("/api/x", set()) == "/api/x"
+
+
+def test_redact_multipart_replaces_the_named_part_and_keeps_the_rest():
+    ct = "multipart/form-data; boundary=XyZ"
+    body = (b"--XyZ\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhello\r\n"
+            b"--XyZ\r\nContent-Disposition: form-data; name=\"pw\"\r\n\r\ntopsecret\r\n--XyZ--\r\n")
+    out = redact_multipart(body, ct, {"pw"})
+    assert b"topsecret" not in out and b"hello" in out and b"<redacted>" in out
+    assert out.count(b"--XyZ") == 3
+    assert redact_multipart(body, ct, set()) == body
+    assert redact_multipart(body, "multipart/form-data", {"pw"}) == b"<redacted>"

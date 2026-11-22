@@ -1,4 +1,4 @@
-# OpenEMR 8.2.0 (tag v8_2_0, commit 6125a2fd8089c8bcc3848071c1293c60e27a7585) protected by Inmune with the
+# OpenEMR 8.2.0 (tag v8_2_0, commit 6125a2fd8089c8bcc3848071c1293c60e27a7585) protected by Immune with the
 # same flow as the Tienda: gateway (L0, rules, sessions) -> shadow clones with oracles -> incident ->
 # containment rule -> patch (5 gates) -> blue/green deploy -> dashboard. OpenEMR's code is unmodified.
 # Prepared by examples/openemr/fetch.py; run with: bin/immune up --project examples/openemr/app

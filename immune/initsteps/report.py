@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 
@@ -115,6 +114,8 @@ def write(init) -> str:
     for step, s in st.items():
         L.append("- result of %s: %s%s" % (step, s.get("source"), (" (errors: %s)" % "; ".join(s["errors"][:3]))
                                            if s.get("errors") else ""))
+    if init.fallback_note():
+        L += ["", "**Not adapted by the LLM:** %s" % init.fallback_note()]
     L += ["", "## Needs human review", "",
           "Every classification below was proposed by %s and verified only mechanically (doctor checks); "
           "a wrong `public` or missing `private` column can copy real data into the shadow." % (

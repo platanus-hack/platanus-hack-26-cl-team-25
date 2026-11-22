@@ -1,4 +1,4 @@
-# Inmune con OpenEMR 8.2.0
+# Immune con OpenEMR 8.2.0
 
 En Linux o WSL2, `IMMUNE_WITH_OPENEMR=1 ./install.sh` descarga las imágenes fijadas de
 OpenEMR y MariaDB. `bin/immune doctor --prereqs --openemr` comprueba que estén disponibles.
@@ -9,6 +9,13 @@ Si el checkout ya tiene un `.venv` de Windows, usá `IMMUNE_VENV_DIR` con una ru
 de Linux tanto para instalar como para ejecutar `bin/immune` desde WSL2.
 La demo funciona con Docker Engine dentro de Ubuntu. Cada base sombra tiene un límite de 1 GiB
 para alojar en memoria la semilla y su copia durante el reinicio del clon.
+
+Rutas de esta guía: `fetch.py`, `legit.py`, `attacks.py` y `seed-rules.sh` están en `examples/openemr/`. Las rutas
+`.immune/…`, `immune-runtime/…` y `Dockerfile.immune` son relativas a `examples/openemr/overlay/`, que `fetch.py`
+copia sobre `examples/openemr/app/` (ese directorio no está en el repositorio: lo crea `fetch.py`). Los archivos
+PHP citados (`library/…`, `src/…`, `interface/…`, `portal/…`) son de OpenEMR y tampoco están en el repositorio.
+Los resultados de esta guía y su nivel de respaldo están en [resultados.md](resultados.md#openemr-820); los
+límites, en [limites.md](limites.md#ejemplo-de-openemr-examplesopenemr).
 
 OpenEMR **v8_2_0** (commit `6125a2fd8089c8bcc3848071c1293c60e27a7585`) protegido con el mismo flujo que la
 Tienda: gateway (L0, reglas, sesiones), clones sombra con oráculos, incidente, regla de contención, parche con
@@ -45,7 +52,7 @@ y las cuentas portal `paciente1 / Inmune-paciente1-82`, `paciente2 / Inmune-paci
 al correr). Para proteger una base real, exportá
 `OPENEMR_DATABASE_URL=mysql://usuario:clave@host:3306/openemr`.
 
-## Qué agrega Inmune
+## Qué agrega Immune
 
 - **Base de datos MySQL/MariaDB** en el runtime genérico (`immune/dbkind.py`):
   - proxy del protocolo en el sidecar (`sidecar/mysqlproxy.py`): observa las sentencias ejecutadas, desactiva
@@ -108,7 +115,7 @@ Un clon completo: MariaDB del clon, OpenEMR `-trace` y sidecar con strace y prox
 
 OpenEMR 8.2.0 trae las cinco fallas de serie; ninguna está sembrada. El seed (`immune-runtime/seed-clinic.php`)
 solo enciende las superficies que el release trae apagadas o que un administrador real no habría configurado,
-y crea las cuentas que permiten mostrar el impacto. Todas quedan cubiertas por el flujo Inmune: request
+y crea las cuentas que permiten mostrar el impacto. Todas quedan cubiertas por el flujo Immune: request
 sospechoso → clon sombra → oráculo → incidente con la línea exacta de PHP (o regla de contención).
 
 | CVE | Fallo | Dónde está el código | Qué lo expone en el demo |
@@ -134,7 +141,7 @@ Las cinco fallas no son iguales para un juez por ejecución: el RCE dispara el o
 resto se detecta **emergente** — el gateway arranca con cero reglas; el clasificador marca las formas
 sospechosas, los clones las ejecutan y los oráculos confirman; la regla de contención es **salida** del
 sistema, no input. Tres oráculos del perfil (`openemr_identity.extra_oracles`, llamados por
-sidecar/server.py después de los oráculos base, con la misma forma de evento) hacen la confirmación:
+`sidecar/server.py` después de los oráculos base, con la misma forma de evento) hacen la confirmación:
 
 | Mecanismo | CVE | Cómo llega a la sombra | Qué confirma el oráculo |
 |---|---|---|---|

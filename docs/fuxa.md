@@ -2,7 +2,7 @@
 
 La demo usa únicamente el commit oficial 19c2471833e410eea235b81857ddcfde7b3851a0. Docker ejecuta el servicio FUXA en una red interna. El gateway publica la interfaz en 127.0.0.1:1881 y conserva la revisión anterior hasta verificar el cambio.
 
-Instala las dependencias de Python y activa los contenedores Linux de Docker. Ejecuta estos comandos desde la raíz de Immune.
+Instala las dependencias de Python y activa los contenedores Linux de Docker. Ejecuta estos comandos desde la raíz de Immune. La demo es un camino aparte del stack de `immune up`: su lugar en el repositorio está en [arquitectura.md](arquitectura.md#2-componentes-y-dónde-corre-cada-uno) y sus límites en [limites.md](limites.md#demo-de-fuxa-immune-fuxa).
 
     python -m immune fuxa baseline
     python -m immune fuxa up
@@ -11,7 +11,7 @@ Instala las dependencias de Python y activa los contenedores Linux de Docker. Ej
 
 Ejecuta «python -m immune fuxa dashboard» en otra terminal para ver la revisión activa, las peticiones del gateway, las alertas del monitor y el historial de parches. Cada petición muestra método, ruta, estado y latencia. Las respuestas HTTP 401 y 403 aparecen como sospechosas. Las detecciones confirmadas requieren evidencia del monitor. El dashboard escucha en http://127.0.0.1:8091. Usa el mismo directorio --runtime para el monitor y el dashboard.
 
-Cada petición que atraviesa el gateway lleva un identificador de operación («Peticiones en vivo» y «Detecciones de Inmune» comparten ese id). El gateway lo añade como cabecera al reenviar la petición; el servidor lo reutiliza en la evidencia del efecto y en la decisión de política. En Socket.IO la unidad es el evento: el HTTP 200 confirma la entrega del mensaje y el veredicto indica si se permitió el efecto, y ambos se unen por el identificador de sesión y el nombre de la operación. Así una escritura de tag aparece como una sola operación con su veredicto: permitida, bloqueada, sin cobertura o evaluación no disponible. El HTTP 200 queda etiquetado como entrega confirmada.
+Cada petición que atraviesa el gateway lleva un identificador de operación («Peticiones en vivo» y «Detecciones de Immune» comparten ese id). El gateway lo añade como cabecera al reenviar la petición; el servidor lo reutiliza en la evidencia del efecto y en la decisión de política. En Socket.IO la unidad es el evento: el HTTP 200 confirma la entrega del mensaje y el veredicto indica si se permitió el efecto, y ambos se unen por el identificador de sesión y el nombre de la operación. Así una escritura de tag aparece como una sola operación con su veredicto: permitida, bloqueada, sin cobertura o evaluación no disponible. El HTTP 200 queda etiquetado como entrega confirmada.
 
 El gateway rechaza con 403 los cambios del programador sin token. Los controles del servidor exigen un administrador autenticado para cambiar programaciones, escribir tags, controlar dispositivos y consultar el histórico. El resultado de una consulta del histórico se entrega a la sesión autorizada que la hizo. Los clientes invitados pueden usar las lecturas ordinarias del HMI.
 
@@ -19,13 +19,13 @@ Antes de ejecutar una operación protegida, FUXA verifica la identidad y envía 
 
 El gateway marca los mensajes sensibles de Socket.IO por HTTP long-polling y muestra el motivo sin guardar los datos del mensaje. Las conexiones WebSocket y los mensajes de polling que superan el límite de 64 KiB aparecen como «Sin inspección» en el registro del gateway. El control del servidor se aplica a los eventos sensibles de ambos transportes y reporta los bloqueos al monitor.
 
-Cuando una sesión acumula denegaciones repetidas de la misma operación, Inmune registra una restricción temporal sobre esa sesión y las operaciones afectadas. La restricción vive dentro del servidor, con la sesión ya autenticada, vence por sí sola y no afecta a la actividad ordinaria como leer el HMI. El panel «Restricciones de sesión» del dashboard muestra qué se restringió, el motivo y cuándo vence. Las claves de sesión son opacas: identificador de Socket.IO o resumen del token, sin guardar credenciales.
+Cuando una sesión acumula denegaciones repetidas de la misma operación, Immune registra una restricción temporal sobre esa sesión y las operaciones afectadas. La restricción vive dentro del servidor, con la sesión ya autenticada, vence por sí sola y no afecta a la actividad ordinaria como leer el HMI. El panel «Restricciones de sesión» del dashboard muestra qué se restringió, el motivo y cuándo vence. Las claves de sesión son opacas: identificador de Socket.IO o resumen del token, sin guardar credenciales.
 
 En una instancia activa, el comando harden activa las políticas administrativas conocidas y valida la revisión candidata en un contenedor sin red con sesiones, credenciales y estado sintéticos. Comprueba el efecto permitido o denegado sobre tags, dispositivos, histórico y programaciones. Luego ejecuta la suite de FUXA y verifica el servicio por el gateway antes de conservar el cambio. La revisión anterior queda disponible. El resultado de la validación aparece en status y en el dashboard. El comando reload-gateway actualiza el gateway y comprueba que la revisión activa siga respondiendo.
 
 El comando validate-active ejecuta la validación en contenedores de prueba con la misma imagen y los mismos archivos instrumentados de la revisión en servicio. La instancia activa continúa atendiendo peticiones.
 
-El comando audit-coverage comprueba que los controles declarados sigan conectados al código de la revisión activa y genera coverage-audit.json junto al informe de validación. El informe identifica la ubicación de cada ruta de lectura, ruta de escritura o evento que requiera revisión. La auditoría también se ejecuta al validar una candidata. Las entradas pendientes indican falta de cobertura verificada de Inmune.
+El comando audit-coverage comprueba que los controles declarados sigan conectados al código de la revisión activa y genera coverage-audit.json junto al informe de validación. El informe identifica la ubicación de cada ruta de lectura, ruta de escritura o evento que requiera revisión. La auditoría también se ejecuta al validar una candidata. Las entradas pendientes indican falta de cobertura verificada de Immune.
 
 Las verificaciones del gateway comprueban el proyecto HMI, el rechazo de lectura de usuarios como invitado y la apertura del canal de datos en vivo. Se ejecutan al subir la demo, actualizar el gateway, validar la revisión activa y después de cambiar de revisión. Si un candidato falla después del cambio, Fleet restaura la revisión anterior y comprueba que vuelva a funcionar. El historial distingue un candidato rechazado de una reversión verificada.
 

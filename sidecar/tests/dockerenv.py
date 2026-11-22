@@ -1,5 +1,5 @@
 """Bring up a private test stack: --internal network, Postgres seeded from a template, the Node demo
-app, the sidecar attached to it, and a tiny evidence collector. All names start with ``p4-``.
+app, the sidecar attached to it, and a tiny evidence collector. All names start with ``sctest-``.
 
 Used by the integration tests and by ``python -m sidecar.tests.bench``.
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -18,6 +19,37 @@ import httpx
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EX = os.path.join(ROOT, "sidecar", "examples")
 SIDECAR_IMAGE = "immune-sidecar:1"
+NODE_IMAGE = "node:22-alpine"
+NPM_CI = ["npm", "ci", "--omit=dev", "--no-audit", "--no-fund"]
+
+
+class DepsUnavailable(RuntimeError):
+    """The Node fixture's dependencies are not installed and could not be installed."""
+
+
+def ensure_node_deps(app_dir: str | None = None) -> None:
+    """examples/node/node_modules is not in git. The app container runs on an --internal network with the
+    fixture mounted read-only, so the dependencies are installed here, once, from package-lock.json: with the
+    host's npm, else with a one-off container of the app's own image (default bridge network, as this user)."""
+    d = app_dir or os.path.join(EX, "node")
+    if os.path.isdir(os.path.join(d, "node_modules", "pg")):
+        return
+    if shutil.which("npm"):
+        cmd, cwd = NPM_CI, d
+    elif shutil.which("docker"):
+        cmd, cwd = ["docker", "run", "--rm", "--label", "immune.test=sidecar", "--user", f"{os.getuid()}:{os.getgid()}",
+                    "-e", "HOME=/tmp", "-e", "npm_config_cache=/tmp/npm", "-v", f"{d}:/app", "-w", "/app",
+                    NODE_IMAGE, *NPM_CI], None
+    else:
+        raise DepsUnavailable(f"{d}/node_modules is missing and neither npm nor docker is available to install it")
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=300)
+        err = (r.stderr or r.stdout).strip()[-400:] if r.returncode else ""
+    except (OSError, subprocess.TimeoutExpired) as e:
+        err = repr(e)
+    if err or not os.path.isdir(os.path.join(d, "node_modules", "pg")):
+        raise DepsUnavailable(f"{d}/node_modules is missing and `{' '.join(cmd[:3])} ...` could not install it "
+                              f"(network access to the npm registry is needed once): {err}")
 
 COLLECTOR = r'''
 import json, http.server
@@ -67,18 +99,18 @@ class Stack:
                  pg_durable: bool = False):
         self.pg_durable = pg_durable
         self.tag = tag or uuid.uuid4().hex[:6]
-        self.net = f"p4-net-{self.tag}"
-        self.pg = f"p4-pg-{self.tag}"
-        self.app = f"p4-app-{self.tag}"
-        self.sc = f"p4-sc-{self.tag}"
-        self.col = f"p4-col-{self.tag}"
+        self.net = f"sctest-net-{self.tag}"
+        self.pg = f"sctest-pg-{self.tag}"
+        self.app = f"sctest-app-{self.tag}"
+        self.sc = f"sctest-sc-{self.tag}"
+        self.col = f"sctest-col-{self.tag}"
         self.app_kind = app
         self.trace = trace
         self.with_collector = collector
         self.collector_url = collector_url
         self.grace_ms = grace_ms
         self.mode = mode
-        self.tmp = tempfile.mkdtemp(prefix="p4-")
+        self.tmp = tempfile.mkdtemp(prefix="sctest-")
         self.started = []
 
     # --------------------------------------------------------------- up / down
@@ -92,6 +124,8 @@ class Stack:
         return self
 
     def _up(self):
+        if self.app_kind == "node":
+            ensure_node_deps()
         sh("docker", "network", "create", "--internal", self.net)
         self.started.append(("network", self.net))
         # the clone database is disposable: durability off makes the L1 reset ~2x faster (README)
@@ -118,7 +152,7 @@ class Stack:
         return httpx.get(f"http://{self.app_ip}:8000/health", timeout=2).status_code == 200
 
     def _run(self, name, args):
-        sh("docker", "run", "-d", "--name", name, "--label", "p4.test=1", *args)
+        sh("docker", "run", "-d", "--name", name, "--label", "immune.test=sidecar", *args)
         self.started.append(("container", name))
 
     async def _pg_ready(self):
@@ -158,16 +192,16 @@ class Stack:
                "-e", "APP_STATIC=/app/static", "-e", "PORT=3000"]
         if self.app_kind == "node":
             self._run(self.app, ["--network", self.net, "--read-only", "-v", f"{EX}/node:/app:ro", "-w", "/app", *env,
-                                 "node:22-alpine", "node", "/app/server.js"])
+                                 NODE_IMAGE, "node", "/app/server.js"])
         elif self.app_kind in ("c", "cdyn"):
             cbin = os.path.join(self.tmp, "cbin")
             os.makedirs(cbin, exist_ok=True)
             env_ = {**os.environ, **({"DYNAMIC": "1"} if self.app_kind == "cdyn" else {})}
             subprocess.run([os.path.join(EX, "c", "build.sh"), cbin], check=True, capture_output=True, env=env_)
             os.chmod(cbin, 0o755)
-            # static binary: any image works (node:22-alpine is used only because it is present); the dynamic
+            # static binary: any image works (NODE_IMAGE is used only because it is present); the dynamic
             # variant needs glibc, which the sidecar image has
-            image = SIDECAR_IMAGE if self.app_kind == "cdyn" else "node:22-alpine"
+            image = SIDECAR_IMAGE if self.app_kind == "cdyn" else NODE_IMAGE
             self._run(self.app, ["--network", self.net, "--read-only", "-v", f"{cbin}:/cbin:ro",
                                  "-v", f"{EX}/c/static:/app/static:ro", "-e", "APP_STATIC=/app/static",
                                  "-e", "PORT=3000", "-e", "PGUSER=capp", image, "/cbin/app"])

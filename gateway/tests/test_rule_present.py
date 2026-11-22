@@ -5,7 +5,7 @@ from starlette.testclient import TestClient
 
 from gateway.core import Config, Gateway
 
-from .test_auth_observe import ADMIN, world  # noqa: F401  (world is a fixture)
+from .world import ADMIN
 
 AUTH = {"kind": "immune-token"}
 RULE = {"id": "rule-i1", "incident": "i1", "method": "GET", "route": "/search",

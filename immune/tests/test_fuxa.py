@@ -378,7 +378,6 @@ def test_route_control_release_and_incident(fleet):
     audit = fuxa.audit_coverage(fleet.profile(), fleet.releases / baseline, fleet.meta(baseline))
     assert audit["counts"]["observe"] == 5
     assert audit["counts"]["event_review"] == 1
-    enforced = set()
     fleet.active = Mock(return_value=baseline)
     fleet.promote = Mock(return_value=None)
     event = {

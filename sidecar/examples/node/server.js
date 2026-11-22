@@ -1,5 +1,5 @@
 // Demo app that exists only to test the sidecar observer. Deliberately vulnerable routes are
-// paired with safe ones. Plain `http` module + vendored `pg` (node_modules/, see README).
+// paired with safe ones. Plain `http` module + `pg` from package-lock.json (node_modules/ is installed by sidecar/tests/dockerenv.py).
 "use strict";
 const http = require("http");
 const fs = require("fs");

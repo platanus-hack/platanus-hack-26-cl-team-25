@@ -149,7 +149,6 @@ class Config:
     aftercheck: bool = False               # gateway: replay clean requests in a clone after prod answered
     audit: AuditConfig = field(default_factory=AuditConfig)
     ports: dict = field(default_factory=lambda: dict(DEFAULT_PORTS))
-    immune_home: str = IMMUNE_HOME
     raw: dict = field(default_factory=dict, repr=False)
 
     # ------------------------------------------------------------------ names
@@ -169,10 +168,6 @@ class Config:
     # ------------------------------------------------------------------ runtime layout
     def rt(self, *parts) -> str:
         return os.path.join(self.runtime_dir, *parts)
-
-    @property
-    def releases_dir(self) -> str:
-        return self.rt("releases")
 
     def release_dir(self, release: str) -> str:
         return self.rt("releases", release)
@@ -218,10 +213,6 @@ class Config:
     def in_source_dirs(self, relpath: str) -> bool:
         p = _norm_rel(relpath)
         return p is not None and any(p == d or p.startswith(d + "/") for d in self.app.source_dirs)
-
-    def in_release_paths(self, relpath: str) -> bool:
-        p = _norm_rel(relpath)
-        return p is not None and any(p == d or p.startswith(d + "/") for d in self.app.release_paths)
 
     # ------------------------------------------------------------------ substitution
     def app_env(self, *, db: str, secret: str, root: str = CONTAINER_APP) -> dict:
@@ -487,8 +478,9 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
     app.command = [str(x) for x in cmd] if isinstance(cmd, list) else []
     app.allowed_file_roots = v.list_(a, "allowed_file_roots", "app.allowed_file_roots")
     if app.runtime == "generic":
-        if not (app.image or app.build):
-            v.err("app.image", "runtime generic needs app.image or app.build")
+        if not app.build:
+            v.err("app.build", "runtime generic needs app.build (the fleet builds one image per release; "
+                               "app.image alone is not supported)")
         if not app.command:
             v.err("app.command", "runtime generic needs app.command")
 

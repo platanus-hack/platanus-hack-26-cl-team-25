@@ -1,1 +1,1 @@
-"""WP7: event bus + live dashboard."""
+"""Event bus + live dashboard. See dashboard/README.md."""

@@ -7,9 +7,12 @@ vulnerable_ref: "2.4.49"
 fixed_ref: "2.4.50"
 language: c
 vuln_class: traversal
-# Shown in the report only. NEVER given to the model.
+# Shown in the report only. The advisory id, the fixed version and the official patch are not given to the model.
 advisory: "CVE-2021-41773 — public advisory, fixed upstream in 2.4.50"
-# What the model is told about the area (generic, no hint about the bug).
+# What the model IS told (anticipate/prompts/audit.md): `name` (product and version), this `area` text, the
+# defect class with its mechanism (CLASS_TEXT in anticipate/core.py), the one-file `scope` below and which
+# legitimate behaviour to keep. That narrows the search to the normalizer; it is not a blind review.
+# What it is NOT told: the advisory id, `fixed_ref`, the official diff, and vectors.yaml (it never sees it).
 area: >-
   URL path normalization that runs on every request before the path is mapped to the filesystem.
   It decodes percent-encoded unreserved characters and removes dot-segments.

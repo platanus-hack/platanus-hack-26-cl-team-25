@@ -35,6 +35,7 @@ services:
       GW_MODE: "${IMMUNE_MODE}"
       GW_AFTERCHECK: "${IMMUNE_AFTERCHECK:-0}"
       IMMUNE_AUTH: "${IMMUNE_AUTH}"
+      WAF_URL: "${IMMUNE_WAF_URL:-}"       # set by `immune up` with IMMUNE_WAF=1 (service `waf` below)
     volumes:
       - "${IMMUNE_HOME}:/opt/immune:ro"
       - "${IMMUNE_RUNTIME}:/runtime"
@@ -59,3 +60,18 @@ services:
       - "${IMMUNE_RUNTIME}:/runtime"
     networks: [ctrlnet, edge]
     ports: ["127.0.0.1:${IMMUNE_PORT_DASHBOARD}:8090"]
+  # Optional OWASP CRS detection service (waf/). Started only with IMMUNE_WAF=1 (compose profile `waf`); the
+  # gateway consults it fail-open and never blocks on its answer (gateway/waf.py).
+  waf:
+    profiles: [waf]
+    image: immune-waf:1
+    container_name: "immune-${IMMUNE_NAME}-waf"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    labels:
+      immune.project: "${IMMUNE_NAME}"
+    networks:
+      ctrlnet: {aliases: [waf]}

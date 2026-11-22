@@ -5,7 +5,7 @@ Two modes:
   and attaches with ``strace -p`` to every process of the app's mount namespace (so the sidecar's own
   processes - uvicorn, the pg proxy, the evidence push - are never traced). Needs CAP_SYS_PTRACE.
 - launch: the sidecar starts the app itself as a traced child (``strace -f --seccomp-bpf -- cmd``),
-  for when both run in one container (contracts/product.md §6). No extra capability needed; with
+  for when both run in one container (sidecar/README.md, "Tracer"). No extra capability needed; with
   seccomp-bpf only the traced syscalls stop the tracee.
 - docker: the sidecar runs outside (on the host, next to the gateway) and starts a tracer container that shares
   the app container's PID namespace: ``docker run --pid=container:<app> … strace -f -p 1``. Nothing is installed
@@ -97,6 +97,7 @@ class Tracer:
         self.thread: threading.Thread | None = None
         self.pids: list[int] = []
         self.lines = 0
+        self.dropped = 0  # strace lines that produced no Syscall: unparsable, or failed in observe (logged per request)
         self.root_pid: int | None = None
 
     def cwd_of(self, pid: int) -> str | None:
@@ -163,14 +164,19 @@ class Tracer:
 
     def _line(self, parser, line):
         self.lines += 1
+        seen = parser.dropped
         try:
             sc = parser.feed(line)
             if sc is None:
+                if parser.dropped != seen:
+                    self.dropped += 1
+                    log.debug("strace line dropped: %r", line[:300])
                 return
             obs = strace.observe(sc, None if self.mode == "docker" else self.cwd_of, attempts=self.attempts)
             if obs is not None:
                 self.on_obs(obs)
         except Exception:  # never let one odd line kill the reader
+            self.dropped += 1
             log.exception("unparsable strace line: %r", line[:300])
 
     def start(self, timeout: float = 30.0):

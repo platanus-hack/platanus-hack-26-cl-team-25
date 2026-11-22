@@ -1,4 +1,4 @@
-"""Attacks against the real OpenEMR 8.2.0 surfaces, through Inmune's gateway.
+"""Attacks against the real OpenEMR 8.2.0 surfaces, through Immune's gateway.
 
     python examples/openemr/attacks.py --base http://127.0.0.1:8280
 
@@ -58,7 +58,7 @@ def main(argv=None):
         path = path.replace("{other}", other or "00000000-0000-0000-0000-000000000000")
         r = c.request(method, path, headers=api if path.startswith("/apis/") else {})
         print("%-56s %d %s" % (name, r.status_code, r.headers.get("content-type", "").split(";")[0]))
-    print("\nMirá el dashboard (Inmune) para el veredicto de cada request: sospechoso, detonado en sombra, incidente,"
+    print("\nMirá el dashboard (Immune) para el veredicto de cada request: sospechoso, detonado en sombra, incidente,"
           " regla y parche o rule_only con la línea PHP.")
 
 

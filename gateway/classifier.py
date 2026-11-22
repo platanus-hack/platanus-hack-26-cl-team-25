@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl, unquote, unquote_plus
 
 from immune_contracts import grammar
 
-from .spec import (Operation, Spec, check_json_value, check_string_value, is_catchall, match_template,
+from .spec import (Spec, check_json_value, check_string_value, is_catchall, match_template,
                    split_template)
 
 CLEAN, SUSPECT, EVIDENCE, CAPTIVE = "clean", "suspect", "evidence", "captive"
@@ -146,11 +146,10 @@ class View:
 class Result:
     cls: str = CLEAN
     reasons: list = field(default_factory=list)
-    op: Operation | None = None
-    path_params: dict = field(default_factory=dict)
     rule_hit: list = field(default_factory=list)       # ids of rules that matched
     rule_strict: list = field(default_factory=list)    # of those, the ones that deny on an inconclusive clone
-    sensitive: dict = field(default_factory=dict)      # {"query": {names}, "json": {dotted}, "form": {names}}
+    # {"query": {names}, "json": {dotted}, "form": {names}, "header": {lower names}, "path": {decoded values}}
+    sensitive: dict = field(default_factory=dict)
 
     def add(self, reason: str):
         if reason not in self.reasons:
@@ -243,7 +242,7 @@ def _walk_json(res: Result, value, schema: dict | None, path: str, values: dict)
         addl = (schema or {}).get("additionalProperties")
         for k, v in value.items():
             if not SAFE_KEY.fullmatch(str(k)):
-                res.add(f"grammar:json.key")
+                res.add("grammar:json.key")
             sub = props.get(k)
             if sub is None and isinstance(addl, dict):
                 sub = addl
@@ -300,9 +299,13 @@ def parse_multipart_fields(body: bytes, content_type_header: str) -> list[tuple[
 def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[Rule],
              session: str, enum: EnumTracker | None = None) -> Result:
     res = Result()
-    op, path_params = spec.match(view.method, view.raw_path)
-    res.op, res.path_params = op, path_params
+    readings = spec.match_readings(view.method, view.raw_path)
+    op, path_params = next((m for m in readings if m is not None), (None, {}))
     values: dict[tuple, list] = {}
+
+    # ---- an encoded slash that changes the route depending on who decodes it (spec.path_readings)
+    if any(m != readings[0] for m in readings):
+        res.add("path:encoded_slash")
 
     # ---- evidence: honeytoken
     if who.honeytoken:
@@ -341,6 +344,8 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
             p = op.params.get(("path", name)) or {}
             values.setdefault(("path", name), []).append(v)
             sensitive = bool(p.get("x-sensitive") or (p.get("schema") or {}).get("x-sensitive"))
+            if sensitive:
+                res.sensitive.setdefault("path", set()).add(v)
             _check_text(res, "path", name, v, p.get("schema") or {}, sensitive,
                         grammar.PATH_SAFE if name in catchall else grammar.SAFE_DEFAULT)
 
@@ -349,6 +354,8 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
                 v = view.headers[name.lower()]
                 values.setdefault(("header", name.lower()), []).append(v)
                 sensitive = bool(p.get("x-sensitive") or (p.get("schema") or {}).get("x-sensitive"))
+                if sensitive:
+                    res.sensitive.setdefault("header", set()).add(name.lower())
                 _check_text(res, "header", name, v, p.get("schema") or {}, sensitive)
 
         # ---- body
@@ -381,6 +388,11 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
         # ---- owner-scoped with an untrusted / anonymous identity
         if op.owner_scoped and not who.trusted:
             res.add("owner_scoped:anonymous" if who.uid is None else "owner_scoped:untrusted")
+        # ---- owner-scoped, seeded identity, but the manifest says the addressed object is someone else's
+        elif op.owner_scoped and who.role != "admin":
+            for name, v in path_params.items():
+                if _owns(manifest, name, v, who.uid) is False:
+                    res.add(f"owner_scoped:mismatch:{name}")
 
         # ---- canaries (path parameters; admins exempt; the owner itself is exempt)
         if who.role != "admin":
@@ -457,18 +469,24 @@ def _strip_indices(dotted: str) -> str:
     return ".".join(p for p in dotted.split(".") if not p.isdigit())
 
 
-def _is_owner(manifest: Manifest, param: str, value: str, uid: int | None) -> bool:
+def _owns(manifest: Manifest, param: str, value: str, uid: int | None) -> bool | None:
+    """Whether `uid` owns the object a path parameter addresses. None: the manifest cannot tell (a
+    parameter with no ownership table, or an object created after the seed)."""
     if uid is None:
         return False
     if param in manifest.group_routes:      # a members-scoped route: every member of the group "owns" it
-        return str(uid) in manifest.groups.get(manifest.group_routes[param], {}).get(value, ())
+        members = manifest.groups.get(manifest.group_routes[param], {}).get(value)
+        return None if members is None else str(uid) in members
     if param == "user_id":
         return str(uid) == value
     if param.endswith("_id"):
-        table = manifest.ownership.get(param[:-3] + "s") or {}
-        owner = table.get(value)
-        return owner is not None and str(owner) == str(uid)
-    return False
+        owner = (manifest.ownership.get(param[:-3] + "s") or {}).get(value)
+        return None if owner is None else str(owner) == str(uid)
+    return None
+
+
+def _is_owner(manifest: Manifest, param: str, value: str, uid: int | None) -> bool:
+    return _owns(manifest, param, value, uid) is True
 
 
 # ---------------------------------------------------------------- redaction for recordings
@@ -506,3 +524,31 @@ def redact_form(body: bytes, names: set) -> bytes:
     if not names:
         return body
     return redact_query(body.decode("utf-8", "replace"), names).encode()
+
+
+def redact_path(raw_path: str, values: set) -> str:
+    """Replace every segment of the raw path whose decoded value is a sensitive path-parameter value."""
+    if not values:
+        return raw_path
+    return "/".join(REDACTED if seg and unquote(seg) in values else seg for seg in raw_path.split("/"))
+
+
+_PART_NAME = re.compile(rb'content-disposition:[^\r\n]*?[;\s]name="?([^";\r\n]*)"?', re.I)
+
+
+def redact_multipart(body: bytes, content_type_header: str, names: set) -> bytes:
+    """Replace the content of the multipart parts whose field name is in `names`. A body whose boundary
+    cannot be read is replaced whole: a recording must not keep a value marked x-sensitive."""
+    if not names:
+        return body
+    m = re.search(r'boundary="?([^";]+)"?', content_type_header or "", re.I)
+    if not m:
+        return REDACTED.encode()
+    delim = b"--" + m.group(1).strip().encode()
+    chunks = body.split(delim)
+    for i in range(1, len(chunks)):
+        head, sep, _ = chunks[i].partition(b"\r\n\r\n")
+        nm = _PART_NAME.search(head)
+        if sep and nm and nm.group(1).decode("utf-8", "replace") in names:
+            chunks[i] = head + sep + REDACTED.encode() + b"\r\n"
+    return delim.join(chunks)

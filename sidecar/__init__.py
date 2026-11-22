@@ -1,1 +1,1 @@
-"""Language-agnostic shadow observer (P4). See sidecar/README.md and contracts/product.md §6."""
+"""Language-agnostic shadow observer. See sidecar/README.md and contracts/product.md §6."""

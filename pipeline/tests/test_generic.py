@@ -66,6 +66,43 @@ def test_policy_rejections(rel, path, new, why):
     assert not ok and why in detail, detail
 
 
+@pytest.mark.parametrize("new,why", [
+    # a comment marker inside a string literal must not hide the rest of the line
+    ("var h = '#'; const cp = require('child_process'); cp.execSync('id');\n", "new import(s)/require(s) child_process"),
+    ("var u = \"http://x\"; const k = process.env.SECRET_KEY;\n", "new use of process.env"),
+    ("var q = 'it\\'s // fine'; eval(q);\n", "new use of eval"),
+    # bracket access to the same members
+    ("const k = process['env'].SECRET_KEY;\n", "new computed member access"),
+    ("const k = process[`env`];\n", "new computed member access"),
+    ("const k = global['pro' + 'cess'];\n", "new computed member access"),
+    ("const f = [].filter['constructor']('return 1');\n", "new computed member access"),
+    # no parser: a `//` inside a regular-expression literal looks like a comment; code after it is still seen
+    ("const r = /[//]/; require('child_process').execSync('id');\n", "a comment contains code-shaped"),
+])
+def test_policy_lexes_strings_before_comments_and_sees_bracket_access(rel, new, why):
+    src = read(rel, "src/tasks.js")
+    diff, work = patched(rel, {"src/tasks.js": new + src})
+    ok, detail, _ = check_generic(diff, rel, work, dirs=DIRS)
+    assert not ok and why in detail, detail
+
+
+def test_policy_accepts_prose_comments_and_markers_inside_strings(rel):
+    src = read(rel, "src/tasks.js")
+    note = ("// bound parameter: don't build the statement by hand; fetch the rows as before (system of record)\n"
+            "/* the '#' and \"//\" below are data */\nconst marks = ['#', \"//\", `/*`];\n")
+    diff, work = patched(rel, {"src/tasks.js": note + src.replace(FIX[0], FIX[1])})
+    ok, detail, _ = check_generic(diff, rel, work, dirs=DIRS)
+    assert ok, detail
+
+
+def test_lex_comment_syntax_depends_on_the_language():
+    from pipeline.generic import lex
+    assert lex("a = '#'; b()  // c\n/* d */ e", ".js") == ("a = '#'; b()   \n  e", "// c\n/* d */")
+    assert lex("#include <stdlib.h>\nx(); // y", ".c")[0] == "#include <stdlib.h>\nx();  "
+    assert lex("x = 1  # note\ny = 7 // 2", ".rb") == ("x = 1   \ny = 7 // 2", "# note")
+    assert lex("SELECT 1 -- note", ".sql") == ("SELECT 1  ", "-- note")
+
+
 def test_policy_rejects_tests_and_dependency_files_inside_source_dirs(rel):
     os.makedirs(os.path.join(rel, "src", "__tests__"))
     for p in ("src/__tests__/a.test.js", "src/package-lock.json"):

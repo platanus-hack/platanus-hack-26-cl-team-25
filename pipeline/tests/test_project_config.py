@@ -2,11 +2,9 @@
 release copies, skipped tests gate, autopatch caps and recording replay (contracts/product.md §2, §3)."""
 import json
 import os
-import shutil
 import textwrap
 
 import pytest
-import yaml
 
 from immune import config as icfg
 

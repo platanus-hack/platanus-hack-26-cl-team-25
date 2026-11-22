@@ -1,5 +1,4 @@
 """Generated legit journeys (.immune/scenarios.py): plan derivation and the deterministic runtime."""
-import importlib
 import json
 import sys
 import types

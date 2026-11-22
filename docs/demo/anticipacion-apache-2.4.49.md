@@ -137,9 +137,20 @@ index 2a7fdda..896574b 100644
 | dot-segment | `/.%2e/y` | rejected (ret=0), no parent segment | ❌ `ret=1 /../y` | ✅ `ret=0 /y` | ✅ `ret=0 /y` |
 | dot-segment | `/x/../../y` | rejected (ret=0), no parent segment | ✅ `ret=0 /y` | ✅ `ret=0 /y` | ✅ `ret=0 /y` |
 
+## Qué sabía el modelo
+
+- Se le dijo: el producto y la versión (Apache HTTP Server 2.4.49), el área («URL path normalization that runs on every request before the path is mapped to the filesystem. It decodes percent-encoded unreserved characters and removes dot-segments.»), la clase de defecto con su mecanismo (traversal), un alcance de 1 archivo(s) (server/util.c) y qué comportamiento legítimo conservar.
+- No se le dijo: el identificador del aviso (CVE-2021-41773 — public advisory, fixed upstream in 2.4.50), la versión corregida ni el parche oficial.
+- Los vectores de prueba los escribió el equipo; el modelo nunca los ve.
+- El aviso es público y casi con certeza está en los datos de entrenamiento del modelo: esto no es una prueba ciega.
+
+## Qué significa 21 de 21
+
+- Para cada una de las entradas de la tabla de vectores, la función extraída (server/util.c) compilada contra un shim devuelve el mismo par (valor de retorno, búfer de salida) con el parche sugerido que con el oficial.
+- No demuestra equivalencia de comportamiento de Apache HTTP Server 2.4.49: no se compila ni se ejecuta el servidor, y fuera de esas entradas no se afirma nada.
+
 ## Cómo leer esto
 
-- Al modelo se le dio el área (1 archivo(s) en alcance) y la clase de defecto, **no** el aviso (CVE-2021-41773 — public advisory, fixed upstream in 2.4.50).
 - La evidencia no es lo que dice el modelo: son las propiedades mecánicas, compiladas y ejecutadas en un contenedor sin red.
-- Límite: el defecto es público y antiguo, así que el modelo pudo haberlo visto en su entrenamiento. Para una prueba ciega, usar un aviso posterior a la fecha de corte del modelo.
+- Para una prueba ciega, usar un aviso posterior a la fecha de corte del modelo.
 - Para software de terceros la acción correcta en producción es contener con la regla del gateway y actualizar a la versión corregida.

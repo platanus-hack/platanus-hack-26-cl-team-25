@@ -1,5 +1,4 @@
 """Pure unit tests: no app code runs, no Docker, no network beyond 127.0.0.1 fakes."""
-import base64
 import copy
 import json
 import os
@@ -176,7 +175,6 @@ def test_follower_resumes_from_seq():
     from pipeline.fakes import FakeBus
     from immune_contracts import events as E
     import threading
-    import time
     b = FakeBus()
     try:
         for i in range(5):

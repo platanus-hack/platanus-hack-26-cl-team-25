@@ -1,9 +1,9 @@
-"""Incident flow for an app we did not write and cannot run in the in-process harness (any language).
+"""Incident flow for an app we did not write and cannot run in the in-process harness.
 
 Two modes:
 - judge (app.runtime generic, no REPRO_URL): the full flow of `orchestrator.Pipeline` (PoC 3/3, rule, LLM
   fix, five gates, PR, blue/green deploy, verify), with every runner job executed on ephemeral clone
-  triples (app image + Postgres + observer; `pipeline/generic.py`) and the language-neutral patch
+  triples (app image + Postgres + observer; `pipeline/generic.py`) and the patch
   generator `pipeline/generic_patch.py`.
 - reproduction only (REPRO_URL set, e.g. labs/grafana-cve-2021-43798): oracle.fired -> incident -> PoC
   replayed 3 times against a reserved shadow clone through its sidecar. 3/3: containment rule -> patch
@@ -64,8 +64,7 @@ class ExternalPipeline(Pipeline):
         if not self.repro_url:
             return super()._flow(inc)      # judge mode: the whole flow, judged on clone triples
         iid = inc["incident"]
-        self.publish(E.INCIDENT_OPENED, {k: inc[k] for k in ("incident", "vuln_class", "method", "route", "param",
-                                                            "sink", "evidence_rid", "request")}, inc)
+        self.publish(E.INCIDENT_OPENED, self.opened_data(inc), inc)
         release = self.current_release()
         inc["base_release"] = release
         self.note(inc, "opened (external app, release %s)" % release)
@@ -91,7 +90,7 @@ class ExternalPipeline(Pipeline):
             self.escalate(inc, p, hits, self.runs)
         self.note(inc, "PoC reproduces %d/%d on the shadow clone" % (hits, self.runs))
 
-        # 2. containment rule (built-in derivation; the LLM patcher is Python-only for now)
+        # 2. containment rule (built-in derivation: this mode loads no patch generator)
         rule, why = rules.finalize(None, inc, self.spec, self.cfg.rule_ttl_s)
         self.gw.post_rule(rule)
         inc["rule"] = rule

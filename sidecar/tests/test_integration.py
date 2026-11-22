@@ -1,10 +1,9 @@
-"""Integration tests with real containers (private --internal network, names p4-*): the Node demo app
+"""Integration tests with real containers (private --internal network, names sctest-*): the Node demo app
 runs unmodified from node:22-alpine, the sidecar (immune-sidecar:1) attaches to it through a shared PID
-namespace. Same cases as acceptance/wp2_shadow/test_shadow.py where they apply.
+namespace. Same cases as acceptance/shadow/test_shadow.py where they apply.
 
 Run: .venv/bin/pytest sidecar/tests/test_integration.py -q
 """
-import base64
 import json
 import os
 import shutil
@@ -15,7 +14,7 @@ import jsonschema
 import pytest
 
 from immune_contracts import wire
-from sidecar.tests.dockerenv import ROOT, Stack
+from sidecar.tests.dockerenv import ROOT, DepsUnavailable, Stack, ensure_node_deps
 
 pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(shutil.which("docker") is None, reason="needs docker")]
@@ -23,9 +22,18 @@ pytestmark = [pytest.mark.docker,
 UNION = "x' UNION SELECT id, body FROM notes--"
 
 
+def node_stack(**kw) -> Stack:
+    """A stack around the Node fixture; skipped when its dependencies cannot be installed (they are not in git)."""
+    try:
+        ensure_node_deps()
+    except DepsUnavailable as e:
+        pytest.skip(str(e))
+    return Stack(**kw).up()
+
+
 @pytest.fixture(scope="module")
 def stack():
-    s = Stack(tag="it" + os.urandom(2).hex()).up()
+    s = node_stack(tag="it" + os.urandom(2).hex())
     yield s
     print(s.logs(s.sc)[-4000:])
     s.down()
@@ -174,7 +182,7 @@ def test_evidence_signed_schema_valid_and_pushed_before_response(stack):
     schema = json.load(open(os.path.join(ROOT, "contracts/schemas/evidence.schema.json")))
     jsonschema.validate(ev, schema)
     assert ev["rid"] == "r2" and ev["mode"] == "L2" and ev["release"] == "t0" and ev["clone"] == "c1"
-    assert ev["pre_state_b64"] is None  # CONTRACT_GAP: no sqlite pre-state for Postgres
+    assert ev["pre_state_b64"] is None  # the pre-state snapshot exists for SQLite only; it is null for Postgres
     assert not any(k.startswith("x-imm-") for k in ev["request"]["headers"])
     assert ev["request"]["headers"]["x-custom"] == "v"
     assert not any(k.lower().startswith("x-imm-") and k.lower() not in (wire.H_VERDICT, wire.H_EVENTS)
@@ -182,7 +190,7 @@ def test_evidence_signed_schema_valid_and_pushed_before_response(stack):
 
 
 def test_collector_down_does_not_break_response():
-    s = Stack(tag="cd" + os.urandom(2).hex(), collector=False, collector_url="http://127.0.0.1:9").up()
+    s = node_stack(tag="cd" + os.urandom(2).hex(), collector=False, collector_url="http://127.0.0.1:9")
     try:
         t = time.time()
         r = get(s, "/search", {"q": "cable'--"})
@@ -266,7 +274,7 @@ def test_c_owner_oracle_via_identity_command(cstack):
 def test_launch_mode_without_capabilities(tmp_path):
     from sidecar.tests.dockerenv import ip_of, sh, wait_until
     tag = os.urandom(2).hex()
-    net, name = f"p4-lnet-{tag}", f"p4-launch-{tag}"
+    net, name = f"sctest-lnet-{tag}", f"sctest-launch-{tag}"
     cfg = {"listen_port": 8000, "app_port": 3000, "mode": "launch",
            "command": ["python3", "/opt/immune/sidecar/examples/pyhttp/app.py"],
            "allowed_file_roots": ["/opt/immune/sidecar/examples/pyhttp/static"],

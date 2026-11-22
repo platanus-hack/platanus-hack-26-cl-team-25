@@ -4,7 +4,9 @@
     rep = shadowdata.build(cfg)                       # cfg: immune.config.Config (or a project dir)
     rep = shadowdata.build_db(prod_db, columns, out_dir, seed=1)   # lower level, no config
 
-Reads the production database **read-only** and writes, under ``out_dir``:
+Reads the production database read-only by default and writes, under ``out_dir``, the files below. The one
+exception is opt-in: with ``data.insert_canaries: true`` the canary rows are also INSERTed into the production
+database (``insert_canaries``), so that guessing their ids on prod hits a canary.
 
     shadow/seed.db        same schema, same ids, same foreign keys; private values synthetic and
                           carrying the owner's marker (MK + 10 [A-Z0-9]); secrets random with the
@@ -217,8 +219,7 @@ def validate_columns(cols: dict, schema: dict) -> list[str]:
                             % (name, c))
         o = spec.get("owner")
         if o is None:
-            if spec.get("private") and isinstance(ut, str) and name != ut:
-                pass  # private without owner: allowed (no marker possible), reported as a warning
+            pass  # private without owner: allowed (no marker possible), reported as a warning
         elif isinstance(o, str):
             if o in (spec.get("private") or []) or o in (spec.get("secret") or []):
                 errs.append("tables.%s.owner: the owner column %r cannot be private/secret" % (name, o))
@@ -454,7 +455,7 @@ def private_value(col: str, value, mk: str | None, rng: random.Random):
         kind = "text"
     if kind == "email":
         local = "%s.%s" % (first.lower(), m or "x%d" % rng.randrange(10 ** 6))
-        return "%s%s@shadow.example" % (local, "" if m else "")
+        return "%s@shadow.example" % local
     if kind == "phone":
         return "+00 %d %04d %04d%s" % (rng.randrange(1, 9), rng.randrange(10000), rng.randrange(10000),
                                         (" x" + m) if m else "")
@@ -985,11 +986,11 @@ def build(cfg=None, *, seed: int = 1, hash_password="profile", **kw) -> dict:
 
 def profile_hasher(cfg):
     """callable(list[str]) -> list[str] using <profile>.hash_password in a clean subprocess, or None."""
-    from immune.initsteps import sandbox
-    if not sandbox.profile_has(cfg, "hash_password"):
+    from immune.initsteps import hostrun
+    if not hostrun.profile_has(cfg, "hash_password"):
         return None
 
     def run(passwords):
-        out = sandbox.call_profile(cfg, "hash_password", passwords)
+        out = hostrun.call_profile(cfg, "hash_password", passwords)
         return out
     return run

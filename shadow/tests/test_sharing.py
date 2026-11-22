@@ -59,9 +59,8 @@ def test_admin_and_anonymous_unchanged(h):
 def test_follows_the_clone_database(h):
     # membership added in L2 state counts on the next request (the oracle reads the clone's own db)
     import sqlite3
-    c = sqlite3.connect(h.engine.db_path) if hasattr(h, "engine") else None
-    if c is None:
-        pytest.skip("harness does not expose its engine")
+    assert owners(h.send("GET", "/teams/1/members", uid=5, mode="L2")) == [1, 2]      # not a member yet
+    c = sqlite3.connect(h.engine.db_path)
     c.execute("INSERT INTO memberships VALUES (5, 1)")
     c.commit()
     c.close()

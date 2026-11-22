@@ -1,4 +1,4 @@
-"""Child-process driver of shadow.harness.Harness (run through immune.initsteps.sandbox).
+"""Child-process driver of shadow.harness.Harness (run through immune.initsteps.hostrun).
 
 Job (stdin JSON):
     {"profile": "profile", "seed_db": "/abs/seed.db",
@@ -12,7 +12,6 @@ Result (last stdout line): {"ok", "results": [{name, status, verdict, oracles, e
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import re

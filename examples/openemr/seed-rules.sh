@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regla de POLITICA opcional para la demo OpenEMR (POST /rules del admin del gateway en :8281).
+# Regla de POLITICA opcional para la demo OpenEMR (POST /_admin/rules del admin del gateway en :8281).
 #
 # Las reglas viven en el estado del run (GW_STATE_PATH): correrlas despues de cada `immune up`.
 #
@@ -28,10 +28,10 @@ RT=examples/openemr/app/.immune/runtime/stack/containers.env
 TOK=$(grep -oE '^ADMIN_TOKEN=.*' "$RT" | cut -d= -f2)
 
 echo "--- regla de politica: fhir-patient-anon"
-curl -s -X POST http://127.0.0.1:8281/rules \
+curl -s -X POST http://127.0.0.1:8281/_admin/rules \
   -H "x-admin-token: $TOK" -H 'Content-Type: application/json' \
   -d '{"id":"fhir-patient-anon","method":"GET","route":"/apis/default/fhir/Patient","scope":"all","identity":"untrusted"}'
 echo
 echo "--- reglas activas ahora:"
-curl -s http://127.0.0.1:8281/rules -H "x-admin-token: $TOK"
+curl -s http://127.0.0.1:8281/_admin/rules -H "x-admin-token: $TOK"
 echo

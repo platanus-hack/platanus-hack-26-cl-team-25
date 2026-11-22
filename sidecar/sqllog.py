@@ -1,4 +1,4 @@
-"""SQL statements from the shadow database's own log, and the structure rule (docs/plan-producto.md §6b).
+"""SQL statements from the shadow database's own log, and the structure rule (sidecar/README.md).
 
 Source. The Postgres proxy (pgproxy.py) is one way to see the statements; this is the other, for when the app
 cannot be pointed at a proxy or the database is MySQL: the shadow database is ours, so it logs every statement

@@ -1,0 +1,239 @@
+{
+ "date": "2026-11-22",
+ "host": "ARM64, 4 núcleos, compartida",
+ "method": "deploy/record_demo.sh: immune reset; sim.legit --rate 3; sim.attacker --interval 1.5 --until-closed 2 (--fresh-every 3); python -m immune.metrics --json al terminar",
+ "attacker": {
+  "rounds": 56,
+  "attempts_with_real_data": 0,
+  "log": "docs/demo/corrida-2026-11-22-atacante.log"
+ },
+ "legit_denied_by_gateway": {
+  "seeded_customer_requests_recorded": 4551,
+  "denied": 82,
+  "by_cause": {
+   "rule-inc-0005 (IDOR /api/orders/{order_id}), clone verdict inconclusive": 38,
+   "rule-inc-0006 (IDOR /api/orders/{order_id}/invoice), clone verdict inconclusive": 36,
+   "no free clone, grammar:json.note": 7,
+   "no free clone, rule-inc-0006": 1
+  }
+ },
+ "legit_generator_violations": 31,
+ "metrics": {
+  "incidents": [
+   {
+    "incident": "inc-0001",
+    "class": "sqli",
+    "route": "/api/products",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "q",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 0.03949141502380371,
+    "to_rule": 4.336807727813721,
+    "to_diff": 13.323183059692383,
+    "to_merged": 27.842693567276,
+    "to_prod": 30.395078420639038,
+    "to_verified": 63.37171244621277,
+    "identified_to_prod_wall": 30.434569835662842
+   },
+   {
+    "incident": "inc-0002",
+    "class": "sqli",
+    "route": "/api/login",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "POST",
+    "param": "email",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 81.81337666511536,
+    "to_rule": 5.596253871917725,
+    "to_diff": 14.979896783828735,
+    "to_merged": 37.435792207717896,
+    "to_prod": 39.989030838012695,
+    "to_verified": 78.51322555541992,
+    "identified_to_prod_wall": 121.80240750312805
+   },
+   {
+    "incident": "inc-0003",
+    "class": "traversal",
+    "route": "/api/files/download",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "name",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 182.3536138534546,
+    "to_rule": 2.59978985786438,
+    "to_diff": 11.515393495559692,
+    "to_merged": 42.496373653411865,
+    "to_prod": 45.170326948165894,
+    "to_verified": 78.01465058326721,
+    "identified_to_prod_wall": 227.52394080162048
+   },
+   {
+    "incident": "inc-0004",
+    "class": "traversal",
+    "route": "/api/products/{product_id}/image",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "file",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 275.8390657901764,
+    "to_rule": 2.4918107986450195,
+    "to_diff": 11.083564519882202,
+    "to_merged": 54.63990545272827,
+    "to_prod": 61.82510042190552,
+    "to_verified": 96.90436744689941,
+    "identified_to_prod_wall": 337.6641662120819
+   },
+   {
+    "incident": "inc-0005",
+    "class": "idor",
+    "route": "/api/orders/{order_id}",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "order_id",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 385.56224822998047,
+    "to_rule": 2.3897554874420166,
+    "to_diff": 11.750797271728516,
+    "to_merged": 38.93138241767883,
+    "to_prod": 42.81278920173645,
+    "to_verified": 72.4976155757904,
+    "identified_to_prod_wall": 428.3750374317169
+   },
+   {
+    "incident": "inc-0006",
+    "class": "idor",
+    "route": "/api/orders/{order_id}/invoice",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "order_id",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 464.4753179550171,
+    "to_rule": 5.938309669494629,
+    "to_diff": 15.29756498336792,
+    "to_merged": 38.238388776779175,
+    "to_prod": 45.475379943847656,
+    "to_verified": 80.46775507926941,
+    "identified_to_prod_wall": 509.95069789886475
+   },
+   {
+    "incident": "inc-0007",
+    "class": "idor",
+    "route": "/api/users/{user_id}/profile",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "user_id",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 552.2601418495178,
+    "to_rule": 7.027579069137573,
+    "to_diff": 18.07031512260437,
+    "to_merged": 60.25863742828369,
+    "to_prod": 64.59815216064453,
+    "to_verified": 100.39127779006958,
+    "identified_to_prod_wall": 616.8582940101624
+   }
+  ],
+  "summary": {
+   "patched": 7,
+   "not_patched": 0,
+   "queue": {
+    "n": 7,
+    "median": 275.8390657901764,
+    "min": 0.03949141502380371,
+    "max": 552.2601418495178,
+    "mean": 277.47760796546936
+   },
+   "to_rule": {
+    "n": 7,
+    "median": 4.336807727813721,
+    "min": 2.3897554874420166,
+    "max": 7.027579069137573,
+    "mean": 4.340043783187866
+   },
+   "to_diff": {
+    "n": 7,
+    "median": 13.323183059692383,
+    "min": 11.083564519882202,
+    "max": 18.07031512260437,
+    "mean": 13.717245033809117
+   },
+   "to_merged": {
+    "n": 7,
+    "median": 38.93138241767883,
+    "min": 27.842693567276,
+    "max": 60.25863742828369,
+    "mean": 42.83473907198225
+   },
+   "to_prod": {
+    "n": 7,
+    "median": 45.170326948165894,
+    "min": 30.395078420639038,
+    "max": 64.59815216064453,
+    "mean": 47.18083684785025
+   },
+   "to_verified": {
+    "n": 7,
+    "median": 78.51322555541992,
+    "min": 63.37171244621277,
+    "max": 100.39127779006958,
+    "mean": 81.45151492527553
+   }
+  },
+  "detection": {
+   "requests": 6662,
+   "detonated": 966,
+   "detonated_by_verdict": {
+    "clean": 301,
+    "oracle": 208,
+    "inconclusive": 457
+   },
+   "clean_share": 0.312,
+   "no_clone": 71,
+   "aftercheck_oracle": 0,
+   "incidents_by_origin": {
+    "live": 7
+   },
+   "audits": {
+    "n": 7,
+    "checked": 34,
+    "findings": 0,
+    "seconds": 94.2
+   }
+  }
+ }
+}

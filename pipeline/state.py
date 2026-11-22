@@ -53,9 +53,3 @@ class State:
 
     def incident(self, iid: str) -> dict:
         return self.data["incidents"][iid]
-
-    def update(self, iid: str, **kw) -> dict:
-        with self.lock:
-            self.data["incidents"][iid].update(kw)
-            self.save()
-            return self.data["incidents"][iid]

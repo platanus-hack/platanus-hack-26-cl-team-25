@@ -12,7 +12,7 @@ from pipeline import audit, openapi, properties, reqs
 from pipeline.bus import AUDIT_DONE, AUDIT_FINDING, AUDIT_STARTED
 from pipeline.corpus import Corpus
 
-from .test_orchestrator import ScriptedValidator, env, make  # noqa: F401  (env is a fixture)
+from .test_orchestrator import ScriptedValidator, make
 
 MANIFEST = {"seed_max_uid": 60, "legit_users": [{"id": 2, "role": "user"}, {"id": 3, "role": "user"}],
             "admin": {"id": 1}, "canaries": {"order_id": [12, 31], "user_id": [7, 19]},
@@ -155,7 +155,7 @@ def _audit_events(env_):
     return [e for e in env_["bus"].events if e["type"].startswith("audit.")]
 
 
-def test_audit_after_patch_opens_audit_incidents(env, events):  # noqa: F811
+def test_audit_after_patch_opens_audit_incidents(env, events):
     v = FakeJudge({("POST", "/api/login", "email"): "sql", ("GET", "/api/products", "q"): "sql"})
     p = make(env, validator=v, audit=True)
     a = p.enqueue(events["sqli"])                    # live: GET /api/products q
@@ -174,7 +174,11 @@ def test_audit_after_patch_opens_audit_incidents(env, events):  # noqa: F811
     assert inc["origin"] == "audit" and inc["parent"] == a and p.state.data["queue"] == [new]
     # the audit incident goes through the normal flow, its incident.opened says where it came from
     assert p.step() == new and p.state.incident(new)["status"] == "closed"
-    assert p.state.incident(new)["outcome"] in ("patched", "rule_only")   # the stub's sqli fix targets products.py
+    # the stub's sqli fix already patched auth.py together with products.py: it has nothing left to propose
+    # for the login route, so the audit incident stays contained by its rule and is marked for a retry
+    closed = p.state.incident(new)
+    assert (closed["outcome"], closed["outcome_detail"]) == ("rule_only", "transient"), closed["reason"]
+    assert closed["rule"]["id"] in env["gw"].rules
     opened = [e["data"] for e in env["bus"].events if e["type"] == "incident.opened"]
     assert opened[0]["origin"] == "live" and "parent" not in opened[0]
     assert opened[1]["origin"] == "audit" and opened[1]["parent"] == a
@@ -187,7 +191,7 @@ def test_audit_after_patch_opens_audit_incidents(env, events):  # noqa: F811
     assert p.state.data["queue"] == []
 
 
-def test_audit_dedupes_against_known_incidents(env, events):  # noqa: F811
+def test_audit_dedupes_against_known_incidents(env, events):
     v = FakeJudge({("GET", "/api/orders/{order_id}/invoice", "order_id"): "owner",
                    ("GET", "/api/users/{user_id}/profile", "user_id"): "owner"})
     p = make(env, validator=v, audit=True)
@@ -197,8 +201,8 @@ def test_audit_dedupes_against_known_incidents(env, events):  # noqa: F811
     prof["data"]["request"]["path"] = "/api/users/7/profile"
     b = p.enqueue(prof)
     assert b is not None
-    p.step()
-    p.step()                                         # audit
+    assert p.step() == a
+    assert p.step() == a                             # audit
     finds = [e["data"] for e in _audit_events(env) if e["type"] == AUDIT_FINDING]
     assert [f["route"] for f in finds] == ["/api/orders/{order_id}/invoice"]
     started = [e["data"] for e in _audit_events(env) if e["type"] == AUDIT_STARTED][0]
@@ -207,7 +211,7 @@ def test_audit_dedupes_against_known_incidents(env, events):  # noqa: F811
     assert len(keys) == len(set(keys)) == 3
 
 
-def test_one_audit_per_class_per_release_and_pause(env, events):  # noqa: F811
+def test_one_audit_per_class_per_release_and_pause(env, events):
     v = FakeJudge({})
     p = make(env, validator=v, audit=True)
     a = p.enqueue(events["sqli"])
@@ -225,7 +229,7 @@ def test_one_audit_per_class_per_release_and_pause(env, events):  # noqa: F811
     assert len(v.jobs) == jobs and "already audited on release" in p.state.incident(a)["log"][-1]
 
 
-def test_audit_disabled_or_not_reproducible_does_not_schedule(env, events):  # noqa: F811
+def test_audit_disabled_or_not_reproducible_does_not_schedule(env, events):
     p = make(env, validator=FakeJudge(reproducible=False), audit=True)
     a = p.enqueue(events["sqli"])
     p.step()
@@ -253,7 +257,7 @@ def test_corpus_dedupe_bound_and_values_only(tmp_path):
     assert Corpus(str(tmp_path / "corpus")).limit == 500
 
 
-def test_corpus_filled_by_the_flow_and_used_by_reproduce(env, events):  # noqa: F811
+def test_corpus_filled_by_the_flow_and_used_by_reproduce(env, events):
     seen = {}
 
     class V(FakeJudge):
@@ -287,7 +291,7 @@ def test_corpus_filled_by_the_flow_and_used_by_reproduce(env, events):  # noqa: 
     assert got and all(k == v for k, v in got.items()) and "zz' OR 1=1 --" in got
 
 
-def test_audit_origin_reaudits_only_unaudited_candidates(env):  # noqa: F811
+def test_audit_origin_reaudits_only_unaudited_candidates(env):
     p = make(env, validator=FakeJudge(), audit=True)
     all_ = audit.candidates(p.spec, "sqli", MANIFEST)
     p.state.data["audits"] = {"sqli": {"releases": {"r1": {"by": "inc-0001"}},

@@ -15,16 +15,15 @@ results have the same shape as `pipeline/runner_entry.py`, so `gates.py`, `prope
 `verify.py` work unchanged. `tests` runs `tests.command` in the app image with DATABASE_URL pointing
 at a fresh copy of the seed (database `tests`).
 
-`GenericPolicy` replaces the Python-AST policy gate for non-Python sources (see `check_generic`).
+`check_generic` (used by `JudgeValidator.gate_policy`) replaces the Python-AST policy gate for non-Python
+sources.
 """
 from __future__ import annotations
 
 import base64
-import hashlib
 import itertools
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -38,6 +37,7 @@ from immune_contracts import wire
 
 from . import diffs, policy
 from .gates import Validator
+from .jobshape import body_info as _body_info, file_candidates, norm_body as _norm_body, short as _short
 from .runner import RunnerError
 
 log = logging.getLogger("pipeline.generic")
@@ -118,8 +118,12 @@ class Triple:
             json.dump(sidecar_config(f, self.db, self.su_pw, prof), fh)
         os.chmod(cpath, 0o644)
         self.cpath = cpath
-        mounts = ["-v", "%s:/opt/immune:ro" % self.r.home, "-v", "%s:/cfg/sidecar.json:ro" % cpath,
-                  "-v", "%s:/markers/markers.json:ro" % proj.markers_path]
+        mounts = ["-v", "%s:/opt/immune:ro" % self.r.home, "-v", "%s:/cfg/sidecar.json:ro" % cpath]
+        # bind the markers only when the file exists: docker would create a directory in its place and the
+        # observer refuses to start on an unreadable markers source
+        has_markers = os.path.isfile(proj.markers_path)
+        if has_markers:
+            mounts += ["-v", "%s:/markers/markers.json:ro" % proj.markers_path]
         for d in (os.path.join(self.r.home, "runtime"), os.path.join(self.r.home, ".git")):
             if os.path.isdir(d):
                 mounts += ["--mount", "type=tmpfs,destination=/opt/immune/%s" % os.path.relpath(d, self.r.home)]
@@ -133,7 +137,7 @@ class Triple:
                 *self.labels(), *self.common(), "--cap-add", "SYS_PTRACE", "--memory", "256m",
                 "--tmpfs", "/tmp:rw,mode=1777", *mounts, "-e", "PYTHONPATH=/opt/immune", "-e", "PYTHONDONTWRITEBYTECODE=1",
                 "-e", "SIDECAR_JUDGE=1", "-e", "CLONE_ID=judge", "-e", "RELEASE=" + os.path.basename(self.release_dir),
-                "-e", "MARKERS_PATH=/markers/markers.json",
+                *(["-e", "MARKERS_PATH=/markers/markers.json"] if has_markers else []),
                 SIDECAR_IMAGE, "python", "-m", "sidecar", "--config", "/cfg/sidecar.json")
         ip = _ip(self.app, self.net)
         self.url = "http://%s:8000" % ip
@@ -227,39 +231,9 @@ class Triple:
         return "postgres://app:%s@%s:5432/%s" % (self.app_pw, self.db, name)
 
 
-def _body_info(body: bytes) -> dict:
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        text = body.decode("latin-1")
-    return {"sha": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b""), "head": text[:300]}
-
-
-def _norm_body(body: bytes, normalize=None):
-    """A replayed body as compared by the legit gate. `normalize` (legit.normalize of the project config):
-    regexes of per-session values (CSRF tokens, timestamps) replaced before comparing."""
-    if normalize:
-        text = (body or b"").decode("utf-8", "replace")
-        for rx in normalize:
-            try:
-                text = re.sub(rx, "<normalized>", text)
-            except re.error:
-                continue
-        body = text.encode("utf-8")
-    try:
-        return json.loads(body)
-    except (ValueError, UnicodeDecodeError):
-        return {"sha256": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b"")}
-
-
 def legit_normalize(project) -> list:
     raw = ((getattr(project, "raw", None) or {}).get("legit") or {}).get("normalize") or []
     return [str(x) for x in raw if isinstance(x, str)]
-
-
-def _short(v, n=400):
-    s = v if isinstance(v, str) else json.dumps(v, default=str)
-    return s if len(s) <= n else s[:n] + "..."
 
 
 class JudgeRunner:
@@ -351,27 +325,8 @@ class JudgeRunner:
 
     def expand(self, release_dir: str, spec: dict) -> list:
         """Every file under the allowed roots (read from the release on the host), by every relative suffix."""
-        from . import reqs as R
-        out, seen = [], set()
-        for root in self.roots():
-            hroot = self.facts.host_path(release_dir, root)
-            if not hroot or not os.path.isdir(hroot):
-                continue
-            for d, _dirs, files in os.walk(hroot):
-                for fn in sorted(files):
-                    full = os.path.join(d, fn)
-                    rel = os.path.relpath(full, hroot).split(os.sep)
-                    with open(full, "rb") as fh:
-                        sha = hashlib.sha256(fh.read()).hexdigest()
-                    for i in range(len(rel)):
-                        val = "/".join(rel[i:])
-                        if val in seen:
-                            continue
-                        seen.add(val)
-                        rq = R.set_value(spec["base"], spec["param"], val, spec.get("template"))
-                        rq.update(name="cand:" + val, expect_sha=sha)
-                        out.append(rq)
-        return out
+        dirs = [self.facts.host_path(release_dir, root) for root in self.roots()]
+        return file_candidates([d for d in dirs if d and os.path.isdir(d)], spec)
 
     def job_plain(self, tr: Triple, job: dict) -> dict:
         requests = list(job.get("requests") or [])
@@ -449,7 +404,8 @@ IMPORT_RES = [re.compile(r"""\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)"""),
               # php: include/require with or without parentheses, constant prefixes (__DIR__ . "/x.php")
               re.compile(r"""\b(?:include|include_once|require|require_once)\b\s*\(?\s*(?:[A-Za-z_\\]+\s*\.\s*)?['"]([^'"]+)['"]""")]
 DANGER_RE = re.compile(r"\b(child_process|execSync|execFile|spawnSync|spawn|fork|eval|Function|vm\.run\w*|"
-                       r"process\.env|process\.binding|dlopen|os\.(?:Getenv|Setenv|LookupEnv|exec\w*|system)|exec\.Command|"
+                       r"process\.env|process\.binding|process\.mainModule|globalThis|Reflect|constructor\.constructor|"
+                       r"dlopen|os\.(?:Getenv|Setenv|LookupEnv|exec\w*|system)|exec\.Command|"
                        r"getenv|setenv|system|popen|Runtime\.getRuntime|ProcessBuilder|net\.(?:connect|createConnection|Socket)|"
                        r"dgram|http\.request|https\.request|fetch|XMLHttpRequest|WebSocket|socket|"
                        # php
@@ -457,6 +413,15 @@ DANGER_RE = re.compile(r"\b(child_process|execSync|execFile|spawnSync|spawn|fork
                        r"curl_multi_exec|fsockopen|pfsockopen|stream_socket_client|putenv|apache_setenv|"
                        r"call_user_func|call_user_func_array|preg_replace_callback_array|extract|parse_str|"
                        r"move_uploaded_file|\$_ENV|\$_SERVER\s*\[\s*['\"]PHP_AUTH)\b")
+# computed member access that reaches the same things without naming them as an identifier:
+# process['env'], global["pro" + "cess"], obj['constructor'], x[`execSync`]
+_MEMBERS = (r"env|binding|mainModule|constructor|child_process|exec\w*|spawn\w*|fork|eval|Function|getenv|setenv|"
+            r"system|popen|require|dlopen|process|global|globalThis")
+BRACKET_RE = re.compile(r"\b(?:process|global|globalThis|module|require|Reflect|os|window|self)\s*(?:\?\.)?\s*\[|"
+                        r"\[\s*(['\"`])(?:%s)\1\s*\]" % _MEMBERS)
+# what counts inside a comment: only call- or access-shaped uses (prose such as "fetch the row" does not)
+DANGER_CALL_RE = re.compile(r"(?:%s)\s*[(\[`]|\b(?:process|os|exec|vm|net|http|https|child_process)\.\w+|"
+                            r"\brequire\s*\(|\bimport\s*\(" % DANGER_RE.pattern)
 AUTH_RE = re.compile(r"\b(401|403)\b|requireUser|requireAuth|authenticate|authorize|isAdmin|currentUser|"
                      r"Unauthorized|Forbidden|"
                      # php / OpenEMR-style ACL and CSRF checks
@@ -464,11 +429,54 @@ AUTH_RE = re.compile(r"\b(401|403)\b|requireUser|requireAuth|authenticate|author
                      r"verifyCsrfToken|checkCsrfInput|csrfNotVerified|authorizeUser|AccessDeniedHelper|"
                      r"deny_and_exit|denyAndExit")
 STRING_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`""")
-COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/|#[^\n]*", re.S)
+HASH_COMMENT_EXT = {".py", ".rb", ".pl", ".php", ".ex", ".exs"}
+DASH_COMMENT_EXT = {".lua", ".sql"}
+NO_SLASH_COMMENT_EXT = {".py", ".rb", ".pl", ".ex", ".exs", ".lua", ".sql"}
 
 
-def _strip_comments(src: str) -> str:
-    return COMMENT_RE.sub(" ", src)
+def lex(src: str, ext: str = ".js") -> tuple:
+    """-> (code, comments): the source with comments removed (string literals kept), and the removed text.
+
+    One pass that knows string literals (', ", ` with backslash escapes), so a comment marker inside a
+    string (`var h = '#'`, `"http://x"`) does not start a comment. Which markers exist depends on the
+    language: `#` only where it is one (not in JavaScript, Go, C, Java ...), `//` and `/* */` in the C family,
+    `--` in SQL and Lua. There is still no parser: a `//` inside a regular-expression literal is taken for a
+    comment, which is why `check_generic` also scans the removed text for call-shaped dangerous uses."""
+    hash_c = ext in HASH_COMMENT_EXT
+    slash_c = ext not in NO_SLASH_COMMENT_EXT
+    dash_c = ext in DASH_COMMENT_EXT
+    code, comments = [], []
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        two = src[i:i + 2]
+        if ch in "'\"`":
+            j = i + 1
+            while j < n and src[j] != ch:
+                if src[j] == "\\":
+                    j += 1
+                elif src[j] == "\n" and ch != "`":
+                    break                           # unterminated: the literal ends with the line
+                j += 1
+            code.append(src[i:j + 1])
+            i = j + 1
+        elif (slash_c and two == "//" and src[i - 1:i] != "\\") or (hash_c and ch == "#") or (dash_c and two == "--") \
+                or (i == 0 and two == "#!"):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            comments.append(src[i:j])
+            code.append(" ")
+            i = j
+        elif slash_c and two == "/*":
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            comments.append(src[i:j])
+            code.append(" ")
+            i = j
+        else:
+            code.append(ch)
+            i += 1
+    return "".join(code), "\n".join(comments)
 
 
 def _imports(src: str) -> set:
@@ -492,12 +500,6 @@ def _entropy_tokens(src: str) -> set:
     return out
 
 
-GENERIC_MISSING = ("no parser for this language: the checks are lexical (regex over comment-stripped source), so "
-                   "they do not cover: new route handlers, new reads of request data (params/headers/cookies), "
-                   "comparisons against new literals (value special-casing), or syntax errors; a removed auth check "
-                   "is only caught when the count of 401/403/auth-helper tokens drops")
-
-
 def check_generic(diff: str, base_dir: str, patched_dir: str, max_lines: int = 120, max_files: int = 4, dirs=None):
     """Policy gate for any language. -> (ok, detail, violations).
 
@@ -505,8 +507,14 @@ def check_generic(diff: str, base_dir: str, patched_dir: str, max_lines: int = 1
     deleted, renamed, binary, mode or symlink changes), size bound (lines, files), no test edits, no
     dependency / build files (lock files, manifests, vendored dirs, Dockerfile), high-entropy string literals.
     `.py` files additionally get every AST check of `pipeline.policy.check`. Other source files get lexical
-    checks only: new imports/requires/includes, new process/network/env/dynamic-code tokens, fewer 401/403/
-    auth-helper tokens. See GENERIC_MISSING for what does not exist for non-Python code.
+    checks only (comments removed by `lex`, which respects string literals): new imports/requires/includes,
+    new process/network/env/dynamic-code tokens, new computed member access to them (`process['env']`), fewer
+    401/403/auth-helper tokens.
+
+    Not covered for non-Python code (there is no parser): new route handlers, new reads of request data
+    (params/headers/cookies), comparisons against new literals (value special-casing), syntax errors, names
+    built at run time (`'en' + 'v'` outside a bracket on a known object); a removed auth check is only caught
+    when the count of 401/403/auth-helper tokens drops.
     """
     dirs = policy.source_dirs(dirs)
     area = ", ".join(d + "/" for d in dirs) or "(no app.source_dirs)"
@@ -552,13 +560,14 @@ def check_generic(diff: str, base_dir: str, patched_dir: str, max_lines: int = 1
     for p in sorted(set(other)):
         try:
             with open(os.path.join(base_dir, p), encoding="utf-8") as fh:
-                before = _strip_comments(fh.read())
+                before_raw = fh.read()
             with open(os.path.join(patched_dir, p), encoding="utf-8") as fh:
                 after_raw = fh.read()
         except (OSError, UnicodeDecodeError) as e:
             v.append("%s: unreadable before or after the patch (%s)" % (p, e))
             continue
-        after = _strip_comments(after_raw)
+        ext = os.path.splitext(p)[1].lower()
+        (before, before_c), (after, after_c) = lex(before_raw, ext), lex(after_raw, ext)
         new_imp = _imports(after) - _imports(before)
         if new_imp:
             v.append("%s: new import(s)/require(s) %s" % (p, ", ".join(sorted(new_imp))))
@@ -566,10 +575,21 @@ def check_generic(diff: str, base_dir: str, patched_dir: str, max_lines: int = 1
         grew = sorted(k for k, n in da.items() if n > db.get(k, 0))
         if grew:
             v.append("%s: new use of %s (process, network, environment or dynamic code)" % (p, ", ".join(grew)))
+        bb, ba = _count(BRACKET_RE, before), _count(BRACKET_RE, after)
+        grew = sorted(k for k, n in ba.items() if n > bb.get(k, 0))
+        if grew:
+            v.append("%s: new computed member access %s (reaches process, environment or dynamic code by name)"
+                     % (p, ", ".join(grew)))
+        cb, ca = _count(DANGER_CALL_RE, before_c), _count(DANGER_CALL_RE, after_c)
+        grew = sorted(k for k, n in ca.items() if n > cb.get(k, 0))
+        if grew or _imports(after_c) - _imports(before_c):
+            v.append("%s: a comment contains code-shaped %s (without a parser a comment cannot be told from code "
+                     "for certain; keep such text out of comments)"
+                     % (p, ", ".join(grew + sorted(_imports(after_c) - _imports(before_c)))))
         ab, aa = sum(_count(AUTH_RE, before).values()), sum(_count(AUTH_RE, after).values())
         if aa < ab:
             v.append("%s: fewer authentication/authorisation checks (%d -> %d 401/403/auth-helper tokens)" % (p, ab, aa))
-        ent = _entropy_tokens(after_raw) - _entropy_tokens(open(os.path.join(base_dir, p), encoding="utf-8").read())
+        ent = _entropy_tokens(after_raw) - _entropy_tokens(before_raw)
         if ent:
             v.append("%s: high-entropy string constant %r" % (p, sorted(ent)[0][:12] + "..."))
     if v:

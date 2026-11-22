@@ -1,4 +1,7 @@
-"""Fire-and-forget event publisher. Never blocks a request; drops on failure or overflow."""
+"""Fire-and-forget event publisher. Never blocks a request.
+
+`request.*` events are telemetry: dropped on failure or overflow. Every other event is kept and retried for
+RETRY_S (at most KEEP_MAX of them) before it is dropped; `dropped` counts both."""
 from __future__ import annotations
 
 import asyncio

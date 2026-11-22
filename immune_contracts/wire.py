@@ -1,8 +1,9 @@
 """Internal wire protocol between gateway and shadow clones.
 
-Only the gateway can reach a clone (internal Docker network). The gateway MUST
-strip every header starting with INTERNAL_PREFIX from client requests and from
-responses sent to clients.
+Only the gateway can reach a clone (internal Docker network). The gateway strips
+every header starting with INTERNAL_PREFIX from client requests and from responses
+sent to clients (gateway/core.py: _read, _clean_resp_headers).
+Reference: contracts/README.md section 5.
 """
 from __future__ import annotations
 import hashlib, hmac, json
@@ -30,7 +31,6 @@ ORACLE_FILE = "file"
 ORACLE_PROC = "proc"
 ORACLE_NET = "net"
 ORACLE_OWNER = "owner"
-ORACLES = (ORACLE_SQL, ORACLE_FILE, ORACLE_PROC, ORACLE_NET, ORACLE_OWNER)
 
 # Clone evidence push: POST http://<COLLECTOR_URL>/_clone/evidence  (JSON body, see contracts/schemas/evidence.schema.json)
 H_CLONE_ID = "x-imm-clone"

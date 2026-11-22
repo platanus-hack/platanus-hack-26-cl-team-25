@@ -1,7 +1,6 @@
 """MySQL / MariaDB wire-protocol tracker, dirty-table detection, client helpers and (docker) a live round trip
 through the proxy against the pinned MariaDB image."""
 import asyncio
-import os
 import shutil
 import socket
 import struct

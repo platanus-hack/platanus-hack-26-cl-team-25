@@ -18,20 +18,26 @@
   var PENDING_CARDS_MAX = 8;
   var ID_MAX = 120;
   var BODY_B64_MAX = 8000;
+  var SCRIPTED_RUN = 'demo';   // run id of dashboard/demo_events.py: invented events to develop this page without a stack
+  /* incident.closed outcomes this page knows. error: the pipeline failed before it could post a rule (it retries);
+     the incident is then shown by what is true of it, open or contained. */
+  var OUTCOMES = { patched: 1, rule_only: 1, not_reproducible: 1, error: 1 };
+  var FUXA_OUTCOMES = { rolled_back: 1, rejected: 1 };   // only the FUXA monitor closes with these (immune/fuxa_dashboard.py)
 
   function dict() { return Object.create(null); }   // event ids are data: never index a plain {} with them
 
   function newState() {
     return {
-      incidents: dict(), order: [], pendingOracles: [], rules: dict(),
+      run: null, scripted: false,
+      incidents: dict(), order: [], pendingOracles: [],
       audits: dict(), auditOrder: [],
-      attacks: dict(), attackOrder: [],
+      attacks: dict(), attackOrder: [], attackRun: null,
       prodAlerts: [],
       ticker: [], tickerByRid: dict(),
       counters: { prod: 0, detonated: 0, deny: 0, total: 0 },
       sessions: dict(), restrictions: dict(), pool: null, fuxa: null,
       upstream: null, switches: [], deploy: null, lastOpened: null,
-      archive: { seen: 0, open: 0, contained: 0, cured: 0, dismissed: 0, rolledBack: 0, audit: 0, prod: [] },
+      archive: { seen: 0, open: 0, contained: 0, cured: 0, dismissed: 0, rolledBack: 0, unknown: 0, audit: 0, prod: [] },
       lastSeq: 0, lastTs: 0, events: 0, ignored: 0
     };
   }
@@ -101,13 +107,14 @@
     return a === b || a.endsWith('/' + b) || b.endsWith('/' + a);
   }
 
-  function oracleMatchesSink(data, sink) {
+  /* anyLine: the same file is enough (the caller already matched route and method) */
+  function oracleMatchesSink(data, sink, anyLine) {
     if (!sink || !data || !Array.isArray(data.events)) return false;
     for (var i = 0; i < data.events.length; i++) {
       var stack = (data.events[i] && data.events[i].stack) || [];
       if (!Array.isArray(stack)) continue;
       for (var j = 0; j < stack.length; j++) {
-        if (stack[j] && sameFile(stack[j].file, sink.file) && stack[j].line === sink.line) return true;
+        if (stack[j] && sameFile(stack[j].file, sink.file) && (anyLine || stack[j].line === sink.line)) return true;
       }
     }
     return false;
@@ -135,20 +142,29 @@
     if (inc.route && typeof rq.path === 'string') {
       if (!routeMatches(inc.route, rq.path)) return 0;
       if (inc.method && typeof rq.method === 'string' && inc.method !== rq.method) return 0;
+      /* same route and method: the sink's line moves when a patch for another incident edits the same file (a
+         captive clone runs that later release), so the file is enough. Exact lines left these hits pending. */
+      return oracleMatchesSink(o.data, inc.sink, true) ? 1 : 0;
     }
     return oracleMatchesSink(o.data, inc.sink) ? 1 : 0;
   }
 
-  /* keep only what the page shows: an evidence object can carry a database snapshot */
+  /* the bus replaces what a reader without the token may not see with "[redacted...]" (dashboard/server.py) */
+  function isRedacted(x) { return typeof x === 'string' && x.indexOf('[redacted') === 0; }
+
+  /* keep only what the page shows: an evidence object can carry a database snapshot.
+     body_hidden: the marker the bus sent in place of the body (base64 never starts with "[") */
   function slimEvidence(d) {
     var rq = isObj(d.request) ? d.request : {};
     var evs = Array.isArray(d.events) ? d.events.slice(0, 3) : [];
     var b64 = typeof rq.body_b64 === 'string' ? rq.body_b64 : '';
+    var hidden = isRedacted(b64) ? b64.slice(0, 60) : null;
+    if (hidden) b64 = '';
     return {
       clone: str(d.clone), mode: str(d.mode), status: d.status == null ? null : str(d.status), verdict: str(d.verdict),
       uid: d.uid == null ? null : str(d.uid), role: str(d.role),
       request: { method: str(rq.method), path: str(rq.path), query: str(rq.query) || '',
-                 body_b64: b64.length > BODY_B64_MAX ? b64.slice(0, BODY_B64_MAX) : b64 },
+                 body_b64: b64.length > BODY_B64_MAX ? b64.slice(0, BODY_B64_MAX) : b64, body_hidden: hidden },
       events: evs.map(function (e) {
         e = isObj(e) ? e : {};
         var stack = Array.isArray(e.stack) ? e.stack.slice(0, 8).filter(isObj) : [];
@@ -209,6 +225,11 @@
     st.events++;
     if (typeof seq === 'number') st.lastSeq = seq;
     if (ts > st.lastTs) st.lastTs = ts;
+    /* the run the page is showing = the run of the last event that names one; scripted events mark the page for good */
+    if (sid(ev.run)) {
+      st.run = sid(ev.run);
+      if (st.run === SCRIPTED_RUN) st.scripted = true;
+    }
     id = sid(ev.incident) || sid(d.incident);
 
     switch (ev.type) {
@@ -287,7 +308,6 @@
         }
         break;
       case 'rule.active':
-        if (sid(d.id)) st.rules[sid(d.id)] = true;
         inc = findIncidentForRule(st, d, ev.incident, ts);
         if (inc) {
           inc.rule = { id: sid(d.id), ts: ts, method: str(d.method), route: str(d.route), scope: str(d.scope),
@@ -303,7 +323,6 @@
           inc = st.incidents[st.order[i]];
           if (inc.rule && inc.rule.id === sid(d.id)) { inc.ruleExpired = { ts: ts, reason: str(d.reason) }; touch(inc); }
         }
-        delete st.rules[sid(d.id)];
         break;
       case 'incident.opened':
         if (!id) break;
@@ -433,6 +452,7 @@
         break;
       case 'attack.attempt':
         var v = (str(d.vuln) || '?').slice(0, ID_MAX);
+        st.attackRun = st.run;
         if (!st.attacks[v]) {
           if (st.attackOrder.length >= ATTACK_KINDS_MAX) break;
           st.attacks[v] = []; st.attackOrder.push(v);
@@ -487,24 +507,6 @@
     return au;
   }
 
-  function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
-
-  /* one line about one class self-audit */
-  function auditText(au) {
-    var head = 'Auditoría de clase ' + (au.vuln_class || '?') + ' tras ' + au.incident + ': ';
-    var n = au.candidates == null ? '?' : au.candidates;
-    if (!au.done) return head + n + ' candidatos, en curso' + (au.found.length ? ' (' + plural(au.found.length, 'hallazgo') + ')' : '') + '...';
-    var f = au.done.findings != null ? au.done.findings : au.found.length;
-    return head + (au.done.checked == null ? '?' : au.done.checked) + ' de ' + n + ' candidatos revisados, ' + plural(f, 'hallazgo') +
-      (au.done.seconds != null ? ' en ' + au.done.seconds.toFixed(1) + ' s' : '');
-  }
-
-  /* the most recent class self-audit, or null */
-  function auditLine(st) {
-    if (!st.auditOrder.length) return null;
-    return auditText(st.audits[st.auditOrder[st.auditOrder.length - 1]]);
-  }
-
   function visible(inc) { return !!(inc.opened || inc.oracles.length || inc.origin === 'audit'); }
 
   function phpLocation(inc) {
@@ -533,13 +535,23 @@
     return entry;
   }
 
-  /* open | contained | cured | dismissed (closed as not reproducible) */
+  /* the outcome of an incident closed with one this page does not know (a newer pipeline), else null */
+  function unknownOutcome(inc) {
+    if (!inc.closed) return null;
+    var o = inc.closed.outcome;
+    if (typeof o === 'string' && (OUTCOMES[o] === 1 || (inc.fuxa && FUXA_OUTCOMES[o] === 1))) return null;
+    return o || '?';
+  }
+
+  /* open | contained | cured | dismissed (closed as not reproducible) | rolledBack (FUXA) | unknown (closed with an
+     outcome this page does not know: shown with that outcome as it came, never as contained or open) */
   function status(inc) {
     var outcome = inc.closed && inc.closed.outcome;
     if (outcome === 'patched' || (inc.verify && inc.verify.blocked) ||
         (!inc.verify && inc.merged && inc.deploy && inc.deploy.doneTs && inc.deploy.ok)) return 'cured';
     if (inc.fuxa && outcome === 'rolled_back') return 'rolledBack';
     if (outcome === 'not_reproducible') return 'dismissed';
+    if (unknownOutcome(inc) != null) return 'unknown';
     if (inc.rule && !inc.ruleExpired) return 'contained';
     return 'open';
   }
@@ -684,7 +696,7 @@
 
   function scoreboard(st) {
     var ar = st.archive;
-    var s = { seen: ar.seen, open: ar.open, contained: ar.contained, cured: ar.cured, dismissed: ar.dismissed, rolledBack: ar.rolledBack, audit: ar.audit };
+    var s = { seen: ar.seen, open: ar.open, contained: ar.contained, cured: ar.cured, dismissed: ar.dismissed, rolledBack: ar.rolledBack, unknown: ar.unknown, audit: ar.audit };
     s.pending = pendingAttacks(st).length; s.seen += s.pending; s.open += s.pending;
     for (var i = 0; i < st.order.length; i++) {
       var inc = st.incidents[st.order[i]];
@@ -718,6 +730,20 @@
     return live.concat(pendingAttacks(st), queued, closed).map(function (x) { return x.id; });
   }
 
+  /* The attack panel is fed only by attack.attempt events (sim/attacker.py, or the scripted demo_events.py):
+     it is drawn when the run on the page has at least one, never as an empty box (and never in the FUXA view). */
+  function showAttacks(st) { return !st.fuxa && st.attackOrder.length > 0 && st.attackRun === st.run; }
+
+  /* text next to the connection dot: scripted events are never presented as live */
+  function connLabel(st) { return st.scripted ? 'Conectado' : 'En vivo'; }
+
+  /* who wrote a patch attempt: only the two sources the pipeline defines are named; anything else is unknown */
+  function sourceLabel(source) {
+    if (source === 'llm') return 'Escrito por el LLM';
+    if (source === 'fallback') return 'Fuente: fallback';
+    return 'Fuente: desconocida';
+  }
+
   /* blocked | exec (ok but no real data) | leak (saw real data) */
   function attackKind(x) { return x.saw ? 'leak' : (x.ok ? 'exec' : 'blocked'); }
 
@@ -735,10 +761,11 @@
   function isGithubUrl(u) { return typeof u === 'string' && u.length < 300 && /^https:\/\/github\.com\/[A-Za-z0-9_.\/-]+(#[A-Za-z0-9_-]+)?$/.test(u); }
 
   /* what to print for a PR reference: github links as they are, a local PR file as "PR local #20"
-     (the url of a local PR is a path on the host and is not shown) */
+     (the url of a local PR is a path on the host and is not shown), a placeholder of the scripted demo as such */
   function prLabel(u) {
     if (typeof u !== 'string' || !u) return '';
     if (isGithubUrl(u)) return u;
+    if (u.indexOf('.invalid/') > 0) return 'PR de ejemplo (sin enlace)';
     var m = /#pr-(\d+)$/.exec(u) || /\/(\d+)\.json$/.exec(u);
     return m ? 'PR local #' + m[1] : 'PR local';
   }
@@ -748,7 +775,8 @@
     stages: stages, t0: t0, queueTime: queueTime, timeToRule: timeToRule, timeToDiff: timeToDiff, timeToMerged: timeToMerged,
     timeToProd: timeToProd, timeToVerified: timeToVerified, displayOrder: displayOrder, routeMatches: routeMatches,
     attackKind: attackKind, decodeB64: decodeB64, isGithubUrl: isGithubUrl, prLabel: prLabel, attemptStatus: attemptStatus,
-    auditLine: auditLine, auditText: auditText, visible: visible, pendingAttacks: pendingAttacks, phpLocation: phpLocation
+    visible: visible, pendingAttacks: pendingAttacks, phpLocation: phpLocation, SCRIPTED_RUN: SCRIPTED_RUN, connLabel: connLabel,
+    showAttacks: showAttacks, sourceLabel: sourceLabel, unknownOutcome: unknownOutcome, isRedacted: isRedacted
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ImmuneState = api;

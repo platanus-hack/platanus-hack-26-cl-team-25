@@ -1,14 +1,14 @@
-# Brief: explotar las cinco CVE de OpenEMR 8.2.0 en el lab de Inmune
+# Brief: explotar las cinco CVE de OpenEMR 8.2.0 en el lab de Immune
 
 Pegás esto tal cual al agente (Claude Code, subagente, etc.). El objetivo es doble: (1) demostrar que las
-cinco fallas son explotables contra la instancia local del lab, y (2) dejar evidencia de qué hizo Inmune con
+cinco fallas son explotables contra la instancia local del lab, y (2) dejar evidencia de qué hizo Immune con
 cada ataque. El agente no necesita saber nada del repo antes de leer esto.
 
 ## Contexto
 
-- El repo es **Inmune** (hackathon Platanus 26): un gateway que manda los requests sospechosos a una copia
+- El repo es **Immune** (hackathon Platanus 26): un gateway que manda los requests sospechosos a una copia
   sombra de la app, confirma el ataque con oráculos y lo contiene. Para el demo, la app objetivo es
-  **OpenEMR 8.2.0 sin modificar**, con la clínica sintética "Clínica Delta", protegido por Inmune.
+  **OpenEMR 8.2.0 sin modificar**, con la clínica sintética "Clínica Delta", protegido por Immune.
 - OpenEMR 8.2.0 trae las cinco CVE de serie (ninguna sembrada). El seed (`immune-runtime/seed-clinic.php`)
   enciende las superficies apagadas y crea las cuentas. Detalle por CVE: `docs/openemr.md`
   (sección "Las cinco CVE de 8.2.0 y qué las deja expuestas").
@@ -17,9 +17,9 @@ cada ataque. El agente no necesita saber nada del repo antes de leer esto.
 
 1. **Todo contra `http://127.0.0.1:8280` (el gateway).** Nada hacia internet, nada contra otras interfaces.
    Los callbacks/exfil van a un listener local (`python -m http.server 9999` en el host).
-2. **Pasás por el gateway aunque parezca más fácil directo**: si Inmune bloquea o detona en sombra, eso es
-   resultado, no error. No intentes evadir a Inmune ni desactivar reglas/oráculos.
-3. **No modifiques código** ni de OpenEMR ni de Inmune. No reinicies contenedores salvo para restaurar.
+2. **Pasás por el gateway aunque parezca más fácil directo**: si Immune bloquea o detona en sombra, eso es
+   resultado, no error. No intentes evadir a Immune ni desactivar reglas/oráculos.
+3. **No modifiques código** ni de OpenEMR ni de Immune. No reinicies contenedores salvo para restaurar.
 4. **RCE con comandos inofensivos** (`id`, `hostname`, `uname`) — nada destructivo, persistente ni que
    borre datos. Los datos son 100 % sintéticos, pero se restauran igual.
 5. **Restaurá el estado** que cada vector muta (cada sección dice cómo).
@@ -28,7 +28,7 @@ cada ataque. El agente no necesita saber nada del repo antes de leer esto.
 ## Entorno y accesos
 
 - Levantar (Linux/WSL2, Docker): `bin/immune up --project examples/openemr/app` → gateway `127.0.0.1:8280`,
-  dashboard de Inmune `127.0.0.1:8290`. Estado: `bin/immune status --project examples/openemr/app`.
+  dashboard de Immune `127.0.0.1:8290`. Estado: `bin/immune status --project examples/openemr/app`.
   Si el checkout tiene un `.venv` de Windows, usá `IMMUNE_VENV_DIR` con una ruta absoluta de Linux
   (ver `docs/openemr.md`).
 - **Login web** (staff): `POST /interface/main/main_screen.php?auth=login&site=default` con form
@@ -63,7 +63,7 @@ cuenta de cualquier paciente (CWE-639, corregido en 8.3.0).
    paciente y los ítems/notas de facturación de encuentros ajenos (compará los nombres entre ids).
 3. Opcional (impacto de escritura): del HTML del GET sacá los campos `form_*` y reenviá el POST con
    `form_save=1` cambiando la nota de facturación de otro encuentro; capturá antes/después y **restaurá**.
-4. Reportar: qué datos de qué pacientes viste con la sesión de recepcion, y el veredicto de Inmune
+4. Reportar: qué datos de qué pacientes viste con la sesión de recepcion, y el veredicto de Immune
    (puede cerrar `clean`: los oráculos de owner no cubren la tabla de facturación — decilo tal cual).
 
 ### 2) CVE-2026-67612 — XSS almacenado en plantillas del portal (`portal/import_template.php`)
@@ -163,8 +163,8 @@ Por CVE, en `exploit-report.md`:
 - **Pasos ejecutados** y requests clave (método, URL, headers, body — sin secrets completos).
 - **Evidencia**: status + extracto de la respuesta que pruebe el impacto (nombre ajeno, cookie recibida,
   `access_token`, Bundle FHIR, output del comando).
-- **Veredicto de Inmune**: lo que muestra el dashboard (`127.0.0.1:8290`) para los requests del vector:
-  `clean`, detonado en sombra, `oracle …` (con el archivo:línea de PHP), incidente/regla/parche. Si Inmune
+- **Veredicto de Immune**: lo que muestra el dashboard (`127.0.0.1:8290`) para los requests del vector:
+  `clean`, detonado en sombra, `oracle …` (con el archivo:línea de PHP), incidente/regla/parche. Si Immune
   bloqueó la explotación, ese es el resultado exitoso del producto — reportalo igual.
 - **Estado restaurado**: sí/no por vector (plantilla original, clientes OAuth2 revocados, tabla `categories`
   intacta).

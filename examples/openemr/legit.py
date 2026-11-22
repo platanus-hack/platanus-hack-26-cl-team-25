@@ -1,4 +1,4 @@
-"""Legitimate Clínica Delta staff through Inmune's gateway (the OpenEMR twin of `python -m sim.legit`).
+"""Legitimate Clínica Delta staff through Immune's gateway (the OpenEMR twin of `python -m sim.legit`).
 
     python examples/openemr/legit.py --base http://127.0.0.1:8280 [--duration 60] [--rate 2]
 

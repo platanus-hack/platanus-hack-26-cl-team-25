@@ -130,17 +130,20 @@
     var txt = (r.method || '?') + ' ' + (r.path || '?') + (r.query ? '?' + r.query : '');
     var body = S.decodeB64(r.body_b64);
     if (body) txt += '\n\n' + clip(body, 1500);
+    else if (r.body_hidden) txt += '\n\n(cuerpo no publicado: ' + r.body_hidden + ')';
     return txt;
   }
 
-  var STATUS_LABEL = { open: 'Abierta', contained: 'Contenida por regla', cured: 'Curada', dismissed: 'Descartada' };
+  var STATUS_LABEL = { open: 'Abierta', contained: 'Contenida por regla', cured: 'Curada', dismissed: 'Descartada' };   // unknown: statusLabel()
   var GATE_LABEL = { policy: 'Política', properties: 'Propiedades', poc: 'PoC', tests: 'Tests', legit: 'Tráfico legítimo' };
   var CLASS = {
     sqli: ['Inyección SQL', 'El texto del request terminaba dentro de una consulta a la base de datos.'],
     traversal: ['Lectura de archivos ajenos', 'Un nombre de archivo del request permitía salir de la carpeta prevista.'],
     idor: ['Datos de otro usuario', 'Cambiando un id en la URL, un usuario leía datos que no eran suyos.']
   };
+  function statusLabel(inc, status) { return status === 'unknown' ? 'Cerrado: ' + clip(S.unknownOutcome(inc), 60) : STATUS_LABEL[status]; }
   function storyOf(inc, status) {
+    if (status === 'unknown') return 'El pipeline lo cerró con un resultado que este panel no conoce: ' + clip(S.unknownOutcome(inc), 60) + '.';
     if (inc.fuxa) {
       var head = inc.fuxa.synthetic ? 'Evidencia simulada. ' : 'Un rol sin permiso alcanzó una operación administrativa. ';
       var outcome = inc.closed && inc.closed.outcome;
@@ -149,10 +152,13 @@
       if (outcome === 'rejected') return head + 'El candidato no pasó las validaciones.';
       if (inc.awaitingReview) return head + 'El candidato está validado y espera aprobación.';
       if (inc.rule && !inc.ruleExpired) return head + 'Una regla temporal contiene la operación mientras se valida el parche.';
-      return head + 'Inmune está validando el parche.';
+      return head + 'Immune está validando el parche.';
     }
     if (status === 'cured') return inc.verify && inc.verify.blocked ? 'Parchada y verificada en producción.' : 'Parchada.';
     if (status === 'dismissed') return 'Descartada: no se pudo reproducir.';
+    if (inc.closed && inc.closed.outcome === 'error') {
+      return 'El pipeline falló y cerró el incidente ' + (status === 'contained' ? 'con la regla del gateway activa.' : 'sin regla: el punto sigue abierto.') + ' Lo reintenta.';
+    }
     if (inc.closed && inc.closed.outcome === 'rule_only') return 'El incidente cerró con la regla del gateway.';
     if (status === 'contained') return 'El gateway cierra este punto con una regla mientras se valida el parche.';
     if (!inc.opened) return 'En cola: el pipeline atiende un incidente a la vez.';
@@ -244,7 +250,7 @@
         result === 'accepted' ? 'done' : result === 'rejected' ? 'bad' : 'run');
       var ab = el('div', 'attempt ' + result);
       var ah = el('div', 'attempt-head');
-      add(ah, el('span', null, a.source === 'llm' ? 'Escrito por el LLM' : 'Fuente: ' + (a.source || '?')), el('span', 'st', stl[result] || result));
+      add(ah, el('span', null, S.sourceLabel(a.source)), el('span', 'st', stl[result] || result));
       ab.appendChild(ah);
       if (a.diff) ab.appendChild(renderDiff(a.diff));
       var gates = el('div', 'gates');
@@ -284,6 +290,7 @@
         rowOf(sd, 'Resultado', (d.ok ? 'Verificado' : d.rolled_back ? 'Reversión verificada' : 'Falló') +
           (d.detail ? ': ' + clip(d.detail, 300) : ''), 'plain');
       } else if (failed) rowOf(sd, 'Resultado', 'Falló' + (d.rolled_back ? ', revertido' : '') + (d.detail ? ': ' + clip(d.detail, 300) : ''), 'plain');
+      else if (d.doneTs && /not validated by traffic/.test(String(d.detail || ''))) rowOf(sd, 'Observación', 'Sin tráfico suficiente en la ventana: el despliegue no quedó validado por tráfico', 'plain');
       else if (!d.doneTs && d.startTs) rowOf(sd, 'Estado', inc.prod ? 'Retirando la versión anterior' : 'Levantando la versión nueva', 'plain');
       box.appendChild(sd);
     }
@@ -293,7 +300,7 @@
       sv.appendChild(el('p', 'verdict', inc.verify.blocked ? 'El mismo ataque, repetido contra producción, ya no funciona.' : 'El ataque todavía funciona en producción.'));
       box.appendChild(sv);
     }
-    if (!inc.fuxa && inc.closed && inc.closed.outcome !== 'patched') {
+    if ((!inc.fuxa || S.unknownOutcome(inc) != null) && inc.closed && inc.closed.outcome !== 'patched') {
       box.appendChild(section('Cerrado: ' + (inc.closed.outcome || '?'), inc, inc.closed.ts, 'mute'));
     }
     return box;
@@ -304,8 +311,8 @@
   /* one incident = one row of the list; opening it shows the whole story */
   function buildCard(inc, open) {
     var status = S.status(inc), phase = S.phase(inc);
-    var label = phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : STATUS_LABEL[status];
-    if (inc.fuxa) {
+    var label = phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : statusLabel(inc, status);
+    if (inc.fuxa && status !== 'unknown') {
       var outcome = inc.closed && inc.closed.outcome;
       if (outcome === 'rejected') label = 'Requiere revisión';
       else if (outcome === 'rolled_back') label = 'Reversión verificada';
@@ -450,18 +457,33 @@
     }
     var confirmed = s.seen - s.dismissed, live = confirmed - s.audit;
     $('fl-total').textContent = s.total.toLocaleString('es');
-    fact('fl-detect-fact', [count(s.detonated, 'ejecutado en un clon', 'ejecutados en un clon'), s.deny ? count(s.deny, 'rechazado', 'rechazados') : null]);
+    fact('fl-detect-fact', [count(s.detonated, 'ejecutado en un clon', 'ejecutados en un clon'), s.deny ? count(s.deny, 'rechazado', 'rechazados') : null,
+      s.prod ? s.prod.toLocaleString('es') + ' a producción' : null,
+      s.captive ? count(s.captive, 'sesión cautiva', 'sesiones cautivas') : null,
+      s.size != null && s.free != null ? 'clones: ' + s.free + ' de ' + s.size + ' libres' + (s.busy ? ', ' + count(s.busy, 'ocupado', 'ocupados') : '') : null]);
     $('fl-confirmed').textContent = confirmed;
     fact('fl-confirm-fact', [count(live, 'por ataque', 'por ataques'), s.audit ? s.audit + ' por auto-auditoría' : null,
       s.dismissed ? count(s.dismissed, 'descartada', 'descartadas') : null]);
     $('fl-rule').textContent = n1(s.ruleMedian);
     fact('fl-contain-fact', [s.open ? el('b', 'bad', count(s.open, 'abierta', 'abiertas') + ' sin regla') : null,
-      s.contained ? el('b', 'warn', count(s.contained, 'contenida', 'contenidas') + ' esperando parche') : (s.open ? null : 'Nada esperando parche')]);
+      s.contained ? el('b', 'warn', count(s.contained, 'contenida', 'contenidas') + ' esperando parche') : (s.open ? null : 'Nada esperando parche'),
+      s.unknown ? count(s.unknown, 'cerrada', 'cerradas') + ' con resultado desconocido' : null,
+      s.ruleN ? 'mediana de ' + count(s.ruleN, 'regla', 'reglas') : null]);
     $('fl-prod').textContent = n1(s.prodMedian);
-    fact('fl-cure-fact', [el('b', s.cured === confirmed && confirmed ? 'ok' : null, s.cured + ' de ' + confirmed + ' curadas')]);
+    fact('fl-cure-fact', [el('b', s.cured === confirmed && confirmed ? 'ok' : null, s.cured + ' de ' + confirmed + ' curadas'),
+      s.prodN ? 'mediana de ' + count(s.prodN, 'parche', 'parches') : null]);
     $('flow').setAttribute('data-open', s.open ? '1' : '0');
     $('inc-count').textContent = s.seen ? s.seen + (s.dismissed ? ' (' + s.dismissed + ' descartada' + (s.dismissed === 1 ? '' : 's') + ')' : '') : '';
     $('conn-info').textContent = st.events ? st.events + ' eventos' : '';
+  }
+
+  /* which run is on the page, and whether it is the scripted one (dashboard/demo_events.py): that is said in
+     words for as long as its events are on the page, and the connection is then never called "En vivo" */
+  function renderRun() {
+    show($('run'), !!st.run);
+    $('run-id').textContent = st.run || '';
+    show($('scripted'), st.scripted);
+    if (connected) $('conn-text').textContent = S.connLabel(st);
   }
 
   function renderIncidents() {
@@ -540,9 +562,9 @@
 
   function renderAttacks() {
     var host = $('attacks');
-    show($('panel-attacks'), !st.fuxa && st.attackOrder.length > 0);
+    show($('panel-attacks'), S.showAttacks(st));
     clear(host);
-    if (!st.attackOrder.length) return;
+    if (!S.showAttacks(st)) return;
     st.attackOrder.slice(-12).forEach(function (v) {
       var list = st.attacks[v].slice(-24);
       var row = el('div', 'grid-row');
@@ -590,7 +612,7 @@
     show($('fuxa-summary'), !!live);
     show($('traffic-legend'), !live);
     $('production-column').textContent = live ? 'Tiempo a parche' : 'En producción';
-    $('traffic-title').textContent = live ? 'Detecciones de Inmune' : 'Tráfico';
+    $('traffic-title').textContent = live ? 'Detecciones de Immune' : 'Tráfico';
     show($('fuxa-requests-panel'), !!live);
     if (!live) return;
     if (!pollingFuxaRequests) {
@@ -709,7 +731,7 @@
 
   function render() {
     dirty = false;
-    [renderFuxa, renderScore, renderIncidents, renderProd, renderAudits, renderAttacks, renderTicker, renderRestrictions].forEach(function (f) {
+    [renderFuxa, renderScore, renderRun, renderIncidents, renderProd, renderAudits, renderAttacks, renderTicker, renderRestrictions].forEach(function (f) {
       try { f(); } catch (e) { /* one broken panel must not blank the rest */ }
     });
   }
@@ -721,9 +743,11 @@
     setTimeout(function () { if (dirty) render(); }, 500);
   }
 
+  var connected = false;
   function setConn(on, text) {
+    connected = on;
     $('conn').setAttribute('data-state', on ? 'on' : 'off');
-    $('conn-text').textContent = text;
+    $('conn-text').textContent = on ? S.connLabel(st) : text;
   }
 
   function resetState() {
@@ -754,7 +778,7 @@
     var src;
     try { src = es = new EventSource('/events/stream?since=' + st.lastSeq); } catch (e) { es = null; reconnectSoon(); return; }
     lastBeat = Date.now();
-    src.onopen = function () { if (src !== es) return; lastBeat = Date.now(); retryMs = 1000; setConn(true, 'En vivo'); };
+    src.onopen = function () { if (src !== es) return; lastBeat = Date.now(); retryMs = 1000; setConn(true); };
     src.onerror = function () { if (src === es) reconnectSoon(); };
     src.onmessage = function (m) {
       if (src !== es) return;

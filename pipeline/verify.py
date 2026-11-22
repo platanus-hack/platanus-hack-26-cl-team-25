@@ -204,8 +204,8 @@ def _identity(cfg, ev: dict, manifest: dict | None):
 
 
 def _find_route(cfg, session: str, path: str, since: int, deadline: float):
-    """(rid, route) of our request, from the bus (request.classified/routed), else the recordings file."""
-    rid = route = None
+    """(rid, route, verdict) of our request, from the bus (request.classified/routed), else the recordings file."""
+    rid = route = verdict = None
     while time.time() < deadline:
         try:
             evs = busmod.history(cfg.bus_url, since, "request.", timeout=3)["events"]
@@ -217,13 +217,14 @@ def _find_route(cfg, session: str, path: str, since: int, deadline: float):
                 rid = e.get("rid")
             if rid and e["type"] == "request.routed" and e.get("rid") == rid:
                 route = d.get("would_route") or d.get("route")   # observe mode: what enforce would do
+                verdict = d.get("verdict")
         if rid and route:
-            return rid, route
+            return rid, route, verdict
         rec = _from_recordings(cfg.record_path, session, path)
         if rec:
-            return rec.get("rid"), rec.get("would_route") or rec.get("route")
+            return rec.get("rid"), rec.get("would_route") or rec.get("route"), rec.get("verdict")
         time.sleep(0.3)
-    return rid, route
+    return rid, route, verdict
 
 
 def _from_recordings(path: str, session: str, req_path: str):
@@ -274,6 +275,21 @@ def through_gateway(cfg, inc: dict, gateway_admin, manifest: dict | None = None)
         headers.update(auth)          # a session cookie (auth.login)
     elif auth:
         headers["authorization"] = auth
+    # A request the gateway must detonate (the rule is still active) is denied when no clone is free: that says
+    # nothing about the code, so it is retried a few times instead of being read as "still diverted".
+    for attempt in range(1 + max(0, cfg.verify_capacity_retries)):
+        ok, msg, verdict = _gateway_once(cfg, rq, path, query, headers, session, swapped, gateway_admin)
+        if ok or verdict != "no_clone" or attempt == cfg.verify_capacity_retries:
+            break
+        log.info("verify: no free clone for the gateway check (try %d); retrying", attempt + 1)
+        time.sleep(cfg.verify_capacity_wait_s)
+    if not ok and verdict == "no_clone":
+        msg += " (no free clone after %d tries: not verified, the code was not judged)" % (attempt + 1)
+    return ok, msg
+
+
+def _gateway_once(cfg, rq, path, query, headers, session, swapped, gateway_admin):
+    """One gateway check from a fresh session. -> (ok, message, verdict of the gateway's decision)."""
     try:
         since = int(busmod.history(cfg.bus_url, 10 ** 12, timeout=3).get("next") or 0)
     except Exception:  # noqa: BLE001
@@ -285,21 +301,32 @@ def through_gateway(cfg, inc: dict, gateway_admin, manifest: dict | None = None)
         r = httpx.request(rq.get("method") or "GET", url, headers=headers, content=reqs.body_of(rq) or None,
                           timeout=cfg.http_timeout_s * 3)
     except httpx.HTTPError as e:
-        return False, "gateway request failed: %s" % e
+        return False, "gateway request failed: %s" % e, None
     if session is None:
         sid = r.cookies.get("gwsid")
         if not sid:
-            return False, "gateway did not set a session cookie; cannot locate the request"
+            return False, "gateway did not set a session cookie; cannot locate the request", None
         session = "gwsid:" + sid
-    rid, route = _find_route(cfg, session, path, since, time.time() + cfg.verify_wait_s)
+    rid, route, verdict = _find_route(cfg, session, path, since, time.time() + cfg.verify_wait_s)
     if not rid:
-        return False, "request sent (status %d) but not found on the bus or in the recordings" % r.status_code
-    forwarded = None
-    try:
-        forwarded = gateway_admin.prodlog(rid).get("forwarded")
-    except Exception as e:  # noqa: BLE001
-        log.warning("prodlog: %s", e)
-    if route == "prod" and forwarded is not False:
-        return True, "fresh session %s: %s forwarded to prod (status %d, rid %s)%s" % (
-            session.split(":")[0], path, r.status_code, rid[:8], " (canary id replaced by a non-canary one)" if swapped else "")
-    return False, "fresh session: route %s, forwarded=%s (status %d) — still diverted" % (route, forwarded, r.status_code)
+        return False, "request sent (status %d) but not found on the bus or in the recordings" % r.status_code, None
+    if route != "prod":
+        return False, "fresh session: route %s (status %d) — still diverted" % (route, r.status_code), verdict
+    # the bus says "prod"; the gateway's own log must confirm the request really left for prod. An answer
+    # that is missing or unreadable is "unknown", which is not a verification.
+    for attempt in range(3):
+        try:
+            forwarded = gateway_admin.prodlog(rid).get("forwarded")
+            break
+        except Exception as e:  # noqa: BLE001
+            log.warning("prodlog (try %d): %s", attempt + 1, e)
+            err = e
+            time.sleep(0.3)
+    else:
+        return False, "not verified: routed to prod on the bus, but the gateway's prod log could not be read (%s)" % err, verdict
+    if forwarded is not True:
+        return False, ("fresh session: route prod, forwarded=%s (status %d) — %s" % (
+            forwarded, r.status_code, "still diverted" if forwarded is False else "not verified: the gateway's prod "
+            "log does not say whether the request was forwarded")), verdict
+    return True, "fresh session %s: %s forwarded to prod (status %d, rid %s)%s" % (
+        session.split(":")[0], path, r.status_code, rid[:8], " (canary id replaced by a non-canary one)" if swapped else ""), verdict

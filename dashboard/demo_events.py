@@ -1,4 +1,12 @@
-"""Post a scripted two-incident sequence to a running dashboard (no other component needed).
+"""Scripted events to develop the dashboard UI without a stack. Nothing here was measured.
+
+It posts a fixed two-incident sequence (about 110 events) to a dashboard: the routes, diffs, test counts, SHAs,
+timings and the "attacker bot" rounds are invented, and the PR urls are placeholders under example.invalid.
+Every event carries run="demo"; the page shows "DEMO · datos guionados" while such events are on it and does
+not call the connection "En vivo" (static/state.js: SCRIPTED_RUN).
+
+It only posts to a dashboard on this machine (a loopback --url). Any other target needs --i-know-this-is-scripted:
+never point it at a dashboard that other people read as the record of a real run.
 
   BUS_TOKEN=... python dashboard/demo_events.py [--url http://127.0.0.1:8090] [--speed 1.0] [--clear]
 """
@@ -6,17 +14,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ipaddress
 import json
 import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from immune_contracts import events as E  # noqa: E402
 
-RUN = "demo"
+RUN = "demo"                                   # static/state.js SCRIPTED_RUN: the page labels this run as scripted
+PR_URL = "https://example.invalid/scripted/pull/%d"   # not a link: the page only links plain github.com urls
 XSS = "<img src=x onerror=alert(1)>"
 
 
@@ -114,7 +125,7 @@ def run(p: Poster):
     for g, det in [("policy", "diff toca 1 archivo, sin imports nuevos"), ("properties", "consulta parametrizada, sin concatenacion"),
                    ("poc", "el PoC ya no devuelve filas ajenas (3/3)"), ("tests", "42 passed"), ("legit", "8/8 escenarios legitimos iguales")]:
         p.emit(E.GATE_RESULT, "pipeline", {"incident": inc, "attempt": 1, "gate": g, "ok": True, "detail": det}, incident=inc, wait=0.9)
-    gh = "https://github.com/demo-org/victim/pull/1"
+    gh = PR_URL % 1
     p.emit(E.PR_OPENED, "pipeline", {"incident": inc, "url": gh, "branch": "run/demo/fix-sqli-1"}, incident=inc, wait=0.8)
     p.emit(E.PR_MERGED, "pipeline", {"incident": inc, "url": gh, "sha": "a1b2c3d4e5f6"}, incident=inc, wait=0.6)
     p.emit(E.DEPLOY_STARTED, "fleet", {"release": "a1b2c3d4e5f6"}, wait=1.5)
@@ -176,7 +187,7 @@ def run(p: Poster):
     for g, det in [("policy", "diff toca 1 archivo"), ("properties", "realpath + commonpath dentro de BASE"),
                    ("poc", "el PoC falla (404) 3/3"), ("tests", "42 passed"), ("legit", "8/8 escenarios legitimos iguales")]:
         p.emit(E.GATE_RESULT, "pipeline", {"incident": inc, "attempt": 2, "gate": g, "ok": True, "detail": det}, incident=inc, wait=0.9)
-    gh = "https://github.com/demo-org/victim/pull/2"
+    gh = PR_URL % 2
     p.emit(E.PR_OPENED, "pipeline", {"incident": inc, "url": gh, "branch": "run/demo/fix-trav-1"}, incident=inc, wait=0.8)
     p.emit(E.PR_MERGED, "pipeline", {"incident": inc, "url": gh, "sha": "f6e5d4c3b2a1"}, incident=inc, wait=0.6)
     p.emit(E.DEPLOY_STARTED, "fleet", {"release": "f6e5d4c3b2a1"}, wait=1.5)
@@ -192,13 +203,33 @@ def run(p: Poster):
     p.emit(E.REQ_ROUTED, "gateway", {"route": "deny", "status": 403, "verdict": "rule", "ms": 1}, rid="r-deny")
 
 
+def is_loopback(url: str) -> bool:
+    """True when the url names this machine: localhost or a loopback address."""
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Post SCRIPTED (invented) events to a dashboard, to develop its UI without a stack.")
     ap.add_argument("--url", default=os.environ.get("DASH_URL", "http://127.0.0.1:8090"))
     ap.add_argument("--token", default=os.environ.get("BUS_TOKEN", ""))
     ap.add_argument("--speed", type=float, default=1.0, help="2.0 = twice as fast")
     ap.add_argument("--clear", action="store_true", help="empty the bus store first")
+    ap.add_argument("--i-know-this-is-scripted", dest="scripted_ok", action="store_true",
+                    help="allow a --url that is not this machine (the events are invented, not a real run)")
     a = ap.parse_args(argv)
+    if not (a.scripted_ok or is_loopback(a.url)):
+        print(f"refusing to post scripted events to {a.url}: it is not a loopback address. These events are invented "
+              "(UI development only); pass --i-know-this-is-scripted to post them anyway.", file=sys.stderr)
+        return 2
     if not a.token:
         print("set BUS_TOKEN or --token", file=sys.stderr)
         return 2

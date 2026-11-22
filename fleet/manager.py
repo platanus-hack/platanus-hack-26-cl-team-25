@@ -326,7 +326,7 @@ class Fleet:
         return c
 
     def _masks(self) -> dict:
-        """tmpfs over host state inside the read-only IMMUNE_HOME mount (runtime data, .git, .env)."""
+        """tmpfs over host state inside the read-only IMMUNE_HOME mount (runtime data, .git)."""
         home = os.path.realpath(self.cfg.repo_dir)
         out = {}
         rt = os.path.realpath(self.cfg.runtime_dir)
@@ -513,8 +513,15 @@ class Fleet:
             return fail(f"start failed: {e}")
         if not self.wait_healthy(c):
             return fail("new release failed health check", c)
-        if not self.healthy(c, self.cfg.smoke_path):
-            return fail(f"smoke request {self.cfg.smoke_path} failed", c)
+        path = self.cfg.smoke_path
+        if not path or path == self.cfg.health_path:
+            # asking for the health path a second time would prove nothing: say that the step did not run
+            smoke = "skipped: no request distinct from the health check %s (set SMOKE_PATH)" % self.cfg.health_path
+            log.warning("deploy %s: smoke %s", release, smoke)
+        elif not self.healthy(c, path):
+            return fail(f"smoke request {path} failed", c)
+        else:
+            smoke = "GET %s ok" % path
         # error rate of the release being replaced: the yardstick for the one coming in. Without it, anyone able
         # to make the app answer 5xx (old release included) could undo every deploy by doing so during the watch.
         before_rate = 0.0
@@ -535,30 +542,13 @@ class Fleet:
             return fail(f"gateway upstream switch failed: {e}", c)
         self.active, self.release = new, release
         self._save()
-        baseline = 0
-        try:
-            baseline = int(self.gw.stats().get("prod_5xx", 0))
-        except GatewayError:
-            pass
         # a canary that passed already watched the release under real traffic: that time counts as watch time
         watch_s = self.cfg.deploy_watch_s
         if canary["verdict"] == "ok":
             watch_s = max(min(watch_s, 2.0), watch_s - (time.time() - t_canary))
-        deadline = time.time() + watch_s
-        grew = False
-        while True:
-            try:
-                st = self.gw.stats()
-                errs, reqs = int(st.get("prod_5xx", 0)) - baseline, max(1, int(st.get("prod_requests", 0)))
-                # a regression: 5xx since the switch, at a clearly higher rate than the old release had
-                if errs > 0 and errs / reqs > max(2 * before_rate, before_rate + 0.02):
-                    grew = True
-                    break
-            except GatewayError:
-                pass
-            if time.time() >= deadline:
-                break
-            time.sleep(min(self.cfg.watch_poll_s, max(0.0, deadline - time.time())))
+        grew, reqs, errs = self._watch(before_rate, watch_s)
+        watch = {"seconds": round(watch_s, 2), "requests": reqs, "prod_5xx": errs,
+                 "min_requests": self.cfg.deploy_min_requests}
         if grew:
             try:
                 self.gw.set_upstream(self._addr(old), old_rel)
@@ -566,17 +556,48 @@ class Fleet:
                 log.error("rollback switch failed: %s", e)
             self.active, self.release = old, old_rel
             self._save()
-            res = fail("prod_5xx grew after switch; rolled back", c, rolled_back=True)
-            res["canary"] = canary
-            return res
+            return dict(fail("prod_5xx grew after switch; rolled back", c, rolled_back=True), smoke=smoke, watch=watch,
+                        canary=canary)
+        # validated by traffic: enough requests in the watch, or a canary that compared both releases under it
+        validated = reqs >= self.cfg.deploy_min_requests or canary["verdict"] == "ok"
+        detail = "deployed"
+        if not validated:
+            detail = ("deployed; not validated by traffic (%d request(s) in the %gs watch, minimum %d; canary: %s)"
+                      % (reqs, watch_s, self.cfg.deploy_min_requests, canary["detail"]))
+            log.warning("deploy %s: %s", release, detail)
         try:
             self.destroy_name(f"{self.cfg.name_prefix}-prod-{old}")
         except Exception as e:  # noqa: BLE001
             log.warning("old colour cleanup: %s", e)
         replaced = self._refresh_clones(release)
         self._prune_releases()
-        return {"ok": True, "rolled_back": False, "release": release, "active": new,
-                "detail": "deployed", "clones_replaced": replaced, "canary": canary}
+        return {"ok": True, "rolled_back": False, "release": release, "active": new, "detail": detail,
+                "clones_replaced": replaced, "smoke": smoke, "watch": watch, "traffic_validated": validated,
+                "canary": canary}
+
+    def _watch(self, before_rate: float, watch_s: float) -> tuple[bool, int, int]:
+        """Watch the gateway's prod counters for watch_s seconds after the switch (the gateway zeroes them on the
+        switch). -> (regressed, requests seen, 5xx seen). A regression is a 5xx rate clearly above the one the
+        old release had, over at least deploy_min_requests requests: one failed request is not a rate."""
+        baseline = 0
+        try:
+            baseline = int(self.gw.stats().get("prod_5xx", 0))
+        except GatewayError:
+            pass
+        deadline = time.time() + watch_s
+        reqs = errs = 0
+        while True:
+            try:
+                st = self.gw.stats()
+                errs, reqs = int(st.get("prod_5xx", 0)) - baseline, int(st.get("prod_requests", 0))
+                if errs > 0 and reqs >= max(1, self.cfg.deploy_min_requests) \
+                        and errs / reqs > max(2 * before_rate, before_rate + 0.02):
+                    return True, reqs, errs
+            except GatewayError:
+                pass
+            if time.time() >= deadline:
+                return False, reqs, max(0, errs)
+            time.sleep(min(self.cfg.watch_poll_s, max(0.0, deadline - time.time())))
 
     # -- canary: part of the real traffic on the new release, next to the old one, before it takes everything
     @staticmethod

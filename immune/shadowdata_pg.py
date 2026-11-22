@@ -70,10 +70,6 @@ class PgShadowError(RuntimeError):
     pass
 
 
-def qi(name: str) -> str:
-    return '"%s"' % name.replace('"', '""')
-
-
 def literal(v) -> str:
     if v is None:
         return "NULL"
@@ -109,7 +105,7 @@ def read_prod(url: str, network: str) -> dict:
     parts = _split(out, ["@@META", "@@PRE", "@@POST"])
     meta = json.loads(parts["@@META"].strip())
     lines = ["echo '@@T %s'" % t + "\n" + "psql \"$URL\" -X -At -v ON_ERROR_STOP=1 -c " +
-             _shq("SELECT row_to_json(t) FROM public.%s t" % qi(t)) for t in meta["tables"]]
+             _shq("SELECT row_to_json(t) FROM public.%s t" % shadowdata._q(t)) for t in meta["tables"]]
     rows = {t: [] for t in meta["tables"]}
     if lines:
         data = run_psql(url, network, "\n".join(lines) + "\n", timeout=600)
@@ -170,18 +166,18 @@ def to_sqlite(prod: dict, path: str) -> None:
             for c in cols[t]:
                 ty = "INTEGER" if c["type"] in INT_TYPES or c["type"] == "boolean" else \
                     "REAL" if c["type"] in REAL_TYPES else "TEXT"
-                d = "%s %s" % (qi(c["name"]), ty)
+                d = "%s %s" % (shadowdata._q(c["name"]), ty)
                 if pk == [c["name"]]:
                     d += " PRIMARY KEY"
                 if not c["nullable"]:
                     d += " NOT NULL"
                 defs.append(d)
             if len(pk) > 1:
-                defs.append("PRIMARY KEY (%s)" % ", ".join(qi(x) for x in pk))
+                defs.append("PRIMARY KEY (%s)" % ", ".join(shadowdata._q(x) for x in pk))
             for f in meta["fks"]:
                 if f["table"] == t:
-                    defs.append("FOREIGN KEY (%s) REFERENCES %s (%s)" % (qi(f["from"]), qi(f["ref"]), qi(f["to"])))
-            conn.execute("CREATE TABLE %s (%s)" % (qi(t), ", ".join(defs)))
+                    defs.append("FOREIGN KEY (%s) REFERENCES %s (%s)" % (shadowdata._q(f["from"]), shadowdata._q(f["ref"]), shadowdata._q(f["to"])))
+            conn.execute("CREATE TABLE %s (%s)" % (shadowdata._q(t), ", ".join(defs)))
             names = [c["name"] for c in cols[t]]
             kinds = {c["name"]: c["type"] for c in cols[t]}
             for r in prod["rows"][t]:
@@ -193,7 +189,7 @@ def to_sqlite(prod: dict, path: str) -> None:
                     elif isinstance(v, (dict, list)):
                         v = json.dumps(v, ensure_ascii=False)
                     vals.append(v)
-                conn.execute("INSERT INTO %s (%s) VALUES (%s)" % (qi(t), ", ".join(qi(n) for n in names),
+                conn.execute("INSERT INTO %s (%s) VALUES (%s)" % (shadowdata._q(t), ", ".join(shadowdata._q(n) for n in names),
                                                                   ", ".join("?" * len(names))), vals)
         conn.commit()
     finally:
@@ -228,20 +224,20 @@ def to_sql(prod: dict, shadow_sqlite: str) -> str:
         for t in fk_order(meta):
             names = [c["name"] for c in cols[t]]
             kinds = {c["name"]: c["type"] for c in cols[t]}
-            cur = conn.execute("SELECT %s FROM %s" % (", ".join(qi(n) for n in names), qi(t)))
+            cur = conn.execute("SELECT %s FROM %s" % (", ".join(shadowdata._q(n) for n in names), shadowdata._q(t)))
             for r in cur:
                 vals = []
                 for n, v in zip(names, r):
                     if kinds[n] == "boolean" and v is not None:
                         v = bool(v)
                     vals.append(literal(v))
-                out.append("INSERT INTO public.%s (%s) VALUES (%s);\n" % (qi(t), ", ".join(qi(n) for n in names),
+                out.append("INSERT INTO public.%s (%s) VALUES (%s);\n" % (shadowdata._q(t), ", ".join(shadowdata._q(n) for n in names),
                                                                          ", ".join(vals)))
         for c in meta["columns"]:
             if str(c.get("default") or "").startswith("nextval("):
                 out.append("SELECT setval(pg_get_serial_sequence(%s, %s), coalesce((SELECT max(%s) FROM public.%s), 0) + 1, "
-                           "false);\n" % (literal("public." + qi(c["table"])), literal(c["name"]), qi(c["name"]),
-                                          qi(c["table"])))
+                           "false);\n" % (literal("public." + shadowdata._q(c["table"])), literal(c["name"]), shadowdata._q(c["name"]),
+                                          shadowdata._q(c["table"])))
     finally:
         conn.close()
     out.append(prod["post"])
@@ -290,9 +286,9 @@ def build(cfg, prod_url: str, network: str, *, seed: int = 1) -> dict:
         for name in ("manifest.json", "markers.json"):
             shutil.copyfile(os.path.join(work, name), os.path.join(os.path.dirname(shadow), name))
         shutil.copyfile(os.path.join(work, "markers.json"), os.path.join(shadow, "markers.json"))
-        if os.path.exists(os.path.join(work, "shadow", getattr(shadowdata, "SHARING_FILE", "sharing.json"))):
-            shutil.copyfile(os.path.join(work, "shadow", getattr(shadowdata, "SHARING_FILE", "sharing.json")),
-                            os.path.join(shadow, getattr(shadowdata, "SHARING_FILE", "sharing.json")))
+        sharing = shadowdata.SHARING_FILE
+        if os.path.exists(os.path.join(work, "shadow", sharing)):
+            shutil.copyfile(os.path.join(work, "shadow", sharing), os.path.join(shadow, sharing))
         rep = {k: v for k, v in rep.items() if k not in ("seed_db",)}
         rep.update(seed_sql=os.path.join(shadow, "seed.sql"), tables={t: len(r) for t, r in prod["rows"].items()},
                    bytes=len(sql))

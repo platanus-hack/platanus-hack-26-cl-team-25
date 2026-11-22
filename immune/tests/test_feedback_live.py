@@ -51,7 +51,8 @@ def test_doctor_failure_is_fed_back_to_the_owning_step(tmp_path):
 @pytest.mark.live
 def test_live_init_on_builtin_app_unknown(tmp_path):
     """Acceptance A: the built-in app as an unknown project (no contracts/openapi.yaml, no hand-written profile
-    used): real LLM steps, doctor green, and the generated profile + seed reproduce the VULNS.md oracles."""
+    used): real LLM steps, doctor green, and the generated profile + seed reproduce the oracles of
+    docs/demo/respuestas/tienda.md."""
     ok, why = docker.available()
     if not ok:
         pytest.skip(why)
