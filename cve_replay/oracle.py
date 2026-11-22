@@ -82,3 +82,60 @@ class FileEscapeOracle:
             events.append({"oracle": "file", "detail": {"opened": p, "outside_roots": True},
                            "ts": o.ts})
         return events
+
+
+# Full execve parse (path + argv), for the process-spawn oracle.
+_EXEC_FULL = re.compile(
+    r'^(?P<pid>\d+)\s+(?P<ts>\d+\.\d+)\s+execve\("(?P<path>(?:[^"\\]|\\.)*)",\s*\[(?P<argv>[^\]]*)\]'
+)
+
+
+@dataclass
+class Spawn:
+    pid: str
+    ts: float
+    path: str
+    argv: str
+
+
+def parse_spawns(trace: str) -> list[Spawn]:
+    out = []
+    for line in trace.splitlines():
+        m = _EXEC_FULL.match(line.strip())
+        if not m:
+            continue
+        out.append(Spawn(m.group("pid"), float(m.group("ts")),
+                         _unescape(m.group("path")), m.group("argv").strip()))
+    return out
+
+
+class ProcessSpawnOracle:
+    """Fires when handling a request causes the server to spawn a process.
+
+    A web server that serves static files / scripted pages never execs a new program once it
+    has started. So the rule mirrors FileEscapeOracle: any program executed during a request in
+    flight that pre-warming (startup + legitimate traffic) never executed is the exploit firing.
+    This is exactly a webshell's signature (system()/exec()/passthru() -> execve of a shell or
+    command), and it is runtime-agnostic: it reads the syscall trace, not the application.
+    """
+
+    def __init__(self, allowed_bins: list[str] | None = None):
+        # programs the server may legitimately exec (its own process management during boot is
+        # learned by prewarm; this is for the rare target that execs a fixed helper at runtime).
+        self.allowed_bins = set(allowed_bins or [])
+        self.baseline: set[str] = set()
+
+    def prewarm(self, trace: str) -> None:
+        for sp in parse_spawns(trace):
+            self.baseline.add(sp.path)
+
+    def check(self, trace: str) -> list[dict]:
+        events, seen = [], set()
+        for sp in parse_spawns(trace):
+            if sp.path in self.baseline or sp.path in self.allowed_bins or sp.path in seen:
+                continue
+            seen.add(sp.path)
+            events.append({"oracle": "exec",
+                           "detail": {"spawned": sp.path, "argv": sp.argv, "outside_baseline": True},
+                           "ts": sp.ts})
+        return events

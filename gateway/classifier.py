@@ -189,7 +189,7 @@ def traversal_in_value(value: str) -> bool:
 
 def is_builtin_rule(reasons) -> bool:
     """Reasons that fail closed like an active rule (deny unless a clone says clean)."""
-    return any(r == "traversal:path" for r in reasons)
+    return any(r in ("traversal:path", "upload:executable") for r in reasons)
 
 
 # ---------------------------------------------------------------- helpers
@@ -270,6 +270,38 @@ def parse_multipart_fields(body: bytes, content_type_header: str) -> list[tuple[
         return None
 
 
+# server-executable script markers: no legitimate image/document starts with these.
+_EXECUTABLE_HEADS = (b"<?php", b"<?=", b"#!", b"<%", b"<jsp:", b"<script runat")
+
+
+def _looks_executable(head: bytes) -> bool:
+    h = head.lstrip()[:64].lower()
+    return any(h.startswith(m) for m in _EXECUTABLE_HEADS)
+
+
+def parse_multipart_files(body: bytes, content_type_header: str):
+    """File parts of a multipart body: (field, filename, content_type, head_bytes). None if unparsable."""
+    try:
+        from email.parser import BytesParser
+        from email.policy import HTTP
+        msg = BytesParser(policy=HTTP).parsebytes(
+            b"Content-Type: " + content_type_header.encode() + b"\r\n\r\n" + body)
+        if not msg.is_multipart():
+            return None
+        out = []
+        for part in msg.iter_parts():
+            fn = part.get_filename()
+            if not fn:
+                continue
+            name = part.get_param("name", header="content-disposition")
+            payload = part.get_payload(decode=True) or b""
+            out.append((str(name) if name else "", str(fn),
+                        (part.get_content_type() or "").lower(), payload[:64]))
+        return out
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- main entry
 
 def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[Rule],
@@ -299,6 +331,13 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
     for k, v in pairs:
         if traversal_in_value(v):
             res.add(f"traversal:query.{k if SAFE_KEY.fullmatch(k) else '?'}")
+
+    # built-in, on- or off-spec: an uploaded file whose bytes are a server-executable script.
+    # No legitimate image/document starts with <?php/#!/<% — this fails closed like traversal.
+    if view.content_type.startswith("multipart/form-data") and view.body:
+        for _f, _fn, _ct, head in (parse_multipart_files(view.body, view.headers.get("content-type", "")) or []):
+            if _looks_executable(head):
+                res.add("upload:executable")
 
     if op is not None:
         sens_q = res.sensitive.setdefault("query", set())
@@ -352,6 +391,14 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
                         if sensitive:
                             sens_f.add(k)
                         _check_text(res, "form", k, v, sub if op.form_schema is not None else None, sensitive)
+                    for fname, filename, fctype, head in (parse_multipart_files(
+                            view.body, view.headers.get("content-type", "")) or []):
+                        # schema-based: the field declares the media types it accepts and this isn't one
+                        sub = props.get(fname) or {}
+                        allowed = sub.get("x-content-types") or (
+                            [sub["contentMediaType"]] if sub.get("contentMediaType") else [])
+                        if allowed and fctype and fctype not in [a.lower() for a in allowed]:
+                            res.add("schema:upload_type")
 
         # ---- owner-scoped with an untrusted / anonymous identity
         if op.owner_scoped and not who.trusted:

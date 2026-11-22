@@ -1,0 +1,8 @@
+FROM php:8.2-apache
+RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*
+COPY app/ /var/www/html/
+RUN chmod -R 0777 /var/www/html/uploads
+# run apache (foreground) under strace, tracing process-exec syscalls across forks
+COPY entrypoint-strace.sh /entrypoint-strace.sh
+RUN chmod +x /entrypoint-strace.sh
+CMD ["/entrypoint-strace.sh"]

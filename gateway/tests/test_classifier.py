@@ -204,3 +204,37 @@ def test_group_route_ownership_uses_membership():
     # no declared relation: the one-owner lookup is unchanged
     assert _is_owner(MAN, "order_id", "12", 7) and not _is_owner(MAN, "order_id", "12", 3)
     assert Manifest.from_dict({"group_routes": {"team_id": "missing"}}).group_routes == {}
+
+
+# ---- unvalidated upload -> webshell (RCE class)
+from gateway.classifier import is_builtin_rule  # noqa: E402
+
+_UP_CT = "multipart/form-data; boundary=X"
+
+
+def _upload(filename, ctype, data: bytes) -> bytes:
+    return (f'--X\r\nContent-Disposition: form-data; name="avatar"; filename="{filename}"\r\n'
+            f'Content-Type: {ctype}\r\n\r\n').encode() + data + b"\r\n--X--\r\n"
+
+
+def test_executable_upload_is_suspect_builtin_even_off_spec():
+    body = _upload("shell.php", "image/png", b'<?php system($_GET["cmd"]); ?>')
+    r = c("POST", "/upload", body=body, ctype=_UP_CT, who=ANON, spec=Spec(None))
+    assert r.cls == SUSPECT and "upload:executable" in r.reasons
+    assert is_builtin_rule(r.reasons)                       # fails closed -> diverted to a clone
+
+
+def test_legit_image_upload_is_clean():
+    body = _upload("avatar.png", "image/png", b"\x89PNG\r\n\x1a\n real image bytes")
+    r = c("POST", "/upload", body=body, ctype=_UP_CT, who=ANON, spec=Spec(None))
+    assert r.cls == CLEAN and r.reasons == []
+
+
+def test_upload_type_mismatch_against_declared_schema():
+    spec = Spec({"paths": {"/avatar": {"post": {"requestBody": {"content": {"multipart/form-data": {
+        "schema": {"properties": {"avatar": {"type": "string", "format": "binary",
+                                             "x-content-types": ["image/png", "image/jpeg"]}}}}}}}}}})
+    # a GIF where only png/jpeg are accepted, bytes not executable: schema mismatch, still flagged
+    body = _upload("a.gif", "image/gif", b"GIF89a harmless")
+    r = classify(View("POST", "/avatar", "", {"content-type": _UP_CT}, body), spec, ANON, MAN, [], "s")
+    assert r.cls == SUSPECT and "schema:upload_type" in r.reasons
