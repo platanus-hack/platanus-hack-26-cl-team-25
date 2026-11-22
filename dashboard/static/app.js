@@ -530,7 +530,10 @@
     S.pendingAttacks(st).forEach(function (p) { pending[p.id] = p; });
     ids.forEach(function (id) {
       var pend = pending[id], inc = pend ? null : st.incidents[id], c = cards[id];
-      var open = pend ? false : (id in userOpen ? userOpen[id] : !!(inc.opened && !inc.closed));
+      // Collapsed by default: the always-visible rail already shows each incident's stage, so a newly arrived
+      // incident must not auto-expand and steal focus from the card the viewer has open. Only the viewer's own
+      // toggles (userOpen) expand a card.
+      var open = pend ? false : !!userOpen[id];
       var sig = pend ? 'p' + pend.hits : inc.rev + '|' + S.status(inc) + '|' + (open ? 1 : 0);
       keep[id] = true;
       if (!c || c.sig !== sig) {
