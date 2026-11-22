@@ -147,6 +147,9 @@ profile hooks as `env`.
 Evidence `stack` is `[]` unless a source of frames is configured (see *Where in the app's code* below); `detail` is `{statement,input,param,location,reason}`,
 `{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
 
+Evidence `stack` is `[]` unless a source of frames is configured (see *Where in the app's code* below); `detail` is `{statement,input,param,location,reason}`,
+`{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
+
 ### One request
 
 `Sidecar.handle` in `server.py`. Requests are processed one at a time under a lock, so everything observed

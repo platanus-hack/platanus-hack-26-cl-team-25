@@ -104,7 +104,11 @@ def derive_param(kind: str, event: dict, req: dict, template: str | None, manife
 
 
 def dedupe_key(kind: str, method: str, route: str, param: dict | None) -> str:
-    p = "%s:%s" % (param.get("in"), param.get("name")) if param else "-"
+    # Access-control bugs (owner: missing-authentication or IDOR) are route-level sinks: the fix is one
+    # check on the route, not one per parameter, and the containment rule is already route-scoped. So all
+    # parameters on the route collapse to a single incident/patch (e.g. /httpds tank_level and pump_cmd are
+    # the same missing-auth bug). Injection sinks (sql/file) stay per-parameter.
+    p = "-" if kind == "owner" else ("%s:%s" % (param.get("in"), param.get("name")) if param else "-")
     return "|".join([kind, method.upper(), route, p])
 
 
