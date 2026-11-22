@@ -1,4 +1,4 @@
-"""Expose FUXA Fleet records through the existing Inmune dashboard."""
+"""Expose FUXA Fleet records through the existing Immune dashboard."""
 from __future__ import annotations
 
 import asyncio
