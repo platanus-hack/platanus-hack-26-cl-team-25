@@ -385,6 +385,11 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
                             sens_f.add(k)
                         _check_text(res, "form", k, v, sub if op.form_schema is not None else None, sensitive)
 
+        # ---- high-risk route (e.g. a process/script execution endpoint): always verify in the shadow,
+        #      whatever the identity. The syscall oracle there confirms whether code actually ran (RCE).
+        if op.high_risk:
+            res.add("high_risk:route")
+
         # ---- owner-scoped with an untrusted / anonymous identity
         if op.owner_scoped and not who.trusted:
             res.add("owner_scoped:anonymous" if who.uid is None else "owner_scoped:untrusted")
