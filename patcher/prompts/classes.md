@@ -74,6 +74,17 @@ with a single `/` (not `//` and not `/\`), or compare the parsed host with an al
 redirect to a fixed default page. Do not test with `startswith("http")` or a substring: `//evil.example`,
 `/\evil.example` and `https://evil.example@your.host/` get past those.
 
+## xss
+## What a correct fix looks like (cross-site scripting, reflected or stored)
+
+A request value — this request's, or one an earlier request stored — reaches an HTML response without being escaped, so
+its markup is parsed as part of the page. Escape on output, at the point the value is put into HTML: use the template
+engine's autoescaping (keep it on; do not mark the value safe/`|safe`/`dangerouslySetInnerHTML`) or an HTML-escaping
+function (`html.escape`, `markupsafe.escape`), so `<`, `>`, `&`, `"` and `'` become entities. Escape for the context the
+value lands in (HTML text vs. an attribute vs. a URL vs. a `<script>` block). For a stored value, escape where it is
+rendered, not only where it is stored. Do not strip `<script>` or tags by hand. Values that carry no markup must render
+byte-for-byte the same.
+
 ## other
 Find the root cause at the reported sink and fix it in the narrowest way that keeps every
 legitimate request working the same.

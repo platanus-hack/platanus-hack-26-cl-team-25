@@ -9,7 +9,8 @@ from __future__ import annotations
 import base64
 
 # a value of the class's input that does the legitimate thing; the fix must keep answering it as before
-BENIGN = {"ssrf": "abc", "cmdi": "abc", "ssti": "hello", "deser": "abc", "xxe": "<r>ok</r>", "redirect": "/home"}
+BENIGN = {"ssrf": "abc", "cmdi": "abc", "ssti": "hello", "deser": "abc", "xxe": "<r>ok</r>", "redirect": "/home",
+          "xss": "Alice"}
 
 SSRF = ["http://127.0.0.1:1/", "http://localhost:1/", "http://169.254.169.254/latest/meta-data/", "http://[::1]:1/",
         "http://2130706433:1/", "http://0x7f000001:1/", "http://0177.0.0.1:1/", "http://127.1:1/",
@@ -36,4 +37,10 @@ XXE = [_DTD % "file:///etc/passwd", _DTD % "file:///etc/hostname", _DTD % "http:
 REDIRECT = ["https://evil.example/", "//evil.example", "/\\evil.example", "///evil.example", "https:evil.example",
             "http://evil.example@evil.example/", "HTTPS://EVIL.EXAMPLE/x", "https://evil.example.attacker.invalid/"]
 
-BATTERY = {"ssrf": SSRF, "cmdi": CMDI, "ssti": SSTI, "deser": DESER, "xxe": XXE, "redirect": REDIRECT}
+# values carrying real markup: if any is reflected verbatim and unescaped in an HTML response (stored or same-request),
+# the xss oracle (shadow/taint.py) fires. The fix is output escaping, which this battery confirms reflected-wise.
+XSS = ["<script>alert(91)</script>", "<img src=x onerror=alert(91)>", "<svg/onload=alert(91)>",
+       "\"><script>alert(91)</script>", "'><img src=x onerror=alert(91)>", "<a href=javascript:alert(91)>x</a>",
+       "<body onload=alert(91)>", "<iframe src=javascript:alert(91)>", "</title><script>alert(91)</script>"]
+
+BATTERY = {"ssrf": SSRF, "cmdi": CMDI, "ssti": SSTI, "deser": DESER, "xxe": XXE, "redirect": REDIRECT, "xss": XSS}

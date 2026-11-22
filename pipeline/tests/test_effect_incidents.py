@@ -69,6 +69,47 @@ def test_the_class_beats_the_side_effects_that_came_with_it():
     assert incident.build(older, SPEC)["vuln_class"] == "sqli"                   # the older order is untouched
 
 
+# ------------------------------------------------------------------ multi-step (stored) taint attribution
+def _stored_xss_event():
+    """A stored-XSS oracle.fired: the firing request (GET /wall) rendered a value an earlier POST /n planted."""
+    payload = "<script>alert(91)</script>"
+    origin_req = {"method": "POST", "path": "/n", "query": "", "headers": {"content-type": "application/json"},
+                  "body_b64": base64.b64encode(b'{"body":"%s"}' % payload.encode()).decode()}
+    ev = {"type": "oracle.fired", "ts": 1.0, "rid": "fire", "data": {
+        "rid": "fire", "uid": 1, "role": "user", "status": 200, "mode": "L1",
+        "events": [{"oracle": "xss", "detail": {"input": payload, "param": "body", "location": "json", "stored": True,
+                                                "origin_rid": "plant"},
+                    "stack": [{"file": "app/x.py", "line": 7, "func": "wall"}],
+                    "origin": {"rid": "plant", "request": origin_req}}],
+        "request": {"method": "GET", "path": "/wall", "query": "", "headers": {}, "body_b64": ""}}}
+    return ev, payload, origin_req
+
+
+def test_stored_incident_is_attributed_to_the_request_that_planted_the_value():
+    ev, payload, origin_req = _stored_xss_event()
+    inc = incident.build(ev, SPEC)
+    assert inc["vuln_class"] == "xss" and inc["oracle"] == "xss"
+    # the replayable request and the parameter are the planting request's, not the firing one's
+    assert inc["request"]["method"] == "POST" and inc["request"]["path"] == "/n"
+    assert inc["param"] == {"in": "json", "name": "body"}
+    # the sink stays the firing request's render point
+    assert inc["sink"] == {"file": "app/x.py", "line": 7}
+    # both steps are recorded, plant first then trigger
+    assert [s["path"] for s in inc["steps"]] == ["/n", "/wall"]
+    assert payload.encode() in base64.b64decode(inc["steps"][0]["body_b64"])
+
+
+def test_stored_poc_replays_both_steps():
+    ev, payload, _ = _stored_xss_event()
+    inc = incident.build(ev, SPEC)
+    inc["incident"] = "inc-x"
+    p = poc.build(inc, "t0")
+    assert [r["path"] for r in p["requests"]] == ["/n", "/wall"]
+    # the mutators target the planting step (where the parameter lives)
+    muts = poc.mutate(inc, p)
+    assert muts and all(m[1]["path"] == "/n" for m in muts)
+
+
 # ------------------------------------------------------------------ PoC variants
 @pytest.mark.parametrize("oracle,detail,req,param", [c for c in CASES if c[0] not in ("deser", "xxe")], ids=lambda x: x if isinstance(x, str) else None)
 def test_builtin_mutators_use_the_classs_battery(oracle, detail, req, param):

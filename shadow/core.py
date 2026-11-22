@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from immune_contracts import authtoken, wire
 
-from . import db, effects, inputs, instrument, sqltaint
+from . import db, effects, inputs, instrument, sqltaint, taint
 from .instrument import STATE, RequestRecord
 
 log = logging.getLogger("shadow")
@@ -113,6 +113,7 @@ class Engine:
         self.base_state = state
         self.collector = collector.rstrip("/") if collector else None
         self.clone_id, self.clone_key, self.release = clone_id, clone_key, release
+        self.taint = taint.TaintTracker()   # stored taint across a captive (L2) session: second-order sql, stored xss
         self.profile = importlib.import_module(profile)
         mod_name, _, attr = self.profile.APP.partition(":")
         top = mod_name.split(".")[0]
@@ -172,6 +173,8 @@ class Engine:
             db.restore_from_bytes(self.base_state, self.db_path)
         elif self.seed_db:
             db.restore_from_file(self.seed_db, self.db_path)
+        if hasattr(self, "taint"):
+            self.taint.reset()
 
     def snapshot(self) -> bytes:
         return db.snapshot(self.db_path)
@@ -289,7 +292,7 @@ class Engine:
         client_h = _hdict(client)
         query = query_string.decode("latin-1")
         events = self.evaluate(rec, method, path, query, client_h, body, scope.get("path_params"),
-                               rheaders, rbody, uid, role, status)
+                               rheaders, rbody, uid, role, status, rid, mode)
         # 6. verdict
         if events:
             verdict = wire.VERDICT_ORACLE
@@ -359,7 +362,8 @@ class Engine:
             log.warning("evidence rid=%s push failed: %r", evidence["rid"], e)
 
     # ------------------------------------------------------------ oracles
-    def evaluate(self, rec, method, path, query, client_h, body, path_params, rheaders, rbody, uid, role, status=None):
+    def evaluate(self, rec, method, path, query, client_h, body, path_params, rheaders, rbody, uid, role,
+                 status=None, rid="", mode="L1"):
         ins = inputs.extract(path, query, client_h, body, path_params)
         events = sqltaint.check(rec.statements, ins, self.constants())
         events += rec.events  # file / proc / net, collected live
@@ -367,8 +371,20 @@ class Engine:
         events += self.owner_events(path, rheaders, rbody, uid, role, bool(events), last_stack, path_params)
         # input -> effect classes (ssrf, cmdi, ssti, deser, xxe, redirect): the request's own input reached the effect
         rh = _hdict(rheaders or [])
-        return effects.refine(events, ins, {"headers": client_h or {}, "body": body or b""},
-                              {"status": status, "headers": rh, "body": _decoded_body(rheaders or [], rbody or b"")})
+        rbody_dec = _decoded_body(rheaders or [], rbody or b"")
+        events = effects.refine(events, ins, {"headers": client_h or {}, "body": body or b""},
+                                {"status": status, "headers": rh, "body": rbody_dec})
+        # multi-step (stored) taint across a captive session: input planted in an earlier request that fires here.
+        # The current request's own values go to the first-order checks above; only earlier ones are second-order.
+        cur_values = {v for _l, _p, v in ins if isinstance(v, str)}
+        events += self.taint.second_order_sql(rec.statements, self.constants(), "sqlite", cur_values)
+        events += self.taint.stored_xss(rbody_dec, rh.get("content-type", ""), ins, last_stack)
+        # remember this request's inputs so a later request of the same captive session can be attributed to it
+        if mode == "L2":
+            origin_req = {"method": method, "path": path, "query": query,
+                          "headers": client_h or {}, "body_b64": base64.b64encode(body or b"").decode()}
+            self.taint.observe(rid, origin_req, ins)
+        return events
 
     def co_members(self, path_params, uid) -> set:
         """Group-shared access (shadow/sharing.json): the members of every group this request addresses

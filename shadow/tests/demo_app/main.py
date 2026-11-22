@@ -153,6 +153,24 @@ def add_note(payload: dict, authorization: str = Header(None)):
     return {"id": cur.lastrowid}
 
 
+@app.get("/wall")
+def wall(authorization: str = Header(None)):
+    """Stored XSS sink: every note body dropped into an HTML page without escaping."""
+    who(authorization)
+    rows = db().execute("SELECT body FROM notes ORDER BY id").fetchall()
+    html = "<html><body><h1>wall</h1>" + "".join("<div class=note>%s</div>" % r["body"] for r in rows) + "</body></html>"
+    return Response(html, media_type="text/html")
+
+
+@app.get("/note_search")
+def note_search(authorization: str = Header(None)):
+    """Second-order SQLi sink: the most recent note body is concatenated into a query."""
+    who(authorization)
+    body = db().execute("SELECT body FROM notes ORDER BY id DESC LIMIT 1").fetchone()["body"]
+    rows = db().execute("SELECT id, name FROM items WHERE name = '" + body + "'").fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.get("/boom")
 def boom():
     raise RuntimeError("boom")

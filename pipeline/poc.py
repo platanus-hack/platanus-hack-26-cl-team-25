@@ -28,13 +28,20 @@ def validate(obj: dict, name: str) -> None:
 
 def build(inc: dict, release: str) -> dict:
     ev = inc["evidence"]
-    rq = ev.get("request") or {}
     uid = ev.get("uid")
-    req = {"method": rq.get("method", "GET"), "path": rq.get("path", "/"), "query": rq.get("query") or "",
-           "headers": reqs.clean_headers(rq.get("headers") or {}, drop_auth=uid is not None),
-           "body_b64": rq.get("body_b64") or "", "uid": uid, "role": ev.get("role") if uid is not None else None}
+    role = ev.get("role") if uid is not None else None
+
+    def _req(rq):
+        return {"method": rq.get("method", "GET"), "path": rq.get("path", "/"), "query": rq.get("query") or "",
+                "headers": reqs.clean_headers(rq.get("headers") or {}, drop_auth=uid is not None),
+                "body_b64": rq.get("body_b64") or "", "uid": uid, "role": role}
+
+    # multi-step (stored) taint: replay both steps — plant the value, then trigger it. The single-request case
+    # (every channel oracle and the reflected effect classes) keeps its one captured request.
+    steps = inc.get("steps")
+    requests = [_req(s) for s in steps] if steps else [_req(ev.get("request") or {})]
     poc = {"incident": inc["incident"], "release": release, "state_b64": ev.get("pre_state_b64"),
-           "requests": [req], "expect": {"oracle": inc["oracle"], "sink": dict(inc["sink"])}}
+           "requests": requests, "expect": {"oracle": inc["oracle"], "sink": dict(inc["sink"])}}
     validate(poc, "poc.schema.json")
     return poc
 
@@ -52,10 +59,11 @@ def _target(value: str) -> str:
 
 def mutate(inc: dict, poc: dict, manifest: dict | None = None) -> list:
     """[(name, request)] derived from the captured request (same shape as poc.requests items)."""
-    base = poc["requests"][-1]
     param, tpl = inc.get("param"), inc.get("route")
     if not param:
         return []
+    # the parameter lives in the planting step for a stored attack, in the only request otherwise
+    base = next((r for r in poc["requests"] if reqs.get_value(r, param, tpl) is not None), poc["requests"][-1])
     val = reqs.get_value(base, param, tpl)
     if val is None:
         return []

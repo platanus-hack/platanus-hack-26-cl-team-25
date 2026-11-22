@@ -167,3 +167,43 @@ def test_evidence_built_in_harness(h):
     ev = r.evidence
     assert ev["verdict"] == "oracle" and ev["mode"] == "L2" and ev["uid"] == 1 and ev["pre_state_b64"]
     assert not any(k.startswith("x-imm-") for k in ev["request"]["headers"])
+
+
+# ---------- multi-step (stored) taint across a captive session (shadow/taint.py)
+def test_stored_xss_fires_on_the_request_that_renders_an_earlier_requests_input(h):
+    # plant markup in a note (L2, kept), then render the wall (L1): the stored value is reflected unescaped
+    payload = "<script>alert(91)</script>"
+    import json as _j
+    plant = h.send("POST", "/note", headers={"content-type": "application/json"},
+                   body=_j.dumps({"body": payload}).encode(), uid=1, mode="L2")
+    assert plant.status == 200 and "xss" not in kinds(plant)      # planting alone is not an XSS
+    r = h.send("GET", "/wall", uid=1, mode="L1")
+    assert r.status == 200 and "xss" in kinds(r)
+    ev = next(e for e in r.events if e["oracle"] == "xss")
+    assert ev["detail"]["stored"] is True and payload in ev["detail"]["input"]
+    assert ev["stack"] and ev["stack"][0]["file"] == "demo_app/main.py"
+
+
+def test_stored_xss_quiet_for_a_note_without_markup(h):
+    import json as _j
+    h.send("POST", "/note", headers={"content-type": "application/json"},
+           body=_j.dumps({"body": "an ordinary note"}).encode(), uid=1, mode="L2")
+    assert "xss" not in kinds(h.send("GET", "/wall", uid=1, mode="L1"))
+
+
+def test_second_order_sql_fires_when_a_stored_note_reaches_a_query(h):
+    import json as _j
+    plant = h.send("POST", "/note", headers={"content-type": "application/json"},
+                   body=_j.dumps({"body": "x' OR '1'='1"}).encode(), uid=1, mode="L2")
+    assert "sql" not in kinds(plant)                              # the INSERT is parameterised
+    r = h.send("GET", "/note_search", uid=1, mode="L1")
+    assert r.status == 200 and "sql" in kinds(r)
+    ev = next(e for e in r.events if e["oracle"] == "sql")
+    assert ev["detail"]["second_order"] is True
+
+
+def test_second_order_sql_quiet_for_a_benign_stored_note(h):
+    import json as _j
+    h.send("POST", "/note", headers={"content-type": "application/json"},
+           body=_j.dumps({"body": "usb cable"}).encode(), uid=1, mode="L2")
+    assert "sql" not in kinds(h.send("GET", "/note_search", uid=1, mode="L1"))

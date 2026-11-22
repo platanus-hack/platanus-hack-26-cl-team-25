@@ -16,6 +16,7 @@ CASES = {
     "deser": ("deser", {"in": "cookie", "name": "session"}),
     "xxe": ("xxe", {"in": "body", "name": "body"}),
     "redirect": ("redirect", {"in": "query", "name": "next"}),
+    "xss": ("xss", {"in": "query", "name": "q"}),
 }
 
 
@@ -120,4 +121,4 @@ def test_the_unpatched_baseline_is_measured_once_per_incident():
 def test_every_class_has_a_check_a_battery_and_a_benign_value():
     for cls in classes.EFFECT_CLASSES:
         assert cls in properties.CHECKS and payloads.BATTERY[cls] and payloads.BENIGN[cls]
-        assert set(classes.FAMILY[cls]) <= {"ssrf", "cmdi", "ssti", "deser", "xxe", "redirect", "proc", "net", "file"}
+        assert set(classes.FAMILY[cls]) <= {"ssrf", "cmdi", "ssti", "deser", "xxe", "redirect", "xss", "proc", "net", "file"}
