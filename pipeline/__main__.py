@@ -42,8 +42,10 @@ def build(cfg: Config, patcher=None) -> Pipeline:
     if os.environ.get("PIPELINE_APP") == "external" or cfg.project.app.runtime == "generic":
         # app outside the in-process harness (any language): pipeline/external.py
         from .external import ExternalPipeline
+        from .extfix import load_target
+        target = load_target(os.environ["EXTERNAL_TARGET"]) if os.environ.get("EXTERNAL_TARGET") else None
         return ExternalPipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local,
-                                repro_url=os.environ.get("REPRO_URL", ""))
+                                repro_url=os.environ.get("REPRO_URL", ""), target=target)
     return Pipeline(cfg, state, pub, gw, fleet, repo, patcher=patcher, local_fallback=local)
 
 
@@ -56,6 +58,9 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     logging.basicConfig(level=os.environ.get("PIPELINE_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    if not os.environ.get("PIPELINE_LOG_HTTP"):
+        for noisy in ("httpx", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = Config.from_env()
     pipe = build(cfg)
     if a.status:
@@ -90,6 +95,8 @@ def main(argv=None) -> int:
             log.info("PAUSE file %s: %s", cfg.pause_file, "paused, no new incident will start" if paused else "resumed")
             was_paused = paused
         did = pipe.step()
+        if not did and not paused and not a.once:
+            pipe.maintain()
         pipe.state.flush()
         if did:
             idle_since = time.time()

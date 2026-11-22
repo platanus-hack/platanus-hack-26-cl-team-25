@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Nombre provisorio: "immune" aparece en <title>, metas, el h1 del hero y el pie. -->
+<title>immune · del exploit al parche en producción</title>
+<meta name="description" content="Un proxy inverso que ejecuta cada request sospechoso primero en una copia aislada de la app, confirma el ataque con comprobaciones deterministas, lo contiene con una regla y despliega un parche validado.">
+<meta name="theme-color" content="#0B0E0D">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:title" content="immune · del exploit al parche en producción">
+<meta property="og:description" content="Proxy inverso que ejecuta lo sospechoso en un clon de la app: confirma el ataque, lo contiene con una regla y despliega un parche validado.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='10' fill='%230B0E0D'/%3E%3Cpath d='M18 10h-8v28h8M30 10h8v28h-8' fill='none' stroke='%23E8E6E1' stroke-width='5' stroke-linecap='square'/%3E%3Ccircle cx='24' cy='24' r='6' fill='%23B6F24A'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+<script>document.documentElement.className = "js";</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ================= HERO ================= -->
+<header class="hero" id="inicio">
+  <div class="hero-in">
+    <div class="hero-l">
+      <h1>
+        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><path d="M17 7H8v34h9M31 7h9v34h-9"/><circle cx="24" cy="24" r="6"/></svg><span>immune</span>
+      </h1>
+      <p class="lede">Un proxy inverso que ejecuta cada request sospechoso primero en una copia aislada de la app.</p>
+      <p class="lede">Si ahí el ataque funciona, lo contiene con una regla y despliega un parche validado: 24,9&nbsp;s de mediana desde la confirmación.</p>
+      <p class="tally">21 incidentes. 21 parches. <b>0 reintentos.</b></p>
+    </div>
+
+    <div class="win hero-term" data-term>
+      <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">atacante · tienda.test</span><button class="replay" type="button" data-replay hidden>repetir</button></div>
+      <pre aria-label="Secuencia del ataque y la respuesta del sistema"><span class="ln" data-type><span class="p">$</span> <span data-cmd>curl "tienda.test/api/products?q=zzzzzz' OR '1'='1"</span><i class="caret"></i></span>
+<span class="ln out">→ 200 · respondió el clon, con datos falsos</span>
+<span class="ln sys"><b> 0,0 s</b>  ataque confirmado en una copia aislada</span>
+<span class="ln sys hold"><b> 1,9 s</b>  anticuerpo: regla en el proxy</span>
+<span class="ln sys"><b>10,0 s</b>  un LLM propone el diff</span>
+<span class="ln sys"><b>23,1 s</b>  vacuna: parche con 5 de 5 validaciones</span>
+<span class="ln sys ok"><b>24,9 s</b>  parche en producción</span>
+<span class="ln"><span class="p">$</span> curl "tienda.test/api/products?q=zzzzzz' OR '1'='1"</span>
+<span class="ln out">→ 0 productos</span></pre>
+    </div>
+  </div>
+  <a class="down" href="#bucle" aria-label="Ver el bucle paso a paso">↓</a>
+</header>
+
+<!-- ================= RIEL ================= -->
+<nav class="rail" aria-label="Pasos del bucle">
+  <a href="#p0"><b>entrada</b><span>llega el request</span></a>
+  <a href="#p1"><b>clon</b><span>se ejecuta en una copia</span></a>
+  <a href="#p2"><b>0,0 s</b><span>ataque confirmado</span></a>
+  <a href="#p3"><b>1,9 s</b><span>anticuerpo</span></a>
+  <a href="#p4"><b>replay</b><span>¿vulnerable?</span></a>
+  <a href="#p5"><b>23,1 s</b><span>vacuna</span></a>
+  <a href="#p6"><b>24,9 s</b><span>en producción</span></a>
+</nav>
+
+<main>
+
+<!-- ================= EL BUCLE ================= -->
+<section class="story" id="bucle" aria-label="El bucle, paso a paso">
+
+  <div class="stage" data-stage aria-hidden="true">
+    <svg viewBox="0 0 544 334">
+      <!-- caminos alternativos -->
+      <g class="k alt">
+        <path d="M310 40h100"/><path d="M406 36l5 4-5 4"/><text class="t" x="340" y="33">no</text>
+        <path d="M310 185h126V64"/><path d="M432 68l4-5 4 5"/><text class="t" x="372" y="178">no · se reenvía</text>
+        <path class="dash" d="M420 60v52h-86"/><path d="M339 108l-5 4 5 4"/><text class="t" x="377" y="105">copia al responder</text>
+        <path d="M492 289v13"/><text class="t" x="504" y="300">no</text>
+        <rect x="443" y="306" width="98" height="22" rx="5"/><text class="t" x="492" y="321">caso archivado</text>
+      </g>
+
+      <!-- 0 · entrada -->
+      <g class="k k0">
+        <rect x="4" y="20" width="100" height="40" rx="6"/><text class="l" x="54" y="38">request</text><text class="s" x="54" y="51">cliente o atacante</text>
+        <path class="fl" d="M104 40h9"/><path d="M110 36l5 4-5 4"/>
+        <rect x="116" y="20" width="100" height="40" rx="6"/><text class="l" x="166" y="38">reverse proxy</text><text class="s" x="166" y="51">todo pasa por acá</text>
+        <path d="M216 40h6"/>
+        <polygon points="266,14 310,40 266,66 222,40"/><text class="q" x="266" y="43">¿sospechoso?</text>
+      </g>
+
+      <!-- 1 · clon -->
+      <g class="k k1">
+        <path class="fl" d="M266 66v22"/><path d="M262 84l4 5 4-5"/><text class="t" x="278" y="80">sí</text>
+        <rect x="202" y="92" width="128" height="40" rx="6"/><text class="l" x="266" y="110">clon de la app</text><text class="s" x="266" y="123">mismo código, datos falsos</text>
+      </g>
+
+      <!-- 2 · veredicto -->
+      <g class="k k2">
+        <path class="fl" d="M266 132v25"/><path d="M262 153l4 5 4-5"/>
+        <polygon points="266,161 310,185 266,209 222,185"/><text class="q" x="266" y="188">¿ataque?</text>
+        <path d="M222 185h-30"/>
+        <text class="t" x="109" y="148">oráculos</text>
+        <g class="o o-sql"><rect x="30" y="156" width="50" height="20" rx="10"/><text class="t" x="55" y="169.5">sql</text></g>
+        <g class="o"><rect x="84" y="156" width="50" height="20" rx="10"/><text class="t" x="109" y="169.5">file</text></g>
+        <g class="o"><rect x="138" y="156" width="50" height="20" rx="10"/><text class="t" x="163" y="169.5">proc</text></g>
+        <g class="o"><rect x="57" y="182" width="50" height="20" rx="10"/><text class="t" x="82" y="195.5">net</text></g>
+        <g class="o"><rect x="111" y="182" width="50" height="20" rx="10"/><text class="t" x="136" y="195.5">owner</text></g>
+      </g>
+
+      <!-- 3 · anticuerpo -->
+      <g class="k k3">
+        <path class="fl" d="M266 209v32"/><path d="M262 237l4 5 4-5"/><text class="t" x="278" y="228">sí</text>
+        <rect x="202" y="245" width="128" height="40" rx="6"/><text class="l" x="266" y="263">anticuerpo</text><text class="s" x="266" y="276">regla en el proxy · 2 s</text>
+      </g>
+
+      <!-- 4 · replay -->
+      <g class="k k4">
+        <path class="fl" d="M330 265h6"/><path d="M333 261l5 4-5 4"/>
+        <rect x="340" y="245" width="92" height="40" rx="6"/><text class="l" x="386" y="263">replay</text><text class="s" x="386" y="276">repite el ataque</text>
+        <path d="M432 265h12"/><path d="M441 261l5 4-5 4"/>
+        <polygon points="492,241 536,265 492,289 448,265"/><text class="q" x="492" y="268">¿vulnerable?</text>
+      </g>
+
+      <!-- 5 · vacuna -->
+      <g class="k k5">
+        <path class="fl" d="M492 241v-22"/><path d="M488 223l4-5 4 5"/><text class="t" x="504" y="234">sí</text>
+        <rect x="446" y="175" width="92" height="40" rx="6"/><text class="l" x="492" y="193" style="font-size:10px">vacuna: parche</text><text class="s" x="492" y="206">5 validaciones</text>
+      </g>
+
+      <!-- 6 · deploy -->
+      <g class="k k6">
+        <path class="fl" d="M492 175V64"/><path d="M488 68l4-5 4 5"/><text class="t" x="514" y="122">deploy</text>
+        <rect x="414" y="20" width="126" height="40" rx="6"/><text class="l" x="477" y="38">app de producción</text><text class="s" x="477" y="51">datos reales</text>
+      </g>
+    </svg>
+    <p class="stage-cap" data-cap>&nbsp;</p>
+  </div>
+
+  <div class="steps">
+
+    <article class="step" id="p0" data-cap="request → reverse proxy · ¿sospechoso?">
+      <p class="when">entrada</p>
+      <h2>Llega un request</h2>
+      <p>El valor de <code>q</code> trae una comilla y un <code>OR</code>. No encaja con el esquema de la app, así que el proxy lo marca como sospechoso. Todavía no lo bloquea.</p>
+      <figure class="win rise">
+        <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">atacante</span></div>
+        <pre><span class="p">$</span> curl "tienda.test/api/products?q=<mark>zzzzzz' OR '1'='1</mark>"</pre>
+      </figure>
+      <p class="note">exploit real de la app de prueba</p>
+    </article>
+
+    <article class="step" id="p1" data-cap="sospechoso → clon de la app">
+      <p class="when">clon</p>
+      <h2>Se ejecuta en un clon de la app</h2>
+      <p>El proxy no lo manda a producción: lo ejecuta en un clon, con el mismo código y datos falsos.</p>
+      <p>Si el clon no detecta nada, el mismo request sigue a producción. Un falso positivo cuesta unos 30&nbsp;ms.</p>
+      <figure class="win rise tilt">
+        <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">proxy</span></div>
+        <pre>GET /api/products
+  clasificación  <b>suspect</b> · q fuera de gramática
+  destino        clon L1 · datos falsos
+  producción     en espera del veredicto</pre>
+      </figure>
+      <p class="note">resumen del registro, no una captura literal</p>
+    </article>
+
+    <article class="step" id="p2" data-cap="¿es un ataque? · dispara sql">
+      <p class="when">0,0 s · veredicto</p>
+      <h2>Cinco oráculos, ningún LLM</h2>
+      <p>El veredicto no lo da un modelo. Cinco comprobaciones deterministas miran qué hizo el clon:</p>
+      <dl class="orcs">
+        <div><dt>sql</dt><dd>el request cambió la estructura de una consulta</dd></div>
+        <div><dt>file</dt><dd>abrió un archivo fuera de lo permitido</dd></div>
+        <div><dt>proc</dt><dd>lanzó un proceso hijo</dd></div>
+        <div><dt>net</dt><dd>abrió una conexión saliente</dd></div>
+        <div><dt>owner</dt><dd>devolvió datos de otro usuario</dd></div>
+      </dl>
+      <p>Acá dispara <code>sql</code>. Producción nunca ejecutó ese request.</p>
+      <p class="note">el atacante recibe datos falsos. un usuario conocido, un 404</p>
+    </article>
+
+    <article class="step" id="p3" data-cap="anticuerpo · regla activa sobre /api/products · q">
+      <p class="when">1,9 s · anticuerpo</p>
+      <h2>Anticuerpo: una regla en el proxy</h2>
+      <p>La regla es sobre la ruta y el parámetro, nunca sobre la IP. Todo valor de <code>q</code> fuera de la gramática va al clon, venga de quien venga.</p>
+      <p>Es contención: se borra cuando el parche llega a producción.</p>
+      <figure class="win win--code rise">
+        <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">proxy · regla activa</span></div>
+        <pre>{
+  "method":  "GET",
+  "route":   "/api/products",
+  "param":   { "in": "query", "name": "q" },
+  "grammar": <mark>"[A-Za-z0-9 _.,@:+\\-]{0,128}"</mark>,
+  "scope":   "param",
+  "ttl_s":   3600
+}</pre>
+      </figure>
+      <p class="note">formato real del proxy</p>
+    </article>
+
+    <article class="step" id="p4" data-cap="replay · ¿vulnerable?">
+      <p class="when">replay</p>
+      <h2>Se repite el ataque</h2>
+      <p>Antes de escribir un parche, el sistema repite el ataque para comprobar que la app es vulnerable.</p>
+      <p>Si no lo es, el caso se archiva y no se toca el código.</p>
+    </article>
+
+    <article class="step" id="p5" data-cap="vacuna · parche con 5 validaciones">
+      <p class="when">10,0 s → 23,1 s · vacuna</p>
+      <h2>Vacuna: un parche validado</h2>
+      <p>Un LLM confinado propone el diff. No puede aprobarlo ni desplegarlo: deciden cinco validaciones mecánicas.</p>
+      <figure class="win win--code rise tilt-r">
+        <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">victim/app/products.py</span></div>
+        <pre><span class="del">- conds.append("(name LIKE '%" + q + "%' OR category LIKE '" + q + "')")</span>
+<span class="add">+ conds.append("(name LIKE ? OR category LIKE ?)")</span>
+<span class="add">+ params.extend(["%" + q + "%", q])</span></pre>
+      </figure>
+      <p class="note">la línea eliminada es la real. las agregadas, representativas</p>
+      <ol class="gates">
+        <li>Política del diff</li>
+        <li>Propiedades de la clase de falla</li>
+        <li>El exploit y sus variantes ya no funcionan</li>
+        <li>Los tests de la app pasan</li>
+        <li>El tráfico legítimo responde igual</li>
+      </ol>
+      <p>Si una falla, el parche no sale. Rechazaron 15 de 15 parches defectuosos escritos a propósito.</p>
+    </article>
+
+    <article class="step" id="p6" data-cap="deploy → app de producción">
+      <p class="when">24,9 s</p>
+      <h2>Parche en producción</h2>
+      <p>Despliegue blue/green, sin cortar el servicio. A los 51,3&nbsp;s queda verificado que el exploit ya no tiene efecto.</p>
+      <figure class="win rise">
+        <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">atacante</span></div>
+        <pre><span class="p">$</span> curl "tienda.test/api/products?q=zzzzzz' OR '1'='1"
+<span class="okc">→ 0 productos</span></pre>
+      </figure>
+      <p class="note">pedido nuevo, sin sesión. una sesión ya atrapada sigue en su clon hasta 15 min sin actividad</p>
+      <p>Después, el sistema busca esa misma clase de falla en el resto de las rutas.</p>
+    </article>
+
+  </div>
+</section>
+
+<!-- ================= EVIDENCIA ================= -->
+<section class="col" id="evidencia">
+  <p class="when">medido</p>
+  <h2>21 incidentes, 21 parches, ningún reintento</h2>
+  <p>Tiempos desde que el clon confirma el ataque. Mediana y rango.</p>
+
+  <ol class="tl">
+    <li style="--t:1.9;--a:1.8;--b:3.6"><b>1,9 s</b><span>regla activa</span><small>1,8 – 3,6</small><i></i></li>
+    <li style="--t:10;--a:8.6;--b:13.8"><b>10,0 s</b><span>diff propuesto</span><small>8,6 – 13,8</small><i></i></li>
+    <li class="key" style="--t:24.9;--a:22.2;--b:31"><b>24,9 s</b><span>en producción</span><small>22,2 – 31,0</small><i></i></li>
+    <li style="--t:51.3;--a:48.8;--b:58.4"><b>51,3 s</b><span>verificado</span><small>48,8 – 58,4</small><i></i></li>
+  </ol>
+
+  <dl class="facts">
+    <div><dt>15 / 15</dt><dd>parches defectuosos rechazados. Los 7 correctos pasaron.</dd></div>
+    <div><dt>21 / 21</dt><dd>vectores con el mismo resultado que el parche oficial de Apache 2.4.50. Falla pública: prueba el mecanismo.</dd></div>
+    <div><dt>3 → 7</dt><dd>con tres ataques quedaron parchadas las siete fallas. Cuatro las encontró la auditoría propia.</dd></div>
+    <div><dt>+0,2 – 0,6 ms</dt><dd>por request en el clon, con el observador externo.</dd></div>
+  </dl>
+  <p class="note">app de prueba: 7 fallas plantadas, 3 rondas, en una máquina ARM de 4 núcleos</p>
+</section>
+
+<!-- ================= LÍMITES ================= -->
+<section class="col" id="limites">
+  <p class="when">límites</p>
+  <h2>Lo que no hace</h2>
+  <ul class="limits">
+    <li>Reconocimiento sin explotación no dispara ningún oráculo.</li>
+    <li>Lo que el proxy no marca como sospechoso llega a producción.</li>
+    <li>No ve fallas de lógica de negocio.</li>
+    <li>El parche automático cubre SQL, path traversal y datos ajenos.</li>
+    <li>Protege la capa HTTP, no un PLC ni un escritorio remoto.</li>
+  </ul>
+</section>
+
+<!-- ================= CIERRE ================= -->
+<section class="col" id="probar">
+  <p class="when">código</p>
+  <h2>Todo está en el repositorio</h2>
+  <p>Proxy, clon, oráculos, validaciones y la app de prueba. Las mediciones se pueden reproducir.</p>
+  <figure class="win">
+    <div class="win-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="win-t">terminal</span></div>
+    <pre><span class="c"># instala la CLI desde el repositorio</span>
+<span class="p">$</span> git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25
+<span class="p">$</span> cd platanus-hack-26-cl-team-25 &amp;&amp; ./install.sh
+
+<span class="c"># analiza tu app y deja el proxy listo para desplegar</span>
+<span class="p">$</span> cd tu-app &amp;&amp; immune init</pre>
+  </figure>
+  <p class="cta"><a class="btn" href="https://github.com/platanus-hack/platanus-hack-26-cl-team-25" rel="noopener">Ver el repositorio ↗</a></p>
+</section>
+
+</main>
+
+<footer>
+  <p><svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><path d="M17 7H8v34h9M31 7h9v34h-9"/><circle cx="24" cy="24" r="6"/></svg>immune · Platanus Hack 26, Santiago · team-25</p>
+  <p>Nicolás Funes, Bautista Silvano, Isidro Pasman y Uriel Gandelman</p>
+</footer>
+
+<script>
+(function () {
+  var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---- Terminal del hero: tipea el exploit y revela la secuencia ---- */
+  var term = document.querySelector("[data-term]");
+  if (term) {
+    var cmd = term.querySelector("[data-cmd]");
+    var full = cmd.textContent;
+    var lines = [].slice.call(term.querySelectorAll(".ln"));
+    var replay = term.querySelector("[data-replay]");
+    var timers = [];
+    var later = function (fn, ms) { timers.push(setTimeout(fn, ms)); };
+    var finish = function () {
+      cmd.textContent = full;
+      lines.forEach(function (l) { l.classList.add("in"); });
+      term.classList.add("done");
+      replay.hidden = false;
+    };
+    var play = function () {
+      timers.forEach(clearTimeout); timers = [];
+      term.classList.remove("done"); replay.hidden = true;
+      lines.forEach(function (l) { l.classList.remove("in"); });
+      lines[0].classList.add("in");
+      cmd.textContent = "";
+      var i = 0;
+      (function type() {
+        cmd.textContent = full.slice(0, ++i);
+        if (i < full.length) later(type, 26);
+        else lines.slice(1).forEach(function (l, k) {
+          later(function () {
+            l.classList.add("in");
+            if (k === lines.length - 2) { term.classList.add("done"); replay.hidden = false; }
+          }, 420 + k * 620);
+        });
+      })();
+    };
+    if (reduce) finish(); else later(play, 500);
+    replay.addEventListener("click", play);
+  }
+
+  /* ---- Bucle: el paso visible define el estado del diagrama y del riel ---- */
+  var stage = document.querySelector("[data-stage]");
+  var cap = document.querySelector("[data-cap]");
+  var steps = [].slice.call(document.querySelectorAll(".step"));
+  var rail = [].slice.call(document.querySelectorAll(".rail a"));
+  var set = function (n) {
+    var cls = "stage s" + n;
+    for (var k = 0; k <= n; k++) cls += " ge" + k;
+    stage.className = cls;
+    cap.textContent = steps[n].getAttribute("data-cap");
+    rail.forEach(function (a, k) {
+      a.classList.toggle("on", k === n);
+      a.classList.toggle("past", k < n);
+    });
+  };
+  set(0);
+
+  if ("IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting) set(steps.indexOf(e.target)); });
+    }, { rootMargin: "-50% 0px -50% 0px" });
+    steps.forEach(function (s) { io.observe(s); });
+
+    var story = document.querySelector(".story");
+    new IntersectionObserver(function (es) {
+      document.body.classList.toggle("in-story", es[0].isIntersecting);
+    }, { rootMargin: "-40% 0px -40% 0px" }).observe(story);
+
+    var rise = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("in"); rise.unobserve(e.target); } });
+    }, { rootMargin: "0px 0px -12% 0px" });
+    [].forEach.call(document.querySelectorAll(".rise, .tl"), function (el) { rise.observe(el); });
+  } else {
+    [].forEach.call(document.querySelectorAll(".rise, .tl"), function (el) { el.classList.add("in"); });
+  }
+})();
+</script>
+</body>
+</html>

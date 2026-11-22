@@ -26,6 +26,9 @@ from .repo import RepoError
 log = logging.getLogger("pipeline")
 
 
+TRANSIENT = "transient"     # outcome_detail: closed for a reason that may not hold later (see retry_transient)
+
+
 class Closed(Exception):
     """Raised inside the flow to close the incident with an outcome."""
 
@@ -142,6 +145,83 @@ class Pipeline:
         log.info("queued %s: %s %s %s param=%s", iid, sk["vuln_class"], sk["method"], sk["route"], sk["param"])
         return iid
 
+    # ------------------------------------------------------------ upkeep between incidents
+    def maintain(self, every: float = 20.0) -> None:
+        """Called from the main loop when idle. Keeps the promise made when an incident closes without a patch
+        ("the rule stays active"), and gives a second chance to incidents that failed for a transient reason."""
+        now = time.time()
+        if now - getattr(self, "_maintained", 0.0) < every:
+            return
+        self._maintained = now
+        try:
+            self.bus.flush()            # events the bus could not take earlier
+        except Exception as e:  # noqa: BLE001
+            log.warning("bus flush failed: %s", e)
+        try:
+            self.keep_rules()
+        except Exception as e:  # noqa: BLE001
+            log.warning("rule upkeep failed: %s", e)
+        try:
+            self.retry_transient()
+        except Exception as e:  # noqa: BLE001
+            log.warning("retry pass failed: %s", e)
+
+    def keep_rules(self) -> int:
+        """A rule lives until its incident's fix is deployed (no TTL by default). While the incident is closed
+        without a deployed fix the reason stands: put the rule back if the gateway lost it (e.g. a restart that
+        did not restore state), and, if a TTL was configured, renew it before it expires."""
+        with self.state.lock:
+            open_rules = [(i["incident"], dict(i["rule"])) for i in self.state.data["incidents"].values()
+                          if i.get("status") == "closed" and i.get("outcome") == "rule_only"
+                          and isinstance(i.get("rule"), dict) and i.get("rule_posted")]
+        if not open_rules:
+            return 0
+        active = {r.get("id"): r for r in self.gw.rules()}
+        renewed = 0
+        for iid, rule in open_rules:
+            cur = active.get(rule.get("id"))
+            if cur is not None:
+                ttl_s = rule.get("ttl_s") or self.cfg.rule_ttl_s
+                left = cur.get("expires_in")
+                # a no-ttl rule never expires; a timed one is renewed only in its last quarter
+                if ttl_s is None or left is None or float(left) > float(ttl_s) / 4:
+                    continue
+            for k in ("created", "expires_in"):
+                rule.pop(k, None)
+            self.gw.post_rule(rule)
+            renewed += 1
+            log.info("[%s] rule %s %s: the incident is still unpatched", iid, rule.get("id"),
+                     "renewed" if cur is not None else "restored")
+        return renewed
+
+    def retry_transient(self) -> list:
+        out = []
+        now = time.time()
+        with self.state.lock:
+            d = self.state.data
+            for iid, inc in d["incidents"].items():
+                if inc.get("status") != "closed" or inc.get("outcome_detail") != TRANSIENT:
+                    continue
+                n = int(inc.get("retries") or 0)
+                if n >= self.cfg.max_retries:
+                    continue
+                # 1, 4, 16 minutes, then hourly: quick for a blip, cheap during a long outage of the generator
+                if now - float(inc.get("closed_at") or now) < min(3600.0, self.cfg.retry_cooldown_s * 4 ** n):
+                    continue
+                inc["retries"] = int(inc.get("retries") or 0) + 1
+                inc["status"] = "queued"
+                inc.setdefault("log", []).append("%.1f retry %d after a transient failure: %s"
+                                                 % (now, inc["retries"], inc.get("reason")))
+                if iid not in d["queue"]:
+                    d["queue"].append(iid)
+                out.append(iid)
+            if out:
+                self.state.save()
+        for iid in out:
+            log.info("[%s] queued again (retry %d of %d): last close was transient", iid,
+                     self.state.incident(iid)["retries"], self.cfg.max_retries)
+        return out
+
     # ------------------------------------------------------------ main loop step
     def paused(self) -> bool:
         return os.path.exists(self.cfg.pause_file)
@@ -203,7 +283,7 @@ class Pipeline:
             self.close(inc, c.outcome, c.reason, c.detail)
         except Exception as e:  # noqa: BLE001
             log.error("[%s] failed: %s\n%s", iid, e, traceback.format_exc())
-            self.close(inc, "rule_only", "pipeline error: %s: %s" % (type(e).__name__, e))
+            self.close(inc, "rule_only", "pipeline error: %s: %s" % (type(e).__name__, e), TRANSIENT)
         finally:
             for d in inc.pop("_tmp", []):
                 shutil.rmtree(d, ignore_errors=True)
@@ -212,7 +292,8 @@ class Pipeline:
 
     def close(self, inc, outcome: str, reason: str, detail: str | None = None):
         t0 = inc.get("first_seen") or inc["t"]["start"]
-        str_ = round(inc["rule_posted"] - t0, 1) if inc.get("rule_posted") else None
+        rp = inc.get("first_rule_posted") or inc.get("rule_posted")
+        str_ = round(rp - t0, 1) if rp else None
         stp = round(inc["t"]["verified"] - t0, 1) if outcome == "patched" and inc["t"].get("verified") else None
         inc.update(status="closed", outcome=outcome, reason=reason, closed_at=time.time(),
                    seconds_to_rule=str_, seconds_to_patch=stp, outcome_detail=detail)
@@ -271,6 +352,7 @@ class Pipeline:
         self.gw.post_rule(rule)
         inc["rule"] = rule
         inc["rule_posted"] = time.time()
+        inc.setdefault("first_rule_posted", inc["rule_posted"])     # a retry must not move the containment time
         self.note(inc, "rule %s posted (%s)" % (rule["id"], rule["scope"]))
         self.state.save()
 
@@ -280,11 +362,12 @@ class Pipeline:
         if autopatch == "off":
             raise Closed("rule_only", "autopatch is off; the rule stays active", "autopatch_off")
         if pm is None:
-            raise Closed("rule_only", "patch generator unavailable (%s); the rule stays active" % self._patcher_err)
+            raise Closed("rule_only", "patch generator unavailable (%s); the rule stays active" % self._patcher_err,
+                         TRANSIENT)
         try:
             self.repo.ensure_base()
         except Exception as e:  # noqa: BLE001
-            raise Closed("rule_only", "repository target unavailable: %s" % e)
+            raise Closed("rule_only", "repository target unavailable: %s" % e, TRANSIENT)
         feedback, change, patched_dir, attempt_ok = [], None, None, False
         for attempt in range(1, cfg.max_attempts + 1):
             t = time.time()
@@ -292,11 +375,13 @@ class Pipeline:
                 out = _call_with_timeout(pm.propose, cfg.patcher_timeout_s, base_dir, incmod.public(inc), list(feedback),
                                          attempt) or {}
             except Exception as e:  # noqa: BLE001
-                out = {"diff": "", "source": "llm", "notes": "patch generator failed: %s" % e}
+                out = {"diff": "", "source": "llm", "notes": "patch generator failed: %s" % e, "_failed": True}
             src = out.get("source") if out.get("source") in ("llm", "fallback") else "llm"
             diff = out.get("diff") if isinstance(out.get("diff"), str) else ""
             rec = {"attempt": attempt, "source": src, "notes": str(out.get("notes") or "")[:2000],
                    "propose_s": round(time.time() - t, 1), "gates": []}
+            if out.get("_failed") or not diff.strip():
+                rec["no_proposal"] = True       # the generator gave nothing to judge (down, timed out, quota)
             inc["attempts"].append(rec)
             self.publish(E.PATCH_ATTEMPT, {"incident": iid, "attempt": attempt, "source": src}, inc)
             self.publish(E.PATCH_DIFF, {"incident": iid, "attempt": attempt, "diff": diff}, inc)
@@ -333,7 +418,9 @@ class Pipeline:
             reason = "no patch passed the gates after %d attempts; the rule stays active" % cfg.max_attempts
             if change is not None:
                 self._safe(self.repo.abandon, change, reason + "\n\n" + "\n".join(feedback))
-            raise Closed("rule_only", reason)
+            # nothing was ever proposed: the generator is unavailable, not the fix impossible. Try again later.
+            none = all(a.get("no_proposal") for a in inc["attempts"][-cfg.max_attempts:])
+            raise Closed("rule_only", reason, TRANSIENT if none else None)
         if change is None:
             raise Closed("rule_only", "the pull request could not be opened; the rule stays active")
         caps = list(caps) + list(getattr(self.v, "caps", []) or [])
@@ -349,7 +436,7 @@ class Pipeline:
             sha = self.repo.merge(change)
         except Exception as e:  # noqa: BLE001
             if not self._use_local("merge failed: %s" % e, inc):
-                raise Closed("rule_only", "merge failed: %s" % e)
+                raise Closed("rule_only", "merge failed: %s" % e, TRANSIENT)
             change = self._open_change(inc, change.attempt, good_diff, patched_dir, None)
             for g in inc["attempts"][-1]["gates"]:
                 self._report(change, g["gate"], g["ok"], g["detail"])
@@ -367,13 +454,14 @@ class Pipeline:
         try:
             res = self.fleet.deploy(new_rel, timeout=cfg.deploy_timeout_s)
         except Exception as e:  # noqa: BLE001
-            res = {"ok": False, "rolled_back": False, "detail": "deploy call failed: %s" % e}
+            res = {"ok": False, "rolled_back": False, "detail": "deploy call failed: %s" % e, "unreachable": True}
         inc["t"]["deploy_s"] = round(time.time() - t, 1)
         inc["deploy"] = res
         if not res.get("ok"):
             self._safe(self.repo.revert, change, sha, "deploy of %s failed: %s" % (new_rel, res.get("detail")))
             raise Closed("rule_only", "deploy of %s %s: %s; the rule stays active" % (
-                new_rel, "rolled back" if res.get("rolled_back") else "failed", res.get("detail")))
+                new_rel, "rolled back" if res.get("rolled_back") else "failed", res.get("detail")),
+                TRANSIENT if res.get("unreachable") else None)
         with self.state.lock:
             self.state.data["current_release"] = new_rel
         self.state.save()

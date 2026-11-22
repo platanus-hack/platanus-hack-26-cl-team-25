@@ -1,7 +1,5 @@
 """A `param_present` rule: every request that carries the parameter is detonated; the grammar only decides an
 inconclusive clone. Rules have no ttl by default and survive a gateway restart."""
-import json
-
 import httpx
 from starlette.testclient import TestClient
 
@@ -43,23 +41,20 @@ def test_every_request_with_the_parameter_is_detonated(world):
     httpx.put(w.admin + "/_admin/pool", headers=ADMIN, json={"clones": []})
     assert httpx.get(w.url + "/search", params={"q": "usb"}).status_code == 404
     assert rule_state(w)["stats"]["denied"] == 2
-    # written next to the recordings on every change
-    stored = json.loads((w.record.parent / "rules.json").read_text())["rules"]
-    assert [(x["rule"]["id"], x["expires"]) for x in stored] == [("rule-i1", None)]
     assert httpx.delete(w.admin + "/_admin/rules/rule-i1", headers=ADMIN).status_code == 200
-    assert json.loads((w.record.parent / "rules.json").read_text()) == {"rules": []}
 
 
 def test_rules_survive_a_restart(tmp_path):
-    path = tmp_path / "state" / "rules.json"
-    cfg = Config(rules_path=str(path), admin_token="adm")
+    # rules are part of the persisted gateway state (GW_STATE_PATH); a no-ttl rule restores with an infinite clock.
+    path = tmp_path / "stack" / "gateway-state.json"
+    cfg = Config(state_path=str(path), admin_token="adm")
     gw = Gateway(cfg)
     with TestClient(gw.admin_app()) as c:
         timed = {"id": "t", "method": "GET", "route": "/a", "scope": "all", "ttl_s": 600}
         gone = {"id": "g", "method": "GET", "route": "/b", "scope": "all", "ttl_s": 600}
         assert c.post("/_admin/rules", json=[RULE, timed, gone], headers=ADMIN).status_code == 201
         assert c.delete("/_admin/rules/g", headers=ADMIN).status_code == 200
-    again = Gateway(cfg)                                              # a new process reading the same file
+    again = Gateway(cfg)                                              # a new process reading the same state file
     assert sorted(again.rules) == ["rule-i1", "t"]
     assert again.rules["rule-i1"].scope == "param_present" and again.rules["rule-i1"].expires == float("inf")
     assert again.rules["t"].expires == gw.rules["t"].expires          # the ttl clock is not restarted
@@ -68,10 +63,3 @@ def test_rules_survive_a_restart(tmp_path):
     assert sorted(Gateway(cfg).rules) == ["rule-i1"]
     path.write_text("not json")                                       # a damaged file never stops the gateway
     assert Gateway(cfg).rules == {}
-
-
-def test_rules_path_defaults_next_to_the_recordings():
-    assert Config.from_env({"RECORD_PATH": "/runtime/recordings/requests.jsonl"}).rules_path == \
-        "/runtime/recordings/rules.json"
-    assert Config.from_env({"RECORD_PATH": "/r/x.jsonl", "RULES_PATH": "/s/rules.json"}).rules_path == "/s/rules.json"
-    assert Config.from_env({}).rules_path == ""

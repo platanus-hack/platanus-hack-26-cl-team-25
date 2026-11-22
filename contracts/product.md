@@ -110,7 +110,9 @@ routes:                       # OpenAPI path parameter -> table/column, for owne
 ```
 immune init [--project DIR] [--yes] [--no-llm]   analyse the project, write .immune/, verify, print deploy instructions
 immune doctor [--project DIR] [--json]            run the verification checks (also run by init)
-immune up | down | status | reset [--project DIR] start/stop the stack for the project (what deploy/demo.sh does today)
+immune up [--project DIR]                         start the stack, or bring back whatever is missing of a stack that already ran (§11)
+immune reset [--project DIR]                      back to t0: fresh data, t0 in production, no incidents
+immune down | status [--project DIR]              stop everything / health summary (exit 1 when not healthy)
 immune deploy [--project DIR]                     apply generated deploy artifacts (.immune/deploy/) or print the manual steps
 immune report [--project DIR]                     summary from the bus/recordings: detonations, verdicts, incidents, would-have in observe
 immune autopatch off|pr|merge ; immune mode observe|enforce
@@ -177,3 +179,50 @@ Corpus: `<runtime>/corpus/<class>.jsonl`, confirmed parameter values only, dedup
 ## 10. Generic runtime as built
 
 Per clone: app container (project image, `--cap-drop ALL`), private Postgres, and the observer (`immune-sidecar:1`) sharing the app's network and PID namespaces with `SYS_PTRACE` as its only capability. Extra config keys: `app.build`, `app.workdir`, `app.bind_env`, `app.warmup_paths`, `data.prod_url_env`, `data.demo_postgres`. `pre_state_b64` is null for Postgres.
+
+## 11. Operation: restarts, failures, limits (as built and tested live)
+
+**`up` never goes back to t0.** If the project has a run on disk (`<runtime>/run_id` and `stack/fleet-state.json` agree, and the recorded release exists), `immune up` resumes it: same release in production, same containment rules, open incidents continue. Only `immune reset` returns to t0. For `app.runtime: generic` a run is resumed only while its containers still exist (`immune down` removes that runtime's images and demo database).
+
+**Host processes are supervised and outlive the session that started them.** `fleet` and `pipeline` run under `python -m immune.supervise <spec.json>`, which restarts them (1 s, doubling to 30 s). With a systemd user manager the supervisor is a transient unit `immune-<project>-<fleet|pipeline>.service`; without one it is a detached process (`IMMUNE_NO_SYSTEMD=1` forces that). A process started from a terminal, SSH or agent session without this dies when that session's cgroup is closed. Files: `<runtime>/stack/<name>.supervise.json` (0600, holds the stack secrets), `<runtime>/logs/<name>.pid` (supervisor), `<name>.pid.child` (process), `<name>.log` (appended within a run, emptied by `reset`).
+
+**State that survives a restart** (all under `<runtime>/`, valid only for the run that wrote it):
+
+| Process | File | Holds | On start |
+|---|---|---|---|
+| gateway | `stack/gateway-state.json` | upstream, mode, rules with absolute expiry | restored before the first request |
+| fleet | `stack/fleet-state.json` | live colour, release, pool size, clone counter | `adopt()`: keeps running prod and clones (clone keys are read back from the containers), restarts prod if absent; if both colours run, the gateway's upstream decides |
+| pipeline | `pipeline/state.json` | incidents, queue, last bus seq | an incident left open is redone from the start |
+
+**Watchdogs in the fleet reconcile loop** (every `reconcile_s`): the live prod container is recreated if removed and has Docker restart policy `unless-stopped`; `gateway` and `dashboard` containers are started if found stopped; dead clones are replaced.
+
+**Pipeline under failure.**
+- `POST /deploy` that loses its connection is not a failed deploy: the client waits for the fleet (90 s), reads `/state`, and either confirms the release is live or asks again (3 attempts).
+- An incident closed `rule_only` for a reason that may not hold later gets `outcome_detail: transient` (generator unreachable or silent on every attempt, repository or merge unavailable, deploy unreachable, internal error) and is queued again after `retry_cooldown_s` × 4^n, capped at 1 h, `max_retries` times (env `PIPELINE_RETRY_COOLDOWN_S` 60, `PIPELINE_MAX_RETRIES` 5). A patch rejected by the gates is not transient.
+- The rule of an incident closed without a deployed fix is renewed before its TTL ends and re-posted if the gateway lost it. `seconds_to_rule` is the first time the rule was active, across retries.
+
+**Deploy watch.** A new release is rolled back when, since the switch, production answered 5xx at a rate above `max(2 × rate of the release it replaced, that rate + 2 %)`. With an old release that never failed, one 5xx is enough. Requests the gateway refuses itself (below) are not production errors.
+
+**Gateway input limits.** Answered by the gateway, never forwarded, never counted as production errors: target not starting with `/` → 400; `Content-Length` over 10 MB or a body growing past it → 413; body not completed within 30 s → 408; bytes that cannot be put on the wire as sent → 400. To production: a refused connection is retried once for any method; a pooled connection the upstream had closed is retried once for GET/HEAD/OPTIONS only.
+
+**Bounded disk.** Recording: `requests.jsonl` rotates to `.1` at `RECORD_MAX_MB` (256); the legit gate reads the tail of both. Releases: after a deploy only t0, the live one, any still mounted by a container and the 5 newest are kept. Not bounded yet: the bus log `bus/events.jsonl`.
+
+**`immune up` fails early** with the port and its config key when a port of the stack is held by something else.
+
+Measured on the built-in app, one run each, under 20 requests/s of legitimate traffic (2026-11-21):
+
+| Failure injected | Back to healthy | Requests failed |
+|---|---|---|
+| `kill -9` fleet / pipeline / fleet supervisor | 2.0 s / 1.3 s / 3.3 s | 0 |
+| gateway process crash; gateway container killed by hand | 2.0 s; 1.5 s | ~1.3 s of refused connections |
+| prod process crash; prod container removed | 1.3 s; 1.3 s | ~1.2 s of 502 |
+| clone crash or removal; dashboard/bus crash | 1.5–1.8 s | 0 |
+| pipeline killed when an incident opens | incident patched (55 s) | 0 |
+| fleet killed during the deploy | incident patched (57 s) | 0 |
+| gateway crashed with a rule active | rule back on restart; incident patched (49 s) | 0.6 s |
+| release that does not start; release answering 500 | never takes traffic; rolled back | 0; 1.1 s of 500 |
+| generator down, no fallback | 3 defects contained by rules, retried, patched when it returned | 0 |
+| `immune down` then `immune up` | 4 s, patched release in production | — |
+
+Not covered: loss of the host or of Docker itself (after a reboot `immune up` resumes; nothing runs it at boot), the demo Postgres of the generic example (in memory, unsupervised: stands in for the customer's database), a client that holds thousands of slow connections (put a reverse proxy in front), and an attacker who raises the 5xx rate only during the 20 s watch window.
+

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures as cf
+import json
 import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -28,6 +30,10 @@ class FleetError(Exception):
 
 class GatewayError(Exception):
     pass
+
+
+# prod comes back by itself after a crash or a host reboot; clones are replaced by the reconcile loop instead
+PROD_RESTART = {"Name": "unless-stopped"}
 
 
 @dataclass
@@ -79,6 +85,12 @@ class Gateway:
     def stats(self):
         return self.call("GET", "/_admin/stats")
 
+    def start_canary(self, addr, release, weight):
+        return self.call("POST", "/_admin/canary", {"addr": addr, "release": release, "weight": weight})
+
+    def stop_canary(self):
+        return self.call("DELETE", "/_admin/canary")
+
     def reset(self):
         self.call("POST", "/_admin/reset")
 
@@ -98,6 +110,145 @@ class Fleet:
         self._next_n = 1
         self._last_pool_sig = None
         self._stop = threading.Event()
+
+    # -------------------------------------------------- persisted state
+    # What a restarted fleet process cannot read back from Docker: which colour is live, the pool size, the
+    # clone counter. Written after every change; adopt() uses it so a restart never needs a /reset (which
+    # would put t0, the unpatched release, back in production).
+    def _state_path(self) -> str:
+        return os.path.join(self.cfg.runtime_dir, "stack", "fleet-state.json")
+
+    def _save(self) -> None:
+        path = self._state_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"run_id": self.cfg.run_id, "active": self.active, "release": self.release,
+                           "pool_size": self.pool_size, "next_n": self._next_n, "ts": time.time()}, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning("cannot persist fleet state at %s: %s", path, e)
+
+    def _load(self) -> dict | None:
+        try:
+            with open(self._state_path()) as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(st, dict) or st.get("run_id") != self.cfg.run_id:
+            return None
+        if st.get("active") not in ("blue", "green") or not RELEASE_RE.match(str(st.get("release") or "")):
+            return None
+        return st
+
+    def _container(self, name):
+        try:
+            return self.dk.containers.get(name)
+        except NotFound:
+            return None
+
+    def _clone_key(self, c) -> str | None:
+        """CLONE_KEY of a running clone (generic runtime: it lives in the observer, see fleet/generic.py)."""
+        for kv in (c.attrs.get("Config") or {}).get("Env") or []:
+            if kv.startswith("CLONE_KEY="):
+                return kv.split("=", 1)[1] or None
+        return None
+
+    def adopt(self) -> bool:
+        """After a restart: take over the containers of this run instead of starting from nothing."""
+        with self.lock:
+            if self.active:
+                return True
+            st = self._load()
+            if st is None:
+                return False
+            active, release = st["active"], st["release"]
+            other = "green" if active == "blue" else "blue"
+            prod = self._container(f"{self.cfg.name_prefix}-prod-{active}")
+            alt = self._container(f"{self.cfg.name_prefix}-prod-{other}")
+            try:
+                up = self.gw.get_upstream().get("addr")
+            except GatewayError:
+                up = None
+            if alt is not None and alt.status == "running" and up == self._addr(other) \
+                    and self.healthy(alt, self.cfg.health_path):
+                # we died between the upstream switch and recording it: the gateway is the truth
+                active, other = other, active
+                release = (alt.labels or {}).get("immune.release") or release
+                prod, alt = alt, prod
+            try:
+                self._release_dir(release)
+            except FleetError as e:
+                log.error("cannot adopt run %s: %s", self.cfg.run_id, e)
+                return False
+            if prod is None or prod.status not in ("running", "restarting") or not self.wait_healthy(prod):
+                log.warning("adopt: prod-%s is not serving; starting release %s again", active, release)
+                try:
+                    prod = self.start_prod(active, release)
+                    if not self.wait_healthy(prod):
+                        log.error("adopt: prod-%s failed its health check", active)
+                except Exception as e:  # noqa: BLE001
+                    log.error("adopt: cannot start prod-%s: %s", active, e)
+            if alt is not None:
+                try:
+                    self.destroy(alt)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("adopt: leftover prod-%s: %s", other, e)
+            self.active, self.release = active, release
+            self.pool_size = int(st.get("pool_size") or 0)
+            top = 0
+            for c in self.owned():
+                if (c.labels or {}).get("immune.role") != "clone":
+                    continue
+                m = re.search(r"-clone-(\d+)$", c.name)
+                n = int(m.group(1)) if m else 0
+                top = max(top, n)
+                key = self._clone_key(c) if c.status == "running" else None
+                if m and key and (c.labels or {}).get("immune.release") == release \
+                        and len(self.clones) < self.pool_size:
+                    cl = Clone(n=n, key=key, release=release, prefix=self.cfg.name_prefix)
+                    self.clones[cl.name] = cl
+                else:
+                    try:
+                        self.destroy(c)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("adopt: leftover %s: %s", c.name, e)
+            self._next_n = max(int(st.get("next_n") or 1), top + 1)
+            self._last_pool_sig = None
+            self._save()
+            log.info("adopted run %s: prod-%s on %s, %d/%d clone(s)", self.cfg.run_id, active, release,
+                     len(self.clones), self.pool_size)
+            return True
+
+    def _ensure_prod(self) -> None:
+        """Reconcile: the live colour must exist. Docker restarts a crashed one; a removed one is recreated."""
+        name = f"{self.cfg.name_prefix}-prod-{self.active}"
+        c = self._container(name)
+        if c is not None and c.status in ("running", "restarting", "created"):
+            return
+        log.error("prod container %s is %s; starting release %s again", name, c.status if c else "gone",
+                  self.release)
+        try:
+            c = self.start_prod(self.active, self.release)
+            if not self.wait_healthy(c):
+                log.error("prod container %s failed its health check after the restart", name)
+        except Exception as e:  # noqa: BLE001
+            log.error("cannot restart %s: %s", name, e)
+
+    def _ensure_services(self) -> None:
+        """Reconcile: gateway and dashboard (compose services) must be running. Docker's restart policy covers
+        a crash; it does not cover a container that was stopped or killed by hand, and the gateway is the only
+        way in."""
+        for svc in ("gateway", "dashboard"):
+            c = self._container(f"{self.cfg.name_prefix}-{svc}")
+            if c is None or c.status not in ("exited", "dead", "created"):
+                continue
+            log.error("%s container is %s; starting it", svc, c.status)
+            try:
+                c.start()
+            except Exception as e:  # noqa: BLE001
+                log.error("cannot start %s: %s", c.name, e)
 
     # ---------------------------------------------------------------- bus
     def publish(self, type_, data):
@@ -165,7 +316,7 @@ class Fleet:
         hc = api.create_host_config(
             binds=binds, tmpfs=tmpfs, read_only=True, cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"], pids_limit=pids, mem_limit=mem, memswap_limit=mem,
-            network_mode=net)
+            network_mode=net, restart_policy=PROD_RESTART if role == "prod" else None)
         nc = api.create_networking_config({net: api.create_endpoint_config(aliases=aliases or None)})
         cid = api.create_container(
             self.cfg.image, cmd, name=name, environment=env, host_config=hc, networking_config=nc,
@@ -327,6 +478,7 @@ class Fleet:
             except GatewayError as e:
                 errors.append(str(e))
                 self.gw_ok = False
+            self._save()
             return {"ok": True, "prod": {"active": "blue", "release": release},
                     "clones": [c.id for c in self.clones.values()], "gateway_errors": errors}
 
@@ -340,7 +492,8 @@ class Fleet:
             self.publish("deploy.started", {"release": release})
             res = self._deploy(release, old, old_rel, new)
             self.publish("deploy.done", {"release": release, "ok": res["ok"],
-                                         "rolled_back": res["rolled_back"], "detail": res["detail"]})
+                                         "rolled_back": res["rolled_back"], "detail": res["detail"],
+                                         "canary": res.get("canary")})
             return res
 
     def _deploy(self, release, old, old_rel, new):
@@ -362,21 +515,43 @@ class Fleet:
             return fail("new release failed health check", c)
         if not self.healthy(c, self.cfg.smoke_path):
             return fail(f"smoke request {self.cfg.smoke_path} failed", c)
+        # error rate of the release being replaced: the yardstick for the one coming in. Without it, anyone able
+        # to make the app answer 5xx (old release included) could undo every deploy by doing so during the watch.
+        before_rate = 0.0
+        try:
+            st = self.gw.stats()
+            before_rate = int(st.get("prod_5xx", 0)) / max(1, int(st.get("prod_requests", 0)))
+        except (GatewayError, ValueError, TypeError):
+            pass
+        t_canary = time.time()
+        canary = self._canary(release, new)
+        if canary["verdict"] == "worse":
+            res = fail("canary: %s; the release never took the full traffic" % canary["detail"], c)
+            res["canary"] = canary
+            return res
         try:
             self.gw.set_upstream(self._addr(new), release)
         except GatewayError as e:
             return fail(f"gateway upstream switch failed: {e}", c)
         self.active, self.release = new, release
+        self._save()
         baseline = 0
         try:
             baseline = int(self.gw.stats().get("prod_5xx", 0))
         except GatewayError:
             pass
-        deadline = time.time() + self.cfg.deploy_watch_s
+        # a canary that passed already watched the release under real traffic: that time counts as watch time
+        watch_s = self.cfg.deploy_watch_s
+        if canary["verdict"] == "ok":
+            watch_s = max(min(watch_s, 2.0), watch_s - (time.time() - t_canary))
+        deadline = time.time() + watch_s
         grew = False
         while True:
             try:
-                if int(self.gw.stats().get("prod_5xx", 0)) > baseline:
+                st = self.gw.stats()
+                errs, reqs = int(st.get("prod_5xx", 0)) - baseline, max(1, int(st.get("prod_requests", 0)))
+                # a regression: 5xx since the switch, at a clearly higher rate than the old release had
+                if errs > 0 and errs / reqs > max(2 * before_rate, before_rate + 0.02):
                     grew = True
                     break
             except GatewayError:
@@ -390,14 +565,89 @@ class Fleet:
             except GatewayError as e:
                 log.error("rollback switch failed: %s", e)
             self.active, self.release = old, old_rel
-            return fail("prod_5xx grew after switch; rolled back", c, rolled_back=True)
+            self._save()
+            res = fail("prod_5xx grew after switch; rolled back", c, rolled_back=True)
+            res["canary"] = canary
+            return res
         try:
             self.destroy_name(f"{self.cfg.name_prefix}-prod-{old}")
         except Exception as e:  # noqa: BLE001
             log.warning("old colour cleanup: %s", e)
         replaced = self._refresh_clones(release)
+        self._prune_releases()
         return {"ok": True, "rolled_back": False, "release": release, "active": new,
-                "detail": "deployed", "clones_replaced": replaced}
+                "detail": "deployed", "clones_replaced": replaced, "canary": canary}
+
+    # -- canary: part of the real traffic on the new release, next to the old one, before it takes everything
+    @staticmethod
+    def _worse(c: dict, s: dict) -> str | None:
+        """Why the canary side `c` is clearly worse than the stable side `s` over the same window, or None.
+        Both sides get the same mix of clients (the gateway draws per request), so the old release is the
+        yardstick: errors it also has are not held against the new one."""
+        n, m = max(1, int(c.get("requests", 0))), max(1, int(s.get("requests", 0)))
+        e5, s5 = int(c.get("5xx", 0)) / n, int(s.get("5xx", 0)) / m
+        if int(c.get("5xx", 0)) > 0 and e5 > max(2 * s5, s5 + 0.02):
+            return "5xx on %.0f%% of its requests against %.0f%% on the current release" % (100 * e5, 100 * s5)
+        # a fix that starts refusing legitimate requests shows up as 4xx, not as 5xx
+        e4, s4 = int(c.get("4xx", 0)) / n, int(s.get("4xx", 0)) / m
+        if int(c.get("4xx", 0)) >= 5 and e4 > max(2 * s4, s4 + 0.10):
+            return "4xx on %.0f%% of its requests against %.0f%% on the current release" % (100 * e4, 100 * s4)
+        return None
+
+    def _canary(self, release, new) -> dict:
+        """Run the canary window. verdict: ok (same behaviour, enough traffic) | worse (abort the deploy) |
+        skipped (turned off, gateway without canary support, or too little traffic to say anything)."""
+        cfg = self.cfg
+        out = {"verdict": "skipped", "detail": "canary is off", "weight": cfg.canary_weight, "seconds": 0.0,
+               "canary": {}, "stable": {}}
+        if cfg.canary_weight <= 0 or cfg.canary_s <= 0:
+            return out
+        t0 = time.time()
+        try:
+            self.gw.start_canary(self._addr(new), release, cfg.canary_weight)
+        except GatewayError as e:
+            out["detail"] = "gateway did not start the canary (%s)" % e
+            return out
+        deadline, why, lost = t0 + cfg.canary_s, None, False
+        while True:
+            try:
+                view = self.gw.stats().get("canary")
+                if not view or view.get("release") != release:
+                    lost = True            # the gateway restarted or someone else switched: nothing to compare
+                    break
+                out["canary"], out["stable"] = view.get("canary") or {}, view.get("stable") or {}
+                # judged as it goes: a broken release leaves as soon as it shows, not at the end of the window
+                if int(out["canary"].get("requests", 0)) >= cfg.canary_min_requests:
+                    why = self._worse(out["canary"], out["stable"])
+                    if why:
+                        break
+            except (GatewayError, ValueError, TypeError, AttributeError):
+                pass
+            # no traffic at all: waiting longer compares nothing, it only delays the fix
+            idle = time.time() - t0 >= min(2.0, cfg.canary_s) and not (
+                int(out["canary"].get("requests", 0)) + int(out["stable"].get("requests", 0)))
+            if idle or time.time() >= deadline:
+                break
+            time.sleep(min(cfg.watch_poll_s, max(0.0, deadline - time.time())))
+        out["seconds"] = round(time.time() - t0, 1)
+        if why:
+            # stop the share first: whatever happens next, clients are back on the release that was working
+            try:
+                self.gw.stop_canary()
+            except GatewayError as e:
+                log.error("canary stop failed: %s", e)
+            out["verdict"], out["detail"] = "worse", why
+        elif lost:
+            out["detail"] = "the gateway lost the canary"
+        elif int(out["canary"].get("requests", 0)) < cfg.canary_min_requests:
+            out["detail"] = "only %d request(s) reached the canary in %.0f s" % (
+                int(out["canary"].get("requests", 0)), out["seconds"])
+        else:
+            out["verdict"] = "ok"
+            out["detail"] = "%d request(s) on the canary, same behaviour as the current release" % int(
+                out["canary"]["requests"])
+        # ok / too little traffic: the switch that follows promotes the canary (the gateway ends it itself)
+        return out
 
     def _refresh_clones(self, release):
         """Replace every free clone not on `release`; captive/busy clones are left alone."""
@@ -430,6 +680,30 @@ class Fleet:
         self._trim()
         return done
 
+    KEEP_RELEASES = 5
+
+    def _prune_releases(self) -> int:
+        """Every fix leaves a release directory behind. Keep t0, what is in production, anything a container
+        still mounts (a captive clone stays on its release) and the newest KEEP_RELEASES; remove the rest."""
+        root = os.path.join(self.cfg.runtime_dir, "releases")
+        try:
+            names = [n for n in os.listdir(root) if RELEASE_RE.match(n) and os.path.isdir(os.path.join(root, n))]
+        except OSError:
+            return 0
+        keep = {"t0", self.release}
+        try:
+            keep |= {(c.labels or {}).get("immune.release") for c in self.owned()}
+        except Exception:  # noqa: BLE001
+            return 0            # cannot tell what is mounted: remove nothing
+        rest = sorted((n for n in names if n not in keep), key=lambda n: os.path.getmtime(os.path.join(root, n)))
+        removed = 0
+        for n in rest[:max(0, len(rest) - self.KEEP_RELEASES)]:
+            shutil.rmtree(os.path.join(root, n), ignore_errors=True)
+            removed += 1
+        if removed:
+            log.info("pruned %d old release dir(s)", removed)
+        return removed
+
     def _trim(self):
         """Drop surplus free clones above pool_size (newest-release preferred)."""
         extra = len(self.clones) - self.pool_size
@@ -459,6 +733,8 @@ class Fleet:
         try:
             if not self.active:
                 return
+            self._ensure_services()
+            self._ensure_prod()
             pool = self._refresh_gw_pool()
             dead = []
             for cl in list(self.clones.values()):
@@ -514,6 +790,11 @@ class Fleet:
             self.publish("pool.state", data)
 
     def loop(self):
+        try:
+            self.adopt()
+        except Exception:  # noqa: BLE001
+            log.exception("adopt failed")
+        self.adopted = True
         while not self._stop.is_set():
             self.reconcile_once()
             self._stop.wait(self.cfg.reconcile_s)
@@ -522,7 +803,7 @@ class Fleet:
         self._stop.set()
 
     def state(self):
-        return {"prod": {"active": self.active, "release": self.release},
+        return {"prod": {"active": self.active, "release": self.release}, "ready": getattr(self, "adopted", False),
                 "pool_size": self.pool_size, "gateway_ok": self.gw_ok, "run_id": self.cfg.run_id,
                 "clones": [{"id": c.id, "name": c.name, "addr": c.addr, "release": c.release,
                             "state": self.gw_states.get(c.id, "free")} for c in list(self.clones.values())]}

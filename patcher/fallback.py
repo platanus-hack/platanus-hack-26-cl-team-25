@@ -12,7 +12,7 @@ import re
 
 from .workspace import Workspace
 
-FALLBACK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fallbacks")
+FALLBACK_DIR = os.environ.get("PATCHER_FALLBACK_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "fallbacks")
 
 
 def route_slug(method: str, route: str) -> str:

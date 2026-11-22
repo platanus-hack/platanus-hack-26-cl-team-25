@@ -30,7 +30,7 @@ from docker.errors import NotFound
 
 from immune import generic as ig
 
-from .manager import Clone, Fleet, FleetError
+from .manager import PROD_RESTART, Clone, Fleet, FleetError
 
 log = logging.getLogger("fleet.generic")
 PG_ARGS = ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
@@ -127,7 +127,8 @@ class GenericFleet(Fleet):
             binds=binds or [], tmpfs=tmpfs or {"/tmp": "size=64m,mode=1777"}, read_only=True, cap_drop=["ALL"],
             cap_add=cap_add or None, security_opt=["no-new-privileges:true"], pids_limit=pids, mem_limit=mem,
             memswap_limit=mem, network_mode=("container:%s" % ns_of) if ns_of else network,
-            pid_mode=("container:%s" % ns_of) if ns_of else None)
+            pid_mode=("container:%s" % ns_of) if ns_of else None,
+            restart_policy=PROD_RESTART if role == "prod" else None)
         nc = None if ns_of else api.create_networking_config(
             {network: api.create_endpoint_config(aliases=aliases or None)})
         lab = self._labels(role, release)
@@ -235,6 +236,14 @@ class GenericFleet(Fleet):
             if rt.startswith(os.path.realpath(dot) + os.sep):
                 tmpfs["/profile/" + os.path.relpath(rt, os.path.realpath(dot))] = "size=1m,mode=0555"
         return binds, tmpfs
+
+    def _clone_key(self, c):
+        # the app container is the customer's image, unmodified: the key lives in its observer
+        obs = self._container(c.name + "-obs")
+        db = self._container(c.name + "-db")
+        if obs is None or db is None or obs.status != "running" or db.status != "running":
+            return None
+        return super()._clone_key(obs)
 
     def destroy(self, c):
         try:

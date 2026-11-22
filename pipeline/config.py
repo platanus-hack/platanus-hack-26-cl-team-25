@@ -74,6 +74,8 @@ class Config:
     patcher_timeout_s: float = 600.0
     verify_wait_s: float = 8.0
     reopen_cooldown_s: float = 300.0
+    retry_cooldown_s: float = 60.0      # transient close: tried again after this, x4 per retry, capped at 1 h
+    max_retries: int = 5
     policy_max_lines: int = 120
     policy_max_files: int = 4
     rule_ttl_s: int | None = None   # None: a rule lives until its patch is verified (PIPELINE_RULE_TTL_S overrides)
@@ -153,6 +155,8 @@ class Config:
             patcher_timeout_s=_f(env, "PIPELINE_PATCHER_TIMEOUT_S", 600),
             verify_wait_s=_f(env, "PIPELINE_VERIFY_WAIT_S", 8),
             reopen_cooldown_s=_f(env, "PIPELINE_REOPEN_COOLDOWN_S", 300),
+            retry_cooldown_s=_f(env, "PIPELINE_RETRY_COOLDOWN_S", 60),
+            max_retries=_i(env, "PIPELINE_MAX_RETRIES", 5),
             policy_max_lines=_i(env, "POLICY_MAX_LINES", 120),
             policy_max_files=_i(env, "POLICY_MAX_FILES", 4),
             rule_ttl_s=_i(env, "PIPELINE_RULE_TTL_S", 0) or None,

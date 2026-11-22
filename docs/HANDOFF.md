@@ -1,4 +1,4 @@
-# Handoff — Winnie Pooh, sistema inmunológico autónomo (team-25)
+# Handoff — Immune, sistema inmunológico autónomo (team-25)
 
 Estado al 2026-11-21. Todo el código está en `main` (commit `0fcc328`).
 
@@ -39,11 +39,13 @@ Encuadre acordado para el pitch: **arquitectura de referencia open source con im
 
 ## 4. Cómo correrlo
 
-Requisitos en la VM: Docker, `.venv/`, imágenes `immune-base:1`, `immune-sidecar:1`, `immune-cbuild:1`. `install.sh` los prepara en una máquina nueva (no probado en limpio).
+Requisitos en la VM: Docker, `.venv/`, imágenes `immune-base:1`, `immune-sidecar:1`, `immune-cbuild:1`. `install.sh` los prepara en una máquina nueva (probado desde cero en un Ubuntu 24.04 limpio; `immune doctor --prereqs` dice qué falta). `immune-cbuild:1` solo hace falta para `anticipate` (`IMMUNE_WITH_ANTICIPATE=1 ./install.sh`).
 
 ```bash
 bin/immune reset                         # demo incorporado (app Tienda): vuelve a t0 y levanta todo
-bin/immune status | down
+bin/immune up                            # levanta, o recupera lo que falte SIN volver a t0 (mantiene parches, reglas e incidentes)
+bin/immune status                        # resumen de salud; sale con 1 si algo no está sano
+bin/immune down
 bin/immune init --project DIR --yes      # adapta el sistema a otra app (FastAPI + SQLite), ~45 s, 3 llamadas al LLM
 bin/immune up   --project DIR            # levanta el stack para esa app
 python -m immune.metrics --bus http://127.0.0.1:8090   # tiempos por incidente
@@ -53,8 +55,10 @@ python -m anticipate run apache-httpd-2.4.49
 
 - Puertos por defecto: gateway 8080, admin 8081, dashboard 8090, fleet 8070 (configurables en `.immune/config.yaml`). Todo en `127.0.0.1`.
 - Toda la configuración de una app vive en `<proyecto>/.immune/` (contrato: `contracts/product.md`).
-- Tests: `.venv/bin/pytest acceptance victim/tests shadow/tests gateway/tests pipeline/tests patcher/tests sim/tests dashboard/tests anticipate/tests fleet/tests immune/tests sidecar/tests -q -m "not live" -p no:cacheprovider` (463 pasan).
+- Tests: `.venv/bin/pytest acceptance victim/tests shadow/tests gateway/tests pipeline/tests patcher/tests sim/tests dashboard/tests anticipate/tests fleet/tests immune/tests sidecar/tests -q -m "not live" -p no:cacheprovider` (507 pasan).
 - El LLM usa el login de Claude Code de la máquina.
+- `fleet` y `pipeline` corren supervisados como unidades de systemd del usuario (`immune-<proyecto>-fleet|pipeline`): se reinician solos y **no mueren al cerrar la terminal o la sesión del agente que los lanzó** (antes sí morían; así se cayó el stack el 21/11 a las 18:38). Logs en `runtime/logs/`.
+- Qué pasa cuando algo falla, con tiempos medidos: `contracts/product.md` §11.
 
 ## 5. Qué está verificado (corrido por el orquestador, 2026-11-21)
 
@@ -66,15 +70,21 @@ python -m anticipate run apache-httpd-2.4.49
 | Runtime genérico sobre `examples/tareas-node` (Node + Postgres, observador externo) | Stack arriba en 11 s; SQLi parchado en 37 s. Traversal e IDOR: detectados, regla y PR abierto, sin merge por falta de tráfico legítimo grabado que cubra la ruta (comportamiento diseñado). El agente constructor reportó los tres parchados con tráfico previo |
 | **Memoria inmunológica**: solo 3 peticiones enviadas, una por clase | Los 7 defectos parchados; 4 hallados por auditoría propia sin que nadie los ejerciera. 23,7 s de mediana a producción |
 | Anticipación sobre Apache 2.4.49 | Parche sugerido equivalente al oficial en 21/21 vectores |
+| **Fallas inyectadas en vivo** con 20 req/s de tráfico legítimo: matar fleet, pipeline, supervisor, gateway, prod, clones y bus; matar pipeline al abrir un incidente; matar fleet en pleno deploy; tirar el gateway con una regla activa; release rota; LLM caído | Todo se recupera solo en 1–3 s; los incidentes interrumpidos terminan parchados; el LLM caído deja los defectos contenidos por regla y se parchan al volver. Tabla completa en `contracts/product.md` §11 |
+| Entradas malformadas al gateway (cuerpo de 20 MB, URL de 100 KB, JSON inválido o muy anidado, bytes no UTF-8, 500 headers, cliente lento, 300 conexiones ociosas, 200 simultáneas) | Sin caídas ni reinicios; memoria estable (28 → 33 MB) |
 
 ## 6. Qué NO está verificado ni hecho
 
 - **Pull requests en GitHub**: solo con `gh` simulado. Corre en modo `local`.
-- **Dashboard**: nunca se vio en un navegador.
-- **Rollback** de un deploy roto y reintento del parche con feedback real: sin probar en vivo.
+- **Dashboard**: visto solo en Chromium sin interfaz (capturas a 1440 px y 400 px) con los datos de una corrida terminada; falta mirarlo con un incidente en curso y en el proyector.
+- (Hecho) Reintento con feedback, en vivo: un primer parche que no arreglaba nada (puesto a propósito) fue rechazado por la validación `properties`; el segundo, del LLM real con ese rechazo como contexto, pasó y llegó a producción. El rollback de un deploy roto también se probó en vivo.
+- **Reinicio de la máquina**: `immune up` retoma donde quedó, pero nada lo ejecuta al arrancar.
+- **Bus de eventos** (`runtime/bus/events.jsonl`): crece sin límite en disco y en memoria (probado hasta ~4.000 eventos); grabación y releases sí están acotadas.
+- **Dashboard público**: los lectores sin token reciben los eventos con credenciales y rutas del host tachadas, pero los ids de sesión y de usuario siguen visibles.
+- **`examples/notas`** no trae `.immune/` (lo genera `immune init`) ni base: antes correr `python scripts/init_db.py --db data/notas.db`, y fijar `ports:` si el demo incorporado está arriba.
 - **Atacante simulado en bucle** para el demo: no existe; las peticiones de prueba están en `victim/VULNS.md`.
 - **`immune deploy`** sobre infraestructura real: solo simulacro. Hoy `immune up` corre prod por su cuenta desde releases; falta definir el modo "gateway delante del servicio existente del cliente".
-- **`install.sh`** en una máquina limpia.
+- **`install.sh`**: probado en Ubuntu 24.04 ARM64 limpio; falta x86_64, otras distros y la rama que construye las imágenes dentro del propio script.
 - **`immune init` para apps genéricas** (Node, etc.): el perfil de `tareas-node` está escrito a mano.
 - Runtime genérico: solo Postgres; lenguajes compilados no probados en el juez; chequeos de política sobre código no Python son léxicos.
 - Revisión independiente, equipo rojo y vulnerabilidad ciega.
