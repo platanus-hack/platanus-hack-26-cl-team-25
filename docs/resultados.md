@@ -3,16 +3,24 @@
 Tipo de documento: referencia. Reúne todo lo que se midió, con fecha, máquina, método, tamaño de muestra y
 archivo de datos. Es la única fuente de cifras de la documentación: los demás documentos enlazan aquí.
 
-Cada resultado indica uno de dos niveles de respaldo:
+Cada resultado indica uno de tres niveles de respaldo:
 
 - **Con datos**: hay un archivo en el repositorio del que se puede recalcular la cifra.
 - **Observado una vez, sin datos crudos en el repositorio**: alguien del equipo lo ejecutó y anotó el resultado;
   no hay archivo que lo respalde.
+- **Medido en local por el equipo, sin datos crudos en el repositorio**: el resultado figura en el README de un
+  laboratorio o en una guía, sin fecha, máquina ni número de corridas registrados, y sin archivo que lo respalde.
+  Este documento lo cita con su fuente y no lo verifica.
 
 ## Advertencia sobre las cifras de tiempo
 
 Las mediciones de tiempo de las secciones 1 y 3 son del 2026-11-21. Son anteriores a las correcciones de la
 auditoría del 2026-11-22 y **no se volvieron a medir** después.
+
+También son anteriores a tres cambios del código actual que afectan a esos tiempos: el canario de despliegue,
+que agrega hasta `CANARY_S` segundos (8 por defecto; 2 sin tráfico) antes del cambio de upstream; las reglas de
+alcance `param_present`, que detonan todo request que trae el parámetro; y el cierre `escalated` de un PoC que no
+reproduce 3 de 3 ([arquitectura.md](arquitectura.md#5-ciclo-de-vida-de-un-incidente)).
 
 En esa fecha, la lista de defectos plantados de la tienda estaba dentro de `victim/`, el árbol que el generador
 de parches podía leer. La evidencia que recibe el modelo ya contiene el archivo y la línea
@@ -50,6 +58,7 @@ Cómo leerlo:
   predicen el tiempo ni la tasa de éxito sobre una aplicación real.
 - El tramo entre "en producción" y "verificado" incluye la ventana de observación del despliegue (20 segundos por
   defecto).
+- La medición no incluye el canario de despliegue, que no existía en esa fecha.
 - Una sola serie, en una máquina compartida: no hay intervalo de confianza entre series.
 
 ## 2. Tests y autotest
@@ -64,8 +73,8 @@ Cómo leerlo:
 
 | Medición | Resultado |
 |---|---|
-| Tests que recolecta `pytest` en la raíz (los 12 `testpaths` de `pytest.ini`) | 760 |
-| `.venv/bin/pytest -q -m "not live"` | 754 pasan, 6 deseleccionados |
+| Tests que recolecta `pytest` en la raíz (los 12 `testpaths` de `pytest.ini`) | 912 |
+| `.venv/bin/pytest -q -m "not live"` | 904 pasan, 2 omitidos (`skip`), 6 deseleccionados |
 | Los 6 tests `live` (llaman al modelo) | No se ejecutaron |
 | Suite propia de `examples/notas` | 33 tests |
 | `pyflakes` sobre el Python versionado | Sin avisos |
@@ -130,12 +139,75 @@ Qué significa, y qué no:
 - **La referencia tiene un defecto conocido:** el arreglo de 2.4.50 resultó incompleto (CVE-2021-42013) y se
   corrigió en 2.4.51. Coincidir con 2.4.50 no equivale a estar libre del defecto.
 
-## 5. Lo que no se midió
+## 5. Casos sobre software de terceros
+
+Todos son del nivel **medido en local por el equipo, sin datos crudos en el repositorio**, salvo donde se indica.
+Ninguno tiene test automático de punta a punta. Las fallas son públicas o vienen de un aviso: los casos ejercitan
+el mecanismo con el request del aviso, no un descubrimiento.
+
+### Grafana 8.3.0, CVE-2021-43798
+
+Fuente: `labs/grafana-cve-2021-43798/README.md`. Sin fecha, máquina ni número de corridas registrados.
+
+| Qué | Resultado según la fuente |
+|---|---|
+| Ciclo completo (detección en el clon, regla, parche del modelo, validaciones en un contenedor sin red, merge en un clon local, blue/green, verificación) | Incidente cerrado como `patched` |
+| Tiempos, con las cachés de compilación ya llenas | Regla a los 0,6 s; parche en producción a los 54 s |
+| Validaciones | En una corrida la validación `tests` rechazó el primer intento (rompía `Test_GetPluginAssets`) y el segundo pasó |
+| Vigilante de prod, con el gateway en `passthrough` | El request llega a prod, se publica la alerta, el clon lo confirma y el incidente cierra como `patched`. El mismo request directo al puerto de prod alerta como tráfico que no pasó por el gateway |
+
+Lo que el caso no muestra: los oráculos `proc`, `net` y `sql` contra una falla real (este CVE es de lectura de
+archivos); un pull request en GitHub; el canario de despliegue.
+
+### ScadaBR 1.2.0, CVE-2026-8602
+
+Fuente: `labs/scadabr-cve-2026-8602/README.md` y los scripts del laboratorio. Sin cifras de tiempo.
+
+| Qué | Resultado según la fuente |
+|---|---|
+| Detección | Una escritura anónima en `/ScadaBR/httpds` se detona en el clon y el oráculo de `sidecar/httpds` confirma que un punto de datos la consumió |
+| Regla | `scope: all` con `identity: untrusted` sobre `/ScadaBR/httpds` |
+| Parche | En una corrida contra el código fuente de ScadaBR, el modelo propuso en `HttpDataSourceServlet` una comprobación `Common.getUser(request) == null` que responde 404 |
+| Validación del parche (`labs/scadabr-cve-2026-8602/verify_patch.sh`) | El script compila el servlet parchado dentro de un contenedor candidato y comprueba dos cosas: el request anónimo recibe 404 y una sesión autenticada sigue escribiendo. No hay registro de su salida en el repositorio |
+
+Lo que el caso no muestra: la credencial de los dispositivos legítimos la modela el gateway, porque ScadaBR 1.2.0
+no tiene ninguna en ese endpoint; el contenedor de prod del laboratorio no se reemplaza por el parchado; no hay
+arreglo del fabricante con el que comparar.
+
+### OpenEMR 8.2.0
+
+Fuente: [openemr.md](openemr.md), sección "Lo verificado en vivo". Sin fecha ni máquina registradas.
+
+| Request contra un clon completo (MariaDB, OpenEMR con traza, sidecar) | Veredicto según la fuente |
+|---|---|
+| Login, buscador de pacientes, API REST, FHIR `Patient`, consulta con `O'Brien` | `clean` |
+| Inyección SQL de prueba (un script de prueba, no código de OpenEMR) | `oracle` `sql`, con pila PHP |
+| Traversal de prueba hacia `/etc/hostname` (un script de prueba) | `oracle` `file`, con pila PHP |
+| Sonda de inyección SQL contra la búsqueda real de OpenEMR | `clean`: esa consulta está parametrizada |
+
+La guía describe además el mecanismo de detección previsto para cinco CVE de OpenEMR 8.2.0. El repositorio no
+contiene un resultado registrado de esas cinco detecciones ni de un parche desplegado sobre OpenEMR.
+
+Con datos: `immune/tests/test_mysql_runtime.py` comprueba, sin Docker, que la configuración del ejemplo valida y
+que el perfil no sobrescribe archivos de OpenEMR.
+
+### FUXA v1.2.9
+
+Fuente: [fuxa.md](fuxa.md). No hay mediciones. `immune fuxa demo` usa evidencia sintética, marcada como tal: no
+registra la detección de un ataque real. Con datos: los tests de `immune/tests/test_fuxa.py`, que forman parte de
+la suite de la sección 2.
+
+## 6. Lo que no se midió
 
 - Latencia que agrega la detonación a un request sospechoso, y latencia del gateway para un request limpio.
+- Latencia que agrega el WAF de detección a cada request limpio, y su tasa de anomalías sobre tráfico legítimo.
+- Efecto de una regla `param_present` sobre el tráfico legítimo de ese parámetro.
+- El canario de despliegue con tráfico real: solo tiene tests ([arquitectura.md](arquitectura.md#7-diseñado-y-construido)).
+- Sobrecarga del vigilante de prod sobre el contenedor observado.
 - Tasa de falsos positivos del clasificador y de los oráculos sobre tráfico real.
-- Tasa de éxito del parche automático fuera de los defectos plantados en las tres aplicaciones de demostración.
-- Cualquier cifra en x86_64, con más carga, o con una aplicación que el equipo no escribió.
+- Tasa de éxito del parche automático fuera de los defectos plantados en las tres aplicaciones de demostración y
+  de las corridas citadas en la sección 5.
+- Cualquier cifra en x86_64, con más carga, o con una aplicación en producción real.
 - Comportamiento de los pull requests contra GitHub real.
 
 Las cifras de sobrecarga que aparezcan en `sidecar/README.md` provienen de una ejecución no registrada de

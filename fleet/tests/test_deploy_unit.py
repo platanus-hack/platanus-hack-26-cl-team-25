@@ -64,7 +64,8 @@ class NoDocker(Fleet):
 
 def deploy(after, tmp_path, before=None, broken=(), **over):
     kw = dict(repo_dir=str(tmp_path), runtime_dir=str(tmp_path), run_id="unit", admin_token="t", smoke_path="/api/items",
-              deploy_watch_s=0.05, watch_poll_s=0.01)
+              deploy_watch_s=0.05, watch_poll_s=0.01,
+              canary_weight=0)       # the canary has its own tests (fleet/tests/test_canary.py)
     kw.update(over)
     f = NoDocker(Config(**kw), Stats(after, before), broken)
     return f._deploy("r2", "blue", "r1", "green"), f

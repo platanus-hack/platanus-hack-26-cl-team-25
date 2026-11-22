@@ -55,7 +55,7 @@ def _clone(w, cid, key, ingest):
         h = dict(request.headers)
         w.clone_seen.append({"path": "/" + path, "query": request.url.query, "headers": h})
         text = "/" + path + "?" + request.url.query
-        verdict = "oracle" if "ATTACK" in text else "clean"
+        verdict = "oracle" if "ATTACK" in text else "inconclusive" if "UNSURE" in text else "clean"
         if verdict == "oracle":
             ev = {"clone": cid, "rid": h.get(wire.H_RID, ""), "mode": h.get(wire.H_MODE, "L1"), "release": "t0",
                   "verdict": "oracle", "uid": None, "role": None, "status": 200, "pre_state_b64": None,
@@ -67,7 +67,8 @@ def _clone(w, cid, key, ingest):
                 await c.post(ingest() + "/_clone/evidence", content=raw,
                              headers={wire.H_CLONE_ID: cid, wire.H_SIGNATURE: wire.sign(key, raw),
                                       "content-type": "application/json"})
-        return JSONResponse({"from": cid, "synthetic": True}, headers={wire.H_VERDICT: verdict})
+        return JSONResponse({"from": cid, "synthetic": True}, status_code=401 if verdict == "inconclusive" else 200,
+                            headers={wire.H_VERDICT: verdict})
     return app
 
 

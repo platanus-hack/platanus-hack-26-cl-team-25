@@ -1,4 +1,4 @@
-# Documentación de Inmune
+# Documentación de Immune
 
 Índice de la documentación. Cada documento es de un solo tipo: tutorial, guía de tareas, referencia o explicación.
 Cada dato tiene una única fuente; los demás documentos enlazan a ella.
@@ -14,6 +14,8 @@ Cada dato tiene una única fuente; los demás documentos enlazan a ella.
 | [resultados.md](resultados.md) | Referencia | Todo lo medido, con fecha, máquina, método, muestra y archivo de datos. Única fuente de cifras |
 | [limites.md](limites.md) | Explicación | Lista única de límites, puntos ciegos y partes no construidas, por componente |
 | [proceso.md](proceso.md) | Explicación | Cómo se construyó y revisó el proyecto, y cómo reproducir la auditoría |
+| [fuxa.md](fuxa.md) | Guía de tareas | Demo sobre FUXA v1.2.9 (`immune fuxa`): comandos y qué hace cada uno |
+| [openemr.md](openemr.md) | Guía de tareas y explicación | Ejemplo sobre OpenEMR 8.2.0 sin modificar: preparación, qué agrega el runtime genérico para PHP y MariaDB, mecanismos de detección |
 
 El inicio rápido está en el [README de la raíz](../README.md).
 
@@ -45,14 +47,20 @@ módulo.
 | Generador de tráfico y escenarios | [sim/README.md](../sim/README.md) |
 | Modo de anticipación | [anticipate/README.md](../anticipate/README.md) |
 | Laboratorio de Grafana | [labs/grafana-cve-2021-43798/README.md](../labs/grafana-cve-2021-43798/README.md) |
+| Laboratorio de ScadaBR | [labs/scadabr-cve-2026-8602/README.md](../labs/scadabr-cve-2026-8602/README.md) |
 | Aplicación de ejemplo notas | [examples/notas/README.md](../examples/notas/README.md) |
 | Aplicación de ejemplo tareas-node | [examples/tareas-node/README.md](../examples/tareas-node/README.md) |
+| Ejemplo sobre OpenEMR | [examples/openemr/README.md](../examples/openemr/README.md) |
+
+Sin README propio: `waf/` (WAF de detección; ver [arquitectura.md](arquitectura.md#37-waf-de-detección-opcional)) y
+`landing/` (página estática de presentación).
 
 ## Material del demo
 
 | Ruta | Contenido |
 |---|---|
 | `docs/demo/metricas-tiempo-a-parche.json` | Datos de la medición de tiempos ([resultados.md](resultados.md)) |
+| `docs/demo/selftest-2026-11-22.txt` | Salida del autotest de las validaciones ([resultados.md](resultados.md)) |
 | `docs/demo/anticipacion-apache-2.4.49.md`, `docs/demo/anticipacion-apache-2.4.49.html` | Reporte del modo de anticipación sobre Apache httpd 2.4.49 |
 | [demo/respuestas/](demo/respuestas/README.md) | Listas de defectos plantados de las tres aplicaciones de demostración |
 | `docs/demo/dashboard/` | Capturas del panel |

@@ -81,7 +81,7 @@ class Init:
 
     # ----------------------------------------------------------------------------------------- steps
     def step1_detect(self):
-        d = det_mod.detect(self.project)
+        d = self.det or det_mod.detect(self.project)
         self.det = d
         self.assumptions += d.get("assumptions") or []
         if d.get("problems"):
@@ -397,6 +397,9 @@ class Init:
             self.deploy["style"], ", ".join(os.path.relpath(p, self.project) for p in self.deploy["files"])))
 
     def run(self) -> int:
+        self.det = self.det or det_mod.detect(self.project)
+        if self.det["runtime"] == "generic":
+            return self.run_php_mysql()
         ok = self.step1_detect() and self.step2_openapi() and self.step3_database()
         if ok:
             self.write_config()
@@ -442,6 +445,24 @@ class Init:
         self.out("READY: %s" % self.deploy.get("ready_command"))
         return 0
 
+    def run_php_mysql(self) -> int:
+        self.say(1, "detect: %s, PHP + MySQL (generic runtime)" % self.det["framework"])
+        if not self.read(".immune/config.yaml"):
+            if self.det["framework"] == "openemr":
+                self.out("NEEDS ATTENTION: prepare the pinned example with python examples/openemr/fetch.py")
+            else:
+                self.out("NEEDS ATTENTION: configure the generic build, database connection and shadow profile "
+                         "in .immune/config.yaml (see examples/openemr/overlay/.immune/config.yaml)")
+            return 1
+        checks = doctor.run_mysql(self.project)
+        for check in checks:
+            self.out(doctor.format_line(check))
+        if any(not check["ok"] for check in checks):
+            self.out("NEEDS ATTENTION: fix the checks above")
+            return 1
+        self.out("READY: immune up --project %s" % shlex.quote(self.project))
+        return 0
+
 
 def feedback_text(checks) -> str:
     out = []
@@ -464,6 +485,11 @@ def main(argv=None) -> int:
     if not os.path.isdir(project):
         print("NEEDS ATTENTION:\n  - %s is not a directory" % project)
         return 1
+    detected = det_mod.detect(project)
+    if detected["runtime"] == "generic":
+        init = Init(project, use_llm=False, prod_db=a.prod_db, seed=a.seed)
+        init.det = detected
+        return init.run()
     if os.path.exists(os.path.join(project, ".immune", "config.yaml")) and not a.yes:
         if not sys.stdin.isatty() or input("%s/.immune exists; overwrite? [y/N] " % project).strip().lower() != "y":
             print("NEEDS ATTENTION:\n  - %s/.immune/config.yaml exists (use --yes to regenerate)" % shlex.quote(project))
@@ -477,7 +503,9 @@ def main(argv=None) -> int:
                   "classification and the OpenAPI marks are drafts to review; install and log in to `claude`, then "
                   "run init again." % cb)
             use_llm = False
-    return Init(project, use_llm=use_llm, prod_db=a.prod_db, seed=a.seed).run()
+    init = Init(project, use_llm=use_llm, prod_db=a.prod_db, seed=a.seed)
+    init.det = detected
+    return init.run()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`immune` is the command-line interface of Inmune and the code that adapts Inmune to one application. It reads
+`immune` is the command-line interface of Immune and the code that adapts Immune to one application. It reads
 the project's `.immune/config.yaml`, starts and stops the stack of that project (gateway and dashboard containers,
 the `fleet` and `pipeline` host processes), and reports what the stack saw. `immune init` writes the `.immune/`
 directory for a Python ASGI app; `immune doctor` verifies it.
@@ -15,9 +15,9 @@ the reference for the code in this directory.
 
 | Entry point | What it is |
 |---|---|
-| `bin/immune` | Bash wrapper: `exec .venv/bin/python -m immune "$@"` with `PYTHONPATH` set to the checkout. Fails with a message when `.venv` is missing. `install.sh` links it into `~/.local/bin` (`IMMUNE_BIN_DIR`). |
+| `bin/immune` | Bash wrapper: `exec <venv>/bin/python -m immune "$@"` with `PYTHONPATH` set to the checkout; `<venv>` is `IMMUNE_VENV_DIR`, else `.venv` in the checkout. Fails with a message when that interpreter is missing. `install.sh` links it into `~/.local/bin` (`IMMUNE_BIN_DIR`). |
 | `python -m immune` | `immune/__main__.py`, function `main`. |
-| `python -m immune.init`, `python -m immune.doctor`, `python -m immune.deploycmd` | The modules behind `immune init`, `immune doctor`, `immune deploy`. |
+| `python -m immune.init`, `python -m immune.doctor`, `python -m immune.deploycmd`, `python -m immune.fuxa` | The modules behind `immune init`, `immune doctor`, `immune deploy`, `immune fuxa` (`DISPATCH` in `immune/__main__.py`). |
 | `python -m immune.supervise <spec.json>` | Supervisor of one host process; started by `immune up`, not by hand. |
 | `python -m immune.metrics --bus URL [--recording PATH] [--json]` | Time-to-patch and detection figures computed from the event bus. |
 
@@ -28,14 +28,14 @@ fleet and dashboard over HTTP on `127.0.0.1`.
 
 Every subcommand takes `--project DIR`. Without it, `up`, `down`, `status`, `reset`, `report`, `mode`,
 `autopatch`, `doctor` and `deploy` use the environment variable `IMMUNE_PROJECT`, else the nearest directory at or above the current one
-that holds `.immune/config.yaml`, else the Inmune checkout itself (`find_project` in `immune/config.py`). The
+that holds `.immune/config.yaml`, else the Immune checkout itself (`find_project` in `immune/config.py`). The
 checkout's own `.immune/config.yaml` describes the built-in demo project `tienda` (app in `victim/`).
 `immune init` defaults to the current directory.
 
 ## Commands
 
 Flags are the ones declared with `argparse` in `immune/__main__.py`, `immune/init.py`, `immune/doctor.py`,
-`immune/deploycmd.py` and `anticipate/__main__.py`.
+`immune/deploycmd.py`, `immune/fuxa.py` and `anticipate/__main__.py`.
 
 | Command | Flags | Exit status |
 |---|---|---|
@@ -48,12 +48,13 @@ Flags are the ones declared with `argparse` in `immune/__main__.py`, `immune/ini
 | `immune autopatch off\|pr\|merge` | `--project DIR` | 0; 2 on an invalid config |
 | `immune init` | `--project DIR` (default `.`), `--yes`, `--no-llm`, `--prod-db PATH`, `--seed N` (default 1) | 0 after `READY:`; 1 after `NEEDS ATTENTION:` |
 | `immune doctor` | `--project DIR`, `--json`, `--only 1,2` | 0 all checks pass; 1 otherwise |
-| `immune doctor --prereqs` | `--json` | 0 when every required prerequisite is present; 1 otherwise |
+| `immune doctor --prereqs` | `--json`, `--openemr` | 0 when every required prerequisite is present; 1 otherwise. `--openemr` without `--prereqs` is a usage error (2) |
 | `immune deploy` | `--project DIR`, `--dry-run`, `--experimental` | see [immune deploy](#immune-deploy-experimental) |
 | `immune anticipate list` | | 0 |
 | `immune anticipate check TARGET` | | 0 |
 | `immune anticipate run TARGET` | `--model NAME`, `--out DIR` | 0 when the suggested patch compiles and passes every vector; 1 otherwise |
 | `immune anticipate recheck RESULT_DIR` | | as `run` |
+| `immune fuxa COMMAND` | `--runtime DIR` before the command; see [immune fuxa](#immune-fuxa) | 0; 1 on an error; 130 on interrupt |
 
 `immune anticipate ...` runs the `anticipate` package with the same arguments (`dispatch` in `immune/__main__.py`);
 see [`anticipate/README.md`](../anticipate/README.md).
@@ -99,10 +100,12 @@ and a `data.prod_db` that exists outside the runtime directory, the command writ
 scratch file that is then discarded, so the live database is not overwritten.
 
 For `app.runtime: generic` the fresh start is `immune/generic.py` `cmd_up`: copy the `t0` release, start the
-compose services, build the image `immune-<name>-app:t0` from the release, take the production database URL from
-the environment variable named by `data.prod_url_env` or start and seed a `postgres:16-alpine` demo database
-(`data.demo_postgres`), build the shadow seed from production with `immune/shadowdata_pg.py`, then fleet reset
-and pipeline as above. `check_ports` covers the four ports on `immune reset` and the fleet port on `immune up`
+compose services, build the image `immune-<name>-app:t0` from the release and, when `shadow.tracer` is set, the
+clone-only image `immune-<name>-app:t0-trace` (`fleet.generic.build_trace_image`), take the production database URL
+from the environment variable named by `data.prod_url_env` or start and seed a demo database container
+(`data.demo_postgres` with `postgres:16-alpine`, or `data.demo_mysql` with the pinned MariaDB image of
+`immune/dbkind.py`), build the shadow seed from production with `immune/shadowdata_pg.py` or
+`immune/shadowdata_mysql.py`, then fleet reset and pipeline as above. `check_ports` covers the four ports on `immune reset` and the fleet port on `immune up`
 (the compose services of this stack may already hold the other three).
 
 ### immune down
@@ -145,8 +148,17 @@ Both rewrite one top-level key of `.immune/config.yaml` in place, keeping commen
 
 `immune/init.py`, class `Init`. Scope: a Python ASGI app whose source contains a `FastAPI(...)` or
 `Starlette(...)` instance, with a SQLite database file. An app without an importable `openapi()` needs a spec file
-(`openapi.yaml`, `openapi.json`, `swagger.yaml`, ...) in the project. There is no `init` for other runtimes: the
-profile of `examples/tareas-node` is hand-written.
+(`openapi.yaml`, `openapi.json`, `swagger.yaml`, ...) in the project. Nothing is generated for other runtimes: the
+profiles of `examples/tareas-node` and `examples/openemr` are hand-written.
+
+For a PHP application with MySQL, `init` only checks an existing profile (`Init.run_php_mysql`). `detect`
+reports `runtime: generic` when the project is an OpenEMR tree (the four files `version.php`, `sql/database.sql`,
+`interface/globals.php`, `library/sql.inc.php` exist) or, with no ASGI app found, when a non-test `.php` file or
+`composer.json` mentions `mysqli`, `pdo_mysql` or `mysql:host`. In that case `init` makes no LLM call and writes
+no file: without `.immune/config.yaml` it prints `NEEDS ATTENTION:` and exits 1 (for OpenEMR it points to
+`examples/openemr/fetch.py`); with one it runs `doctor.run_mysql` (checks 1 and 9 below) and prints `READY:` or
+`NEEDS ATTENTION:`. The overwrite question and `--yes`, `--no-llm`, `--prod-db`, `--seed` have no effect on this
+path.
 
 With an existing `.immune/config.yaml`, `init` asks before overwriting; `--yes` skips the question, and without a
 terminal and without `--yes` it exits 1.
@@ -194,8 +206,11 @@ non-system directories.
 
 ### immune doctor
 
-`immune/doctor.py`. Builds a fresh copy of the release (`app.release_paths` plus the profile and scenarios
-modules) and runs eight checks. Each result has `id`, `name`, `ok`, `status` (`pass`, `fail`, `warn`, `skip`),
+`immune/doctor.py`. For a `python-asgi` project it builds a fresh copy of the release (`app.release_paths` plus the
+profile and scenarios modules) and runs checks 1 to 8. For a project with `app.runtime: generic` and
+`database.kind: mysql` it runs only check 1, reduced to a configuration check, and check 9 (`_mysql_checks`); any
+other check requested with `--only` is reported as `skip`. Check 9 runs for no other kind of project, and `--only 9`
+on a `python-asgi` project prints no check. Each result has `id`, `name`, `ok`, `status` (`pass`, `fail`, `warn`, `skip`),
 `reason` and `owner` (the init step that owns the failing artefact).
 
 | # | Name | What it verifies | Runs |
@@ -208,6 +223,10 @@ modules) and runs eight checks. Each result has `id`, `name`, `ok`, `status` (`p
 | 6 | no real data in the shadow | Up to 200 sampled real values per private or secret column do not appear in the shadow seed (`shadowdata.leak_check`). `skip` when the shadow comes from `data.seed_command` and there is no `columns.yaml` | CLI process, reads the two databases |
 | 7 | tests in the runner | `tests.command` passes on the release. `warn` without a tests command (autopatch capped at `pr`) | `--network none` container |
 | 8 | legit scenarios deterministic | The `scenarios` module runs twice in the pipeline's runner with identical output, covers at least one route and hits no 5xx. `warn` without scenarios | pipeline runner container (`pipeline/runner.py`) |
+| 9 | pinned container images | Generic runtime with MySQL only. Every image the stack needs is present in the local Docker image store: the base images the project's Dockerfile pins by digest (`FROM name@sha256:...`, `_pinned_bases`), the database image (`immune/dbkind.py`), `immune-base:1` and `immune-sidecar:1`. It checks presence with `docker image inspect`; it does not pull, and it does not fail on a `FROM` line without a digest (such a line is not listed) | CLI process, `docker image inspect` |
+
+On the MySQL path check 1 is named `generic MySQL configuration` and passes when the generic facts load
+(`immune.generic.facts`) and the Dockerfile named by `app.build` can be read.
 
 "Host subprocess" means `python -I` with a clean `sys.path`, run as the invoking user by
 `initsteps/hostrun.py` and driving `shadow.harness` through `initsteps/harness_runner.py`. The containers of
@@ -216,7 +235,10 @@ checks 1 and 7 are `docker run --rm --network none --read-only --cap-drop ALL` o
 
 `immune doctor --prereqs` needs no project. It reports Docker, the Compose plugin, the image `immune-base:1` and
 `git` as required, and the images `immune-sidecar:1` and `immune-cbuild:1`, the `claude` CLI and the `gh` CLI as
-optional, each with what it is needed for and how to fix it. `install.sh` runs it at the end.
+optional, each with what it is needed for and how to fix it. With `--openemr`, `immune-sidecar:1` becomes required
+and so do the images of the OpenEMR example (`openemr_images`: the digest-pinned bases of
+`examples/openemr/overlay/Dockerfile.immune` and the MariaDB image). `install.sh` runs `--prereqs` at the end, with
+`--openemr` when `IMMUNE_WITH_OPENEMR=1`.
 
 ### immune deploy (experimental)
 
@@ -235,6 +257,37 @@ The gateway this starts has no clone pool, no event bus and none of the project'
 `deploycmd.py`): it proxies requests. Protection in front of a service that is already deployed is not built. The
 working path is `immune up`, which runs production itself from releases.
 
+### immune fuxa
+
+`immune/fuxa.py` `main`, with the Docker work in `fleet/fuxa.py` (`FuxaFleet`). A self-contained demonstration on
+FUXA v1.2.9 (a Node.js SCADA/HMI server; upstream tag and commit pinned in `TAG` and `COMMIT`). It does not use
+`.immune/config.yaml`, the gateway of `gateway/`, the fleet API or the pipeline: it has its own gateway and policy
+layer (`immune/fuxa_runtime/*.cjs`, run with Node inside the containers) and its own state directory, by default
+`runtime/fuxa` in the checkout (`--runtime DIR` selects another). Every command except `watch` (which runs until interrupted) and `dashboard` (which serves) prints one JSON object. The
+walkthrough is [`docs/fuxa.md`](../docs/fuxa.md).
+
+| Command | Flags | What it does |
+|---|---|---|
+| `baseline` | `--repo DIR` | Clones the pinned FUXA tag (or uses the local clone given by `--repo`), checks that the tag resolves to the pinned commit, inventories its HTTP routes and Socket.IO events and writes `profile.json` |
+| `up` | `--port N` (default 1881) | Builds the image (`immune/fuxa_runtime/Dockerfile`), starts FUXA and its gateway on `127.0.0.1:<port>` |
+| `status`, `down` | | State of the active revision; stop the demo |
+| `watch` | `--input FILE` | Follows the running instance and handles incidents; with `--input`, analyses an exported Morgan access log and exits |
+| `dashboard` | `--port N` (default 8091) | Serves `dashboard/server.py` on `127.0.0.1:<port>` with no bus token and no store, fed from the FUXA records, plus `GET /fuxa/requests` and `GET /fuxa/restrictions` (`immune/fuxa_dashboard.py`) |
+| `harden`, `validate-active`, `audit-coverage`, `reload-gateway` | | Activate the known authorization controls on a validated candidate revision; validate the active revision in test containers; audit the coverage inventory; restart the gateway |
+| `patch-mode [auto\|review]` | | Print or set whether a validated candidate is deployed (`auto`) or waits for `approve` |
+| `approve INCIDENT` | | Deploy a candidate that is waiting in `review` mode |
+| `demo` | | Feeds synthetic evidence for an operation still in observation, to exercise the incident flow |
+
+The containment rule of a FUXA incident is proposed by the LLM through `patcher/claude_cli.py` with no editable
+file and accepted only if `fuxa_rules.normalize` validates it (known operation, scope `role` or `session`, TTL of
+300 to 900 s); otherwise the fixed rule of `fuxa_rules.fallback_rule` applies. The events this path publishes to
+its dashboard include `fuxa.status`, `fuxa.review` and `session.restricted`
+(`immune_contracts/events.py`).
+
+Status: implemented and covered by `immune/tests/test_fuxa.py`, which replaces Docker with mocks and runs the
+`.cjs` policy and gateway checks with a local Node.js when one is installed (skipped otherwise). No test in the
+repository builds or starts the FUXA containers.
+
 ## Layout
 
 | File | Role |
@@ -244,6 +297,7 @@ working path is `immune up`, which runs production itself from releases.
 | `_cfg.py` | Path conventions shared by init, doctor and deploy (`columns_path`, `shadow_markers_path`) |
 | `supervise.py` | Supervisor of one host process |
 | `generic.py` | `app.runtime: generic`: facts read from the config, `up` and `down` for such a project |
+| `dbkind.py` | What differs between the two databases of the generic runtime (`postgres`, `mysql`): image, container user, tmpfs, init directory, readiness probe, URL format, the app's environment, the sidecar's proxy section |
 | `auth.py` | Identity resolution used by the gateway and the pipeline: `immune-token`, `jwt-hs256`, `introspect`, `none`; honeytoken detection |
 | `init.py` | `immune init` |
 | `initsteps/detect.py` | Step 1: static detection |
@@ -261,6 +315,8 @@ working path is `immune up`, which runs production itself from releases.
 | `deploycmd.py` | Deploy artefacts and `immune deploy` |
 | `shadowdata.py` | Shadow seed, manifest and markers from a production SQLite database; `leak_check` |
 | `shadowdata_pg.py` | The same from a production Postgres database (generic runtime) |
+| `shadowdata_mysql.py` | The same from a production MySQL or MariaDB database (generic runtime) |
+| `fuxa.py`, `fuxa_rules.py`, `fuxa_dashboard.py`, `fuxa_runtime/` | `immune fuxa`: CLI and source instrumentation, containment rule proposal, dashboard feed, and the Node files and Dockerfile copied into the FUXA image |
 | `legit.py` | Runtime of the generated `.immune/scenarios.py` |
 | `metrics.py` | Time-to-patch and detection figures from bus events |
 | `tests/` | Unit and integration tests |
@@ -288,9 +344,10 @@ directory. The full schema, with examples, is in [`contracts/product.md`](../con
 | `app.static` | empty | Release-relative directory behind `{static}` |
 | `app.image`, `app.build`, `app.command` | empty | Generic runtime. The loader requires `command` and `build`: the fleet builds one image per release, so `image` alone is rejected |
 | `app.allowed_file_roots` | `[]` | Generic runtime |
-| `database.kind` | `sqlite` | `sqlite` or `postgres`; `postgres` only with `app.runtime: generic` |
+| `database.kind` | `sqlite` | `sqlite`, `postgres` or `mysql`; the last two only with `app.runtime: generic` |
 | `database.path_env` | `APP_DB` | Variable carrying the SQLite path |
-| `database.url_env` | empty | Variable carrying the Postgres URL (generic); when empty the generic runtime uses `DATABASE_URL` |
+| `database.url_env` | empty | Generic runtime: variable that receives the database URL |
+| `database.env` | `{}` | Generic runtime: `NAME: template` pairs for apps that take the connection in parts; a template may use `{host}`, `{port}`, `{user}`, `{password}`, `{database}`, `{url}`. `mysql` requires `database.env` or `database.url_env` |
 | `data.prod_db` | required for `sqlite` | The production database file |
 | `data.seed_command` | empty | May use `{prod_db}`, `{shadow_db}`, `{manifest}`, `{markers}`, `{seed}` |
 | `data.insert_canaries` | `false` | Also insert the canary rows into the production database |
@@ -301,6 +358,7 @@ directory. The full schema, with examples, is in [`contracts/product.md`](../con
 | `openapi` | required | Path to the OpenAPI document |
 | `shadow.profile` | required for `python-asgi` | Python module name |
 | `shadow.columns` | empty (`.immune/shadow/columns.yaml`) | |
+| `shadow.tracer` | `{}` | Generic runtime only. `{kind, dir, exclude}`: `kind` must be `php-xdebug` (the default); `dir` defaults to `/tmp/immune-trace` and must be under `/tmp/`; `exclude` is a list of path fragments, default `[/vendor/]`. Clones then run the `-trace` image and the sidecar puts the app's `file:line` frames in the evidence stack (`sidecar/phptrace.py`). Production never runs that image |
 | `tests.command` | empty | Without it autopatch is capped at `pr` |
 | `scenarios` | empty | Python module with `SCENARIOS` for the `legit` gate |
 | `repo.target` | `local` | `local` or `github` |
@@ -314,9 +372,15 @@ directory. The full schema, with examples, is in [`contracts/product.md`](../con
 | `audit.max_jobs`, `audit.max_seconds` | `40`, `120` | |
 | `ports.gateway`, `ports.admin`, `ports.dashboard`, `ports.fleet` | `8080`, `8081`, `8090`, `8070` | Must be distinct |
 
-The generic runtime also reads `app.workdir`, `app.bind_env`, `app.warmup_paths`, `data.prod_url_env` and
-`data.demo_postgres` from the raw file (`facts` in `immune/generic.py`). `config.py` does not validate these five
-keys, so a misspelt one is ignored.
+Keys read from the raw file and not validated by `config.py`, so a misspelt one is ignored:
+
+| Key | Read by | Meaning |
+|---|---|---|
+| `app.workdir`, `app.bind_env`, `app.warmup_paths` | `facts` in `immune/generic.py` | Generic runtime: working directory in the image (default `/app`), variable carrying the bind address, paths requested to warm a clone |
+| `data.prod_url_env` | `facts` | Generic runtime: environment variable carrying the production database URL |
+| `data.demo_postgres`, `data.demo_mysql` | `facts` | Generic runtime, used when that variable is unset: `{database, user, seed_command, seed_privileged}` for a demo production database container of the configured kind. One of `data.prod_url_env` and the demo key of the kind is required |
+| `auth.login` | `pipeline/verify.py` `login_session` | With `auth.kind: introspect`, how the pipeline logs a seeded account in for the post-deploy verification: `{path, form, user_env, password_env, default_user, default_password}`; `form` values may use `{login}` and `{password}` |
+| `legit.normalize` | `pipeline/generic.py` `legit_normalize` | Generic runtime: regular expressions replaced in response bodies before the `legit` gate compares them |
 
 ### Environment variables read by the CLI
 
@@ -328,6 +392,7 @@ keys, so a misspelt one is ignored.
 | `T0_REF` | Build `releases/t0` from `git archive <ref>` instead of the working tree |
 | `NO_PIPELINE` | Do not start the pipeline |
 | `IMMUNE_NO_SYSTEMD` | Do not use systemd user units for the host processes |
+| `IMMUNE_VENV_DIR` | Virtualenv whose `bin/python` runs the host processes and the wrapper (default `.venv` in the checkout; `python()` in `immune/__main__.py`, `bin/immune`, `install.sh`) |
 | `IMMUNE_INIT_MODEL`, `IMMUNE_INIT_TIMEOUT_S` | Model and timeout (default 420 s) of the init LLM steps |
 | `IMMUNE_BASE_IMAGE` | Image used by init and doctor containers (default `immune-base:1`) |
 | `CLAUDE_BIN` | Path of the `claude` CLI (`patcher/claude_cli.py`) |
@@ -364,7 +429,7 @@ Under the runtime directory (`runtime_dir`; `runtime/` at the checkout root for 
 | `stack/containers.env` | CLI | `env_file` of the compose services, 0600 |
 | `stack/fleet.supervise.json`, `stack/pipeline.supervise.json` | CLI | Supervisor specs; they carry the secrets, 0600 |
 | `stack/fleet-state.json`, `stack/gateway-state.json` | fleet, gateway | State restored on resume |
-| `stack/demo-db.env` | CLI (generic runtime) | Password and URL of the demo Postgres, 0600 |
+| `stack/demo-db.env` | CLI (generic runtime) | Password, URL and superuser password of the demo database, 0600 |
 | `data/manifest.json`, `data/markers.json`, `data/shadow/` | seed | Manifest, markers, shadow seed |
 | `data/prod/` (demo) | seed | The demo's production database |
 | `releases/<release>/` | CLI (`t0`), pipeline | Release trees |
@@ -408,6 +473,11 @@ session, the rows pass through a temporary SQLite copy and the same generator, a
 `data/shadow/seed.sql`, with a copy and an init script under `data/shadow/pginit/`, the directory each clone
 database loads at start.
 
+For MySQL or MariaDB (`shadowdata_mysql.build`), throw-away containers of the pinned MariaDB image read production
+in read-only sessions. Only the tables that `columns.yaml` rewrites (owner, private, secret) pass through the
+temporary SQLite copy and the generator; public tables are dumped and copied verbatim. The result is
+`data/shadow/seed.sql`, with a copy and an init script under `data/shadow/myinit/`.
+
 ### Generated scenarios
 
 `initsteps/scenarios.py` derives a plan from the OpenAPI (every GET operation), `columns.yaml` and the manifest;
@@ -431,7 +501,8 @@ is reported as a honeytoken (`immune-token` and `jwt-hs256`). `introspect` is re
 ```
 
 Tests marked `docker` (`test_deploy_init.py`, `test_feedback_live.py`) need Docker and the image `immune-base:1`.
-One test in `test_feedback_live.py` is marked `live` and calls the LLM. To leave both out:
+One test in `test_feedback_live.py` is marked `live` and calls the LLM. `test_fuxa.py` and `test_mysql_runtime.py`
+need neither: Docker is mocked, and the `test_fuxa.py` cases that run the `.cjs` files are skipped without Node.js. To leave both out:
 
 ```
 .venv/bin/pytest immune/tests -q -m "not live and not docker"
@@ -447,8 +518,15 @@ Repository-wide test results are in [`docs/resultados.md`](../docs/resultados.md
   checks 2 to 5 (and for the OpenAPI dump when the container run fails). This is process separation, not a
   sandbox. Only doctor checks 1, 7 and 8 and the first attempt of the OpenAPI dump run in `--network none`
   containers. `report.md` asks for human review of the generated files.
-- **`init` supports one shape of app:** Python ASGI (FastAPI or Starlette instance found by a regular expression)
-  with a SQLite database file. Other runtimes need a hand-written `.immune/` directory.
+- **`init` generates a profile for one shape of app:** Python ASGI (FastAPI or Starlette instance found by a
+  regular expression) with a SQLite database file. Other runtimes need a hand-written `.immune/` directory; for
+  PHP with MySQL `init` only checks it.
+- **The doctor verifies little on the generic runtime.** With MySQL it checks that the configuration loads and
+  that the images are present (checks 1 and 9); clone health, identity, oracles, reset and data leakage (checks 2
+  to 8) are not verified. The generic runtime with Postgres has no doctor path of its own.
+- **`immune fuxa` is a separate demonstration** for one application at one pinned version; its controls, policy
+  files and inventory patterns are specific to FUXA v1.2.9 and it shares only the dashboard and the confined CLI
+  call with the rest of the product. Its container path has no automated test.
 - **Heuristics tuned to the demo apps.** The auth draft detection (`initsteps/drafts.py`), the file-like parameter
   pattern `FILE_PARAM_RE` (`initsteps/scenarios.py`), the table and column name patterns of the column draft, and
   the manifest's ownership keys, which are derived from English plural table names (`shadowdata.py`). On another

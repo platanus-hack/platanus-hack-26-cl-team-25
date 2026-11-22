@@ -81,6 +81,10 @@ class Config:
     smoke_path: str = "/openapi.json"  # '' or the health path: the deploy skips the smoke step and reports it
     deploy_watch_s: float = 20.0
     deploy_min_requests: int = 20      # requests through the new release before its 5xx rate is judged
+    # canary: before the switch, this share of the real traffic goes to the new release for canary_s seconds
+    canary_weight: float = 0.2     # 0 turns the canary off (plain switch + watch)
+    canary_s: float = 8.0
+    canary_min_requests: int = 20  # fewer canary requests than this prove nothing: fall back to the plain watch
     watch_poll_s: float = 0.25
     health_timeout_s: float = 40.0
     reconcile_s: float = 1.0
@@ -144,6 +148,9 @@ class Config:
             smoke_path=e["SMOKE_PATH"] if "SMOKE_PATH" in e else derive_smoke_path(app.openapi, app.app.health),
             deploy_watch_s=float(e.get("DEPLOY_WATCH_S", 20)),
             deploy_min_requests=int(e.get("DEPLOY_MIN_REQUESTS", 20)),
+            canary_weight=min(1.0, max(0.0, float(e.get("CANARY_WEIGHT", 0.2)))),
+            canary_s=float(e.get("CANARY_S", 8)),
+            canary_min_requests=int(e.get("CANARY_MIN_REQUESTS", 20)),
             watch_poll_s=float(e.get("WATCH_POLL_S", 0.25)),
             health_timeout_s=float(e.get("HEALTH_TIMEOUT_S", 40)),
             reconcile_s=float(e.get("RECONCILE_S", 1)),

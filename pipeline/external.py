@@ -6,7 +6,9 @@ Two modes:
   triples (app image + Postgres + observer; `pipeline/generic.py`) and the language-neutral patch
   generator `pipeline/generic_patch.py`.
 - reproduction only (REPRO_URL set, e.g. labs/grafana-cve-2021-43798): oracle.fired -> incident -> PoC
-  reproduced 3/3 against a reserved shadow clone through its sidecar -> containment rule -> `rule_only`.
+  replayed 3 times against a reserved shadow clone through its sidecar. 3/3: containment rule -> patch
+  (pipeline/extfix.py). Less (0/3 included, it did fire once): containment rule, no automatic fix, closed
+  `rule_only` / `escalated` for a person (Pipeline.escalate).
 
 Selected with PIPELINE_APP=external, or automatically for app.runtime generic (pipeline/__main__.py).
 """
@@ -20,13 +22,14 @@ import httpx
 from immune_contracts import events as E, wire
 
 from . import poc as pocmod, reqs, rules
+from .extfix import ExtFix
 from .orchestrator import Closed, Pipeline
 
 HOP = {"host", "content-length", "connection", "transfer-encoding"}
 
 
 class ExternalPipeline(Pipeline):
-    def __init__(self, *a, repro_url: str = "", runs: int = 3, **kw):
+    def __init__(self, *a, repro_url: str = "", runs: int = 3, target: dict | None = None, **kw):
         if not repro_url:
             from .generic import JudgeValidator
             if kw.get("validator") is None:
@@ -35,6 +38,7 @@ class ExternalPipeline(Pipeline):
                 from . import generic_patch
                 kw["patcher"] = generic_patch
         super().__init__(*a, **kw)
+        self.target = target
         self.repro_url = (repro_url or "").rstrip("/")
         self.runs = runs
 
@@ -83,8 +87,7 @@ class ExternalPipeline(Pipeline):
         self.publish(E.POC_READY, {"incident": iid, "reproducible": rep["reproducible"], "runs": hits, "poc": p}, inc)
         self.state.save()
         if not rep["reproducible"]:
-            raise Closed("not_reproducible", "the PoC fired the %s oracle in %d/%d runs on the shadow clone"
-                         % (p["expect"]["oracle"], hits, self.runs))
+            self.escalate(inc, p, hits, self.runs)
         self.note(inc, "PoC reproduces %d/%d on the shadow clone" % (hits, self.runs))
 
         # 2. containment rule (built-in derivation: this mode loads no patch generator)
@@ -95,8 +98,21 @@ class ExternalPipeline(Pipeline):
         self.note(inc, "rule %s posted (%s %s)" % (rule["id"], rule["scope"], rule.get("param")))
         self.state.save()
 
-        # 3. reproduction-only mode stops here: REPRO_URL names one running clone, not a release the gates
-        #    could patch and judge (judge mode, without REPRO_URL, runs the whole flow)
-        raise Closed("rule_only", "contained by rule %s; reproduction-only mode (REPRO_URL) has no patch stage"
-                     % rule["id"])
+        # 3. patch: LLM fix -> CI in a sandbox -> PR -> merge -> blue/green -> verify (pipeline/extfix.py)
+        if not self.target:
+            raise Closed("rule_only", "contained by rule %s; no patch target configured (EXTERNAL_TARGET)"
+                         % rule["id"])
+        fx = ExtFix(self.target, self.cfg.run_id, lambda t, d: self.publish(t, d, inc), self.note,
+                    self.cfg.gateway_admin_url, self.cfg.admin_token, self.cfg.gateway_url,
+                    max_attempts=self.cfg.max_attempts, patcher_timeout_s=self.cfg.patcher_timeout_s)
+        out = fx.run(inc)
+        inc["fix"] = {k: v for k, v in out.items() if k != "outcome"}
+        if out["outcome"] == "patched":
+            inc["t"]["verified"] = time.time()
+            try:
+                self.gw.delete_rule(rule["id"])
+                self.note(inc, "rule %s removed: the fix is live" % rule["id"])
+            except Exception as e:  # noqa: BLE001
+                self.note(inc, "could not remove rule %s: %s" % (rule["id"], e))
+        raise Closed(out["outcome"], out["reason"])
 

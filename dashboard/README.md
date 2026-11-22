@@ -19,6 +19,11 @@ networks `ctrlnet` and `edge`, with the store at `<runtime>/bus/events.jsonl` an
 
 On SIGTERM the open event streams are ended so the process exits at once.
 
+`immune fuxa dashboard` starts the same app a second way (`immune/fuxa_dashboard.py` `serve`): on the host, bound
+to `127.0.0.1` (default port 8091), with no store and no bus token, fed in-process from the FUXA demo's records
+through the `lifespan` argument of `create_app`, and with two extra public routes, `GET /fuxa/requests` and
+`GET /fuxa/restrictions`. With no token configured, `POST /events` on that instance always answers 401.
+
 ## Layout
 
 | File | Role |
@@ -47,6 +52,7 @@ On SIGTERM the open event streams are ended so the process exits at once.
 | `DASH_MAX_EVENTS` | `50000` | Events kept in memory |
 | `DASH_STORE_MAX_MB` | `256` | Size at which the store rotates to `<store>.1`; `0` disables rotation |
 | `DASH_MAX_STREAMS` | `200` | Concurrent event streams; the next one gets 503 |
+| `DASHBOARD_SUBTITLE` | empty | Text shown next to the page title. Sent to the page in the stream's `hello` message. `deploy/compose.yaml` passes it through; `immune up` sets it only for the project named `openemr` (`compose_env` in `immune/__main__.py`) |
 
 ## Behaviour
 
@@ -71,7 +77,7 @@ Accepted event types are the ones in `immune_contracts/events.py` (`TYPES`). Eac
 
 ### Stream protocol
 
-- The stream opens with `event: hello` carrying `{gen, seq}`. `gen` identifies the stored history: it survives a
+- The stream opens with `event: hello` carrying `{gen, seq}`, plus `subtitle` when `DASHBOARD_SUBTITLE` is set. `gen` identifies the stored history: it survives a
   restart on the same store and changes when the store is cleared or replaced. A page that reconnects to a
   different history starts over.
 - Each event is sent with `id: <seq>`.
@@ -117,6 +123,17 @@ redacted.
   oracle (or the audit finding) and `incident.opened` is shown separately as queue time.
   `tests/test_public_surface.py` compares the page's numbers with `immune.metrics` on a recorded run
   (`tests/fixtures/real_run.jsonl`).
+- Canary: between `canary.started` and `canary.done` the production panel shows the share of traffic and the
+  release under canary; the `canary` object of `deploy.done` is summarised in the incident's deploy section.
+- FUXA mode: once a `fuxa.status` event is in the current run the page switches layout (subtitle
+  "Estación Delta · FUXA v1.2.9", panels "Estado de FUXA" and "Peticiones en vivo", the latter polled from
+  `GET /fuxa/requests`, which only the `immune fuxa dashboard` instance serves). `session.restricted` events fill
+  the panel "Restricciones de sesión" until `session.released`; `fuxa.review` marks an incident's candidate as
+  waiting for approval.
+- Accepted but not displayed: `prod.alert` events are kept in the reducer's state (last 50) and no panel renders
+  them; `outcome_detail` of `incident.closed` is not read, so an escalated incident appears as `rule_only`; a
+  `gate.result` whose gate is not one of `policy`, `properties`, `poc`, `tests`, `legit` (the `build` gate of
+  `pipeline/extfix.py`) is not shown. Event types without a reducer case are counted as ignored.
 - The panel "Bot atacante" appears only when the current run has `attack.attempt` events. They come from the demo
   attacker `sim/attacker.py` (real attempts against the running shop) or from `demo_events.py` (invented, labelled
   "DEMO").

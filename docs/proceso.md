@@ -4,7 +4,7 @@ Tipo de documento: explicación, con una guía breve para reproducir la auditor�
 
 ## Cómo se construyó
 
-El código de Inmune lo escribieron agentes de programación con IA (Claude), orquestados y revisados por el
+El código de Immune lo escribieron agentes de programación con IA (Claude), orquestados y revisados por el
 equipo. El trabajo se hizo contra un contrato escrito ([`contracts/`](../contracts/README.md)) y contra tests de
 aceptación (`acceptance/`) definidos antes de construir cada componente.
 
@@ -26,6 +26,12 @@ El 2026-11-22 se hizo una auditoría del código y de la documentación. Entre s
 defectos plantados salieron de los árboles de las aplicaciones hacia `docs/demo/respuestas/`, porque el generador
 de parches copia el árbol de la aplicación para el modelo. Las cifras de tiempo de `resultados.md` son anteriores
 a esa corrección.
+
+Esa auditoría no cubrió el código que se incorporó después desde otra línea de trabajo: el canario de despliegue,
+el sidecar unificado con MySQL y la traza de PHP, el vigilante de prod, el WAF de detección, la etapa de parche
+para aplicaciones externas, los laboratorios de Grafana y ScadaBR, el ejemplo de OpenEMR y la demo de FUXA. Su
+estado, y lo que se verificó de cada uno, está en la tabla de
+[arquitectura.md](arquitectura.md#7-diseñado-y-construido) y en [resultados.md](resultados.md).
 
 ## Cómo reproducir la auditoría
 

@@ -46,7 +46,7 @@ def test_served_with_csp(tmp_path):
         assert "unsafe-inline" not in r.headers["content-security-policy"]
     assert "text/html" in c.get("/").headers["content-type"]
     page = c.get("/").text
-    assert "<title>Inmune</title>" in page and "<h1>Inmune</h1>" in page and "Sistema inmune" not in page
+    assert "<title>Immune</title>" in page and "<h1>Immune</h1>" in page and "Sistema inmune" not in page
 
 
 def test_attack_panel_is_hidden_until_the_page_has_attack_events():

@@ -124,6 +124,9 @@ def build(event: dict, spec: dict, manifest: dict | None = None) -> dict:
     return {
         "vuln_class": CLASS_OF.get(kind, "other"),
         "oracle": kind,
+        # missing-authentication (CWE-306): the owner oracle fired for a caller with no established identity.
+        # Distinct from classic IDOR, where the attacker is authenticated but reaches another owner's resource.
+        "anon": kind == "owner" and ev.get("uid") is None,
         "method": method,
         "route": route,
         "param": param,
@@ -138,5 +141,5 @@ def build(event: dict, spec: dict, manifest: dict | None = None) -> dict:
 
 def public(inc: dict) -> dict:
     """The incident dict handed to the patcher (contracts/interfaces.md)."""
-    keys = ("incident", "vuln_class", "method", "route", "param", "sink", "evidence_rid", "request", "evidence", "poc")
+    keys = ("incident", "vuln_class", "anon", "method", "route", "param", "sink", "evidence_rid", "request", "evidence", "poc")
     return {k: inc.get(k) for k in keys}

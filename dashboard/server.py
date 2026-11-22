@@ -325,13 +325,14 @@ def _int(v, default=0) -> int:
         return default
 
 
-def create_app(store: str | None = None, token: str | None = None) -> Starlette:
+def create_app(store: str | None = None, token: str | None = None, *, lifespan=None) -> Starlette:
     bus = Bus(store if store is not None else os.environ.get("BUS_STORE") or None,
               token if token is not None else os.environ.get("BUS_TOKEN", ""))
     max_streams = _int(os.environ.get("DASH_MAX_STREAMS"), MAX_STREAMS) or MAX_STREAMS
     page_max = _env_int("DASH_EVENTS_LIMIT_MAX", EVENTS_LIMIT_MAX) or EVENTS_LIMIT_MAX
     page = min(_env_int("DASH_EVENTS_LIMIT", EVENTS_LIMIT) or EVENTS_LIMIT, page_max)
     max_body = (_env_int("DASH_MAX_BODY_MB", MAX_BODY_MB) or MAX_BODY_MB) * 1024 * 1024
+    subtitle = os.environ.get("DASHBOARD_SUBTITLE", "")
     no_store = {"Cache-Control": "no-store"}
 
     async def read_body(request: Request) -> bytes | None:
@@ -383,7 +384,10 @@ def create_app(store: str | None = None, token: str | None = None) -> Starlette:
         raw = bus.authorized(request)
 
         def hello() -> str:
-            return "event: hello\ndata: %s\n\n" % json.dumps({"gen": bus.gen, "seq": bus.seq}, separators=(",", ":"))
+            data = {"gen": bus.gen, "seq": bus.seq}
+            if subtitle:
+                data["subtitle"] = subtitle
+            return "event: hello\ndata: %s\n\n" % json.dumps(data, separators=(",", ":"))
 
         async def gen():
             bus.streams += 1
@@ -456,7 +460,7 @@ def create_app(store: str | None = None, token: str | None = None) -> Starlette:
     for n, m in FILES.items():
         routes.append(Route(f"/static/{n}", _static(n, m), methods=["GET"]))
 
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, lifespan=lifespan)
     app.state.bus = bus
     app.add_middleware(SecurityHeaders)
     return app

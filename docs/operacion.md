@@ -18,6 +18,7 @@ El esquema completo de `.immune/config.yaml` y los protocolos entre procesos est
 | CLI de Claude Code (`claude`) con sesión iniciada | Pasos con modelo de `immune init` y parches automáticos | No |
 | GitHub CLI (`gh`) con sesión iniciada | `repo.target: github` | No |
 | Imagen `immune-cbuild:1` | `immune anticipate` | No |
+| Imágenes fijadas de OpenEMR y MariaDB | El ejemplo `examples/openemr` | No |
 
 `immune doctor --prereqs` informa cuáles están presentes.
 
@@ -27,8 +28,8 @@ defectos de la tienda de demostración, que tienen parche de respaldo).
 ## Instalar
 
 ```bash
-git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25.git inmune
-cd inmune
+git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25.git immune
+cd immune
 ./install.sh
 ```
 
@@ -41,7 +42,7 @@ Propiedades:
 - No usa `sudo`. Cuando falta algo, dice qué instalar y termina.
 - Se puede volver a ejecutar. Cada paso se salta si ya está hecho.
 - Las imágenes se construyen en la máquina. La construcción descarga `python:3.12-slim` de Docker Hub y paquetes de
-  PyPI y de los mirrors de Debian. No se descarga ninguna imagen de Inmune de un registro.
+  PyPI y de los mirrors de Debian. No se descarga ninguna imagen de Immune de un registro.
 - Reconstruye el entorno virtual cuando cambia `deploy/requirements.txt`, y una imagen cuando cambia ese archivo o
   su Dockerfile.
 - No reemplaza un enlace `~/.local/bin/immune` que apunte a otro checkout: avisa y lo deja.
@@ -49,11 +50,16 @@ Propiedades:
 | Variable de `install.sh` | Efecto | Por defecto |
 |---|---|---|
 | `IMMUNE_BIN_DIR` | Directorio donde se crea el enlace `immune` | `~/.local/bin` |
-| `PYTHON` | Intérprete con el que se crea `.venv` | `python3` |
+| `IMMUNE_VENV_DIR` | Directorio del entorno virtual. `bin/immune` y la CLI leen la misma variable, así que debe estar definida también al ejecutar | `.venv` en el checkout |
+| `PYTHON` | Intérprete con el que se crea el entorno virtual | `python3` |
 | `IMMUNE_SKIP_IMAGES=1` | No construye imágenes | sin definir |
 | `IMMUNE_WITH_ANTICIPATE=1` | Construye también `immune-cbuild:1` | sin definir |
+| `IMMUNE_WITH_OPENEMR=1` | Descarga las imágenes fijadas de OpenEMR y MariaDB (`openemr_images` en `immune/doctor.py`) y agrega `--openemr` a la comprobación de requisitos | sin definir |
 
 Probado en un Ubuntu 24.04 ARM64 limpio. No probado en x86_64 ni en otras distribuciones.
+
+Las imágenes de los laboratorios (`immune-strace:1`, `immune-bpftrace:1`, `immune-gobuild:1`, `immune-waf:1`) no
+las construye `install.sh`: las construye el `lab.sh` de cada laboratorio la primera vez.
 
 Si `~/.local/bin` no está en el `PATH`, el comando también funciona como `bin/immune` desde el checkout.
 
@@ -107,8 +113,11 @@ immune down
 
 ## Proteger otra aplicación
 
-`immune init` adapta Inmune a una aplicación Python ASGI que expone `openapi()` (FastAPI) y usa un archivo
-SQLite. Para otros lenguajes no hay `init`: el perfil se escribe a mano, como el de `examples/tareas-node/.immune/`.
+`immune init` adapta Immune a una aplicación Python ASGI que expone `openapi()` (FastAPI) y usa un archivo
+SQLite. Para otros lenguajes `init` no genera nada: el perfil se escribe a mano, como los de
+`examples/tareas-node/.immune/` y `examples/openemr/overlay/.immune/`. Ante un proyecto PHP con MySQL que ya tiene
+`.immune/config.yaml`, `init` solo lo valida (comprobaciones 1 y 9 del doctor) y termina con `READY` o
+`NEEDS ATTENTION`.
 
 ```bash
 cd /ruta/a/su-app
@@ -170,11 +179,28 @@ Para `examples/tareas-node` (Node + Postgres, runtime genérico, perfil ya escri
 immune up --project examples/tareas-node
 ```
 
+Para OpenEMR 8.2.0 (PHP + MariaDB, runtime genérico, puertos 8280, 8281, 8290 y 8270), los pasos están en
+[openemr.md](openemr.md).
+
+### Laboratorios y demo de FUXA
+
+No usan `immune up`. Cada uno levanta sus propios procesos y contenedores, con puertos distintos de los de un
+stack; los dos laboratorios usan los mismos puertos de gateway y bus (18080, 18081, 18090), así que no corren a
+la vez.
+
+| Qué | Comandos | Documento |
+|---|---|---|
+| Grafana 8.3.0, CVE-2021-43798 | `labs/grafana-cve-2021-43798/lab.sh up\|check\|status\|down` | `labs/grafana-cve-2021-43798/README.md` |
+| ScadaBR 1.2.0, CVE-2026-8602 | `labs/scadabr-cve-2026-8602/lab.sh up\|check\|status\|down` | `labs/scadabr-cve-2026-8602/README.md` |
+| FUXA v1.2.9 | `immune fuxa baseline`, `up`, `status`, `watch`, `dashboard`, `demo`, `down` y los demás subcomandos de `immune/fuxa.py` | [fuxa.md](fuxa.md) |
+
+`lab.sh up` necesita red la primera vez (imágenes, y en Grafana el código fuente y los módulos de Go).
+
 ## Referencia de comandos
 
-Todos los comandos salvo `anticipate` aceptan `--project DIR`. Sin él, `up`, `down`, `status`, `reset`,
+Todos los comandos salvo `anticipate` y `fuxa` aceptan `--project DIR`. Sin él, `up`, `down`, `status`, `reset`,
 `report`, `mode`, `autopatch`, `doctor` y `deploy` usan, en este orden: la variable `IMMUNE_PROJECT`; el directorio más cercano hacia
-arriba que contenga `.immune/config.yaml`; y si no hay ninguno, el checkout de Inmune (el demo incorporado).
+arriba que contenga `.immune/config.yaml`; y si no hay ninguno, el checkout de Immune (el demo incorporado).
 `init` usa el directorio actual.
 
 | Comando | Qué hace | Código de salida |
@@ -188,12 +214,13 @@ arriba que contenga `.immune/config.yaml`; y si no hay ninguno, el checkout de I
 | `immune autopatch off\|pr\|merge` | Escribe `autopatch`. El pipeline lo lee al empezar cada incidente | 0 |
 | `immune init [--yes] [--no-llm] [--prod-db PATH] [--seed N]` | Genera `.immune/` para una aplicación. `--yes` sobrescribe un `.immune/` existente | 0 `READY`; 1 `NEEDS ATTENTION` |
 | `immune doctor [--json] [--only 1,2]` | Ejecuta las comprobaciones de adaptación de un proyecto | 0 si todas pasan |
-| `immune doctor --prereqs [--json]` | Comprueba los requisitos de la máquina; no necesita proyecto | 0 si no falta nada obligatorio |
+| `immune doctor --prereqs [--openemr] [--json]` | Comprueba los requisitos de la máquina; no necesita proyecto. `--openemr` incluye las imágenes fijadas de OpenEMR y MariaDB | 0 si no falta nada obligatorio |
 | `immune deploy [--dry-run] [--experimental]` | Experimental; ver abajo | 2 sin `--experimental` |
 | `immune anticipate list` | Lista los objetivos del modo de revisión de código fuente | 0 |
 | `immune anticipate check T` | Chequeo mecánico de la versión vulnerable y de la oficial, sin modelo | — |
 | `immune anticipate run T [--model M] [--out DIR]` | Revisión con modelo, chequeos, comparación y reporte | — |
 | `immune anticipate recheck RESULT_DIR` | Reevalúa un resultado guardado, sin llamar al modelo | — |
+| `immune fuxa [--runtime RUTA] <subcomando>` | Demo sobre FUXA v1.2.9, un camino aparte del stack ([fuxa.md](fuxa.md)). Subcomandos: `baseline [--repo]`, `up [--port]`, `watch [--input]`, `dashboard [--port]`, `reload-gateway`, `harden`, `validate-active`, `audit-coverage`, `patch-mode [auto\|review]`, `approve ID`, además de `status`, `demo` y `down` | — |
 
 Un error de configuración termina con código 2 y un mensaje `immune: …`.
 
@@ -218,6 +245,11 @@ desde los releases. Poner el gateway delante de un servicio que el cliente ya ti
 | 6 | Ningún valor privado real aparece en los datos sintéticos (por muestreo). Se omite cuando los datos vienen de `data.seed_command` y no hay `columns.yaml` | host |
 | 7 | El comando de tests pasa en el runner | contenedor sin red |
 | 8 | Los escenarios legítimos generados son deterministas | contenedor sin red |
+| 9 | Imágenes de contenedor fijadas: las bases con digest del Dockerfile del proyecto, la imagen de la base de datos, `immune-base:1` e `immune-sidecar:1` existen en la máquina | host (`docker image inspect`) |
+
+En un proyecto Python con SQLite el doctor ejecuta las comprobaciones 1 a 8. En un proyecto con
+`app.runtime: generic` y `database.kind: mysql` ejecuta solo la 1 (en este caso: la configuración y el Dockerfile
+existen) y la 9, e informa las demás como omitidas (`run` y `_mysql_checks` en `immune/doctor.py`).
 
 ## Modos
 
@@ -225,6 +257,7 @@ desde los releases. Poner el gateway delante de un servicio que el cliente ya ti
 |---|---|---|
 | `mode` | `enforce` (por defecto) | El gateway desvía, captura y niega según la [tabla de decisión](arquitectura.md#33-detonación-y-decisión) |
 | | `observe` | Clasifica y detona, pero toda respuesta sale de prod. Registra lo que `enforce` habría hecho |
+| | `passthrough` | Solo por la API de administración del gateway (`POST /_admin/mode`), no por `immune mode`: clasifica y reenvía todo a prod sin detonar |
 | `autopatch` | `merge` (por defecto del esquema; `immune init` escribe `pr`) | Merge y despliegue automáticos del parche que pasa las validaciones |
 | | `pr` | Abre el pull request y se detiene; la regla sigue activa |
 | | `off` | Solo regla |
@@ -290,24 +323,41 @@ procesos del host. Las variables internas de cada módulo están en su README.
 | `PATCHER_CLAUDE_CONFIG_DIR` | Directorio de configuración y login propio de la CLI del generador de parches (se le pasa como `CLAUDE_CONFIG_DIR`) | sin definir: el login de la máquina | `patcher/claude_cli.py` |
 | `PATCHER_ANTHROPIC_API_KEY` | Clave de API propia del generador de parches (se le pasa como `ANTHROPIC_API_KEY`) | sin definir | `patcher/claude_cli.py` |
 | `PIPELINE_MAX_ATTEMPTS` | Intentos de parche por incidente | 3 | `pipeline/config.py` |
-| `PIPELINE_RULE_TTL_S` | TTL de una regla, en segundos | 3600 | `pipeline/config.py` |
+| `PIPELINE_RULE_TTL_S` | TTL, en segundos, de la regla incorporada del pipeline. No afecta a la regla que deriva `patcher.derive_rule`, que no vence | sin definir o 0: la regla no vence | `pipeline/config.py` |
+| `PIPELINE_REOPEN_COOLDOWN_S` | Espera, en segundos, antes de reabrir un incidente `escalated` ante evidencia nueva | 300 | `pipeline/config.py` |
 | `PIPELINE_RETRY_COOLDOWN_S` | Espera base, en segundos, antes de reintentar un cierre transitorio | 60 | `pipeline/config.py` |
 | `PIPELINE_MAX_RETRIES` | Reintentos de un cierre transitorio | 5 | `pipeline/config.py` |
 | `POLICY_MAX_LINES`, `POLICY_MAX_FILES` | Tamaño máximo de un diff | 120, 4 | `pipeline/config.py` |
 | `SMOKE_PATH` | Ruta del request de humo del despliegue; vacío lo omite | derivada del OpenAPI | `fleet/config.py` |
 | `DEPLOY_WATCH_S` | Ventana de observación tras el cambio de upstream, en segundos | 20 | `fleet/config.py` |
 | `DEPLOY_MIN_REQUESTS` | Requests mínimos para juzgar la tasa de 5xx | 20 | `fleet/config.py` |
+| `CANARY_WEIGHT` | Fracción del tráfico de prod que va al release nuevo durante el canario de despliegue, entre 0 y 1. 0 lo desactiva | 0.2 | `fleet/config.py` |
+| `CANARY_S` | Duración máxima del canario, en segundos. 0 lo desactiva | 8 | `fleet/config.py` |
+| `CANARY_MIN_REQUESTS` | Requests mínimos en el lado canario para que el canario decida | 20 | `fleet/config.py` |
+| `WAF_URL` | URL del WAF de detección. Vacía: no se consulta | vacía | `gateway/core.py` |
 | `RECORD_MAX_MB` | Tamaño al que rota la grabación del gateway | 256 | `gateway/core.py` |
 | `GW_CAPTIVE_TTL_S` | Vencimiento por inactividad de una sesión cautiva, en segundos | 900 | `gateway/core.py` |
+| `DASHBOARD_SUBTITLE` | Subtítulo del panel | vacío | `dashboard/server.py` |
 | `DASH_REDACT=0` | El dashboard no tacha los eventos para lectores sin token | tacha | `dashboard/server.py` |
 | `DASH_EVENTS_LIMIT`, `DASH_EVENTS_LIMIT_MAX` | Eventos por página de `GET /events`, y máximo | 1000, 5000 | `dashboard/server.py` |
 | `DASH_MAX_BODY_MB` | Cuerpo máximo de `POST /events` | 32 | `dashboard/server.py` |
 | `DASH_MAX_EVENTS` | Eventos en memoria | 50000 | `dashboard/server.py` |
 | `DASH_STORE_MAX_MB` | Tamaño al que rota el JSONL del bus; 0 lo desactiva | 256 | `dashboard/server.py` |
 
-Las variables del gateway y del dashboard (`RECORD_MAX_MB`, `GW_CAPTIVE_TTL_S`, `DASH_*`) se leen dentro de sus
-contenedores. `deploy/compose.yaml` no las propaga desde el entorno de `immune up`: para cambiarlas hay que
-agregarlas al bloque `environment` del servicio en ese archivo.
+Las variables del gateway y del dashboard (`RECORD_MAX_MB`, `GW_CAPTIVE_TTL_S`, `WAF_URL`, `DASH_*`) se leen dentro
+de sus contenedores. `deploy/compose.yaml` no las propaga desde el entorno de `immune up`: para cambiarlas hay que
+agregarlas al bloque `environment` del servicio en ese archivo. `DASHBOARD_SUBTITLE` sí está en ese archivo, pero
+su valor lo fija `compose_env` en `immune/__main__.py` (vacío, salvo para el proyecto de nombre `openemr`) y no se
+toma del entorno de quien ejecuta `immune up`.
+
+Variables que solo usan los laboratorios, que arrancan los procesos a mano:
+
+| Variable | Efecto | Leída en |
+|---|---|---|
+| `PIPELINE_APP=external`, `REPRO_URL` | El pipeline reproduce contra el clon a través del sidecar en `REPRO_URL`, sin runner | `pipeline/__main__.py`, `pipeline/external.py` |
+| `EXTERNAL_TARGET` | Archivo `target.yaml` de la etapa de parche para aplicaciones externas | `pipeline/__main__.py`, `pipeline/extfix.py` |
+| `SIDECAR_CONFIG`, `SIDECAR_GRACE_MS`, `SIDECAR_CONTAINER`, `SQL_LOG_CMD`, `SQL_DIALECT`, `SQL_BASELINE`, `MARKERS_PATH`, `CLONE_ID`, `CLONE_KEY`, `COLLECTOR_URL`, `RELEASE` | Configuración del sidecar; las claves del archivo de configuración están en `sidecar/config.py` | `sidecar/config.py` |
+| `PROD_CONTAINERS`, `BPF_IMAGE`, `PROD_GRACE_S` (15), `PROD_COOLDOWN_S` (30), `RECORD_PATH`, `REPRO_URL` | Vigilante de prod | `sidecar/prodwatch.py` |
 
 ## Archivos
 
@@ -341,7 +391,7 @@ El demo incorporado usa `runtime/` en la raíz del repositorio (clave `runtime_d
 | `pipeline/state.json` | Incidentes, cola y última posición leída del bus |
 | `corpus/<clase>.jsonl` | Valores confirmados por clase; se conserva entre `reset` |
 | `repo/` | Repositorio git de los pull requests locales |
-| `stack/gateway-state.json` | Upstream, modo y reglas con su vencimiento |
+| `stack/gateway-state.json` | Upstream, modo y reglas (con su vencimiento, si lo tienen). El canario de despliegue no se guarda |
 | `stack/fleet-state.json` | Color activo, release, tamaño del pool |
 | `stack/containers.env`, `stack/*.supervise.json` | Entorno de los contenedores y de los procesos supervisados |
 | `logs/fleet.log`, `logs/pipeline.log` | Registros de los procesos del host; `reset` los vacía |
@@ -354,7 +404,7 @@ se conserva (`seed` en `immune/__main__.py`).
 
 ## Despliegue y rollback
 
-`fleet` despliega un release en el color libre (`_deploy` en `fleet/manager.py`):
+`fleet` despliega un release en el color libre (`_deploy`, `_canary` y `_watch` en `fleet/manager.py`):
 
 1. Valida que el release existe. En el runtime genérico construye antes la imagen.
 2. Arranca el contenedor del color libre y espera a que responda la salud.
@@ -362,16 +412,37 @@ se conserva (`seed` en `immune/__main__.py`).
    OpenAPI que no sea la ruta de salud. Si no existe ninguno, el paso se omite y el resultado lo dice en `smoke`.
    En la tienda es `GET /api/products`; en `tareas-node` se omite.
 4. Lee la tasa de 5xx del release que va a reemplazar.
-5. Cambia el upstream del gateway, que drena los requests en curso.
-6. Observa durante `DEPLOY_WATCH_S`.
-7. Elimina el color anterior, reemplaza los clones libres y poda releases antiguos.
+5. Canario de despliegue: pide al gateway (`POST /_admin/canary`) que envíe la fracción `CANARY_WEIGHT` del
+   tráfico de prod al release nuevo, sorteada por request, durante `CANARY_S` segundos como máximo. El gateway
+   cuenta requests, 4xx y 5xx de cada lado.
+6. Cambia el upstream del gateway, que drena los requests en curso. El cambio termina el canario.
+7. Observa los contadores de prod durante `DEPLOY_WATCH_S`. Si el canario dio `ok`, el tiempo que duró se descuenta
+   de la ventana, con un mínimo de 2 segundos.
+8. Elimina el color anterior, reemplaza los clones libres y poda releases antiguos.
 
-Una falla de salud o de humo detiene el despliegue antes del cambio. Durante la observación, el despliegue se
-revierte si se cumplen las tres condiciones: al menos `DEPLOY_MIN_REQUESTS` requests desde el cambio, al menos un
-5xx, y una tasa de 5xx superior a `max(2 × tasa anterior, tasa anterior + 0.02)`. Con menos requests, el
-despliegue queda aceptado con `traffic_validated: false` y el detalle "not validated by traffic".
+Una falla de salud o de humo detiene el despliegue antes del canario.
 
-El rollback no detecta un comportamiento incorrecto que responde 200, ni nada que ocurra después de la ventana.
+Veredicto del canario (campo `canary.verdict` del resultado y del evento `deploy.done`):
+
+| Veredicto | Cuándo | Efecto |
+|---|---|---|
+| `worse` | Con al menos `CANARY_MIN_REQUESTS` requests en el lado canario: tiene algún 5xx y su tasa de 5xx supera `max(2 × la del release actual, la del release actual + 0.02)`; o tiene al menos 5 respuestas 4xx y su tasa de 4xx supera `max(2 × la del release actual, la del release actual + 0.10)`. Se evalúa durante la ventana, no al final | Se detiene el canario y el despliegue se aborta: el release nuevo nunca recibe todo el tráfico. `rolled_back` es `false` |
+| `ok` | La ventana termina con al menos `CANARY_MIN_REQUESTS` requests en el lado canario y sin la condición anterior | Sigue el cambio de upstream |
+| `skipped` | `CANARY_WEIGHT` o `CANARY_S` en 0; el gateway no acepta el canario o lo pierde; menos de `CANARY_MIN_REQUESTS` requests en el lado canario. Sin ningún request en ninguno de los dos lados, la espera se corta a los 2 segundos | Sigue el cambio de upstream, sin información del canario |
+
+Un error de conexión con el release canario cuenta como un 5xx de ese lado y el request se reenvía al release
+actual: el cliente no lo ve (`Gateway.to_prod`).
+
+Durante la observación posterior al cambio, el despliegue se revierte si se cumplen las tres condiciones: al menos
+`DEPLOY_MIN_REQUESTS` requests desde el cambio, al menos un 5xx, y una tasa de 5xx superior a
+`max(2 × tasa anterior, tasa anterior + 0.02)`.
+
+`traffic_validated` es `true` cuando hubo al menos `DEPLOY_MIN_REQUESTS` requests en la observación o cuando el
+canario dio `ok`. En otro caso el despliegue queda aceptado con `traffic_validated: false` y un detalle que
+empieza con "deployed; not validated by traffic".
+
+Ni el canario ni el rollback detectan un comportamiento incorrecto que responde 200, ni nada que ocurra después de
+la ventana.
 
 ## Tests
 
@@ -418,6 +489,9 @@ sus contenedores existan, porque `immune down` elimina las imágenes de la aplic
 - Sin `PATCHER_CLAUDE_CONFIG_DIR` ni `PATCHER_ANTHROPIC_API_KEY`, los procesos del host usan el login de Claude Code
   de la máquina y, por lo tanto, su cuota.
 - `install.sh` solo está probado en Ubuntu 24.04 ARM64.
+- El vigilante de prod y el WAF de detección no forman parte de `immune up`; solo los arrancan los laboratorios.
+- Una regla no vence por defecto: la de un incidente sin parche queda activa hasta que se borra
+  (`DELETE /_admin/rules/<id>` en la API de administración del gateway) o hasta `immune reset`.
 - El Postgres de demostración del runtime genérico no está supervisado y no persiste datos entre `down` y `up`.
 
 La lista completa de límites está en [limites.md](limites.md).

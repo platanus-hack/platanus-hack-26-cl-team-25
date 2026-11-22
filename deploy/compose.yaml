@@ -53,6 +53,7 @@ services:
       PYTHONPATH: /opt/immune
       RUN_ID: "${RUN_ID}"
       BUS_STORE: /runtime/bus/events.jsonl
+      DASHBOARD_SUBTITLE: "${DASHBOARD_SUBTITLE:-}"
     volumes:
       - "${IMMUNE_HOME}:/opt/immune:ro"
       - "${IMMUNE_RUNTIME}:/runtime"

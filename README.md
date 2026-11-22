@@ -1,10 +1,10 @@
-# team-25 Platanus Hack 26: Santiago ft. Buk Project
+# Immune · team-25 · Platanus Hack 26: Santiago ft. Buk
 
 **Current project logo:** project-logo.png
 
-<img src="./project-logo.png" alt="Project Logo" width="200" />
+<img src="./project-logo.png" alt="Logo de Immune" width="200" />
 
-Track: 🔧 Hardware
+Track: 🛡️ AI Safety
 
 team-25
 
@@ -13,172 +13,90 @@ team-25
 - Isidro Pasman ([@isidropasman](https://github.com/isidropasman))
 - Uriel Gandelman ([@UriGandel](https://github.com/UriGandel))
 
-## Qué es Inmune
+## El problema
 
-Inmune es un proxy inverso que se pone delante de una aplicación web. Ejecuta cada request sospechoso primero en
-un clon de la misma aplicación, con el mismo código y datos sintéticos, y observa lo que la aplicación hace: la
-consulta SQL, los archivos que abre, los procesos, las conexiones y si devuelve datos de otro dueño. Si el ataque
-funciona en el clon, queda confirmado por ejecución y no por un puntaje. El gateway contiene entonces el punto
-vulnerable con una regla acotada a esa ruta y, cuando el defecto está en un parámetro, a ese parámetro. Un modelo
-confinado propone un parche de código, que solo se despliega si pasa cinco validaciones mecánicas.
+El software del que depende la vida de la gente no se puede corregir a la velocidad a la que hoy se lo ataca.
+
+Atacar se volvió barato: un agente encuentra y explota una falla en horas. Corregirla sigue dependiendo de una persona, y lleva semanas. El agua, la energía y las historias clínicas corren sobre software que nadie alcanza a parchear a tiempo.
+
+## Qué es
+
+Immune protege infraestructura crítica frente a vulnerabilidades zero-day. Es un proxy inverso que se pone delante de la aplicación: desvía cada request sospechoso a un clon de producción con datos sintéticos y, si el ataque funciona ahí, lo contiene con una regla y despliega un parche validado, sin intervención humana.
+
+No necesita conocer la falla de antemano. No mira cómo se ve el request: mira qué hace.
 
 ## Cómo funciona
 
-```mermaid
-flowchart LR
-  C[Cliente] --> GW[Gateway]
-  GW -->|limpio| PROD[Producción]
-  GW -->|sospechoso| CL[Clon: mismo código,<br/>datos sintéticos, oráculos]
-  CL -->|ningún oráculo dispara| PROD
-  CL -->|un oráculo dispara| INC[Incidente]
-  INC --> REP[Reproducción 3 de 3<br/>en un runner sin red]
-  REP --> RULE[Regla en el gateway]
-  REP --> LLM[Modelo confinado<br/>propone un diff]
-  LLM --> VAL[Cinco validaciones:<br/>policy, properties, poc, tests, legit]
-  VAL -->|pasa| DEP[Despliegue blue/green<br/>con rollback]
-  VAL -->|falla| LLM
-  DEP --> PROD
-```
+1. **Clasifica.** Cada request se valida contra el contrato OpenAPI de la aplicación y una gramática segura por parámetro. El clasificador es determinista: no hay un modelo de lenguaje en el camino del tráfico. Lo que se sale del contrato no se bloquea, se marca como sospechoso.
+2. **Desvía.** El request sospechoso se ejecuta en un clon de producción con datos sintéticos, nunca en producción. Ahí hay oráculos que miran qué hizo la aplicación: consultas SQL, archivos, procesos, red y datos de otro dueño. Si uno dispara, hay una prueba reproducible. Si ninguno dispara, el request sigue a producción: un falso positivo cuesta latencia, no un usuario bloqueado. Dos excepciones: una ruta con segmentos `..` se niega siempre, y un punto con regla activa se niega cuando el clon no llega a un veredicto.
+3. **Contiene.** De esa prueba sale una regla acotada a la ruta y el parámetro, nunca a la IP. En nuestra app de prueba quedó activa a los 1,9 s de mediana. La escribe código, no un modelo, y se borra cuando el parche queda verificado.
+4. **Corrige.** Un agente confinado propone el parche. No decide: el parche solo sale si pasa cinco validaciones mecánicas, entre ellas frenar el exploit original y no cambiar el comportamiento legítimo (escenarios guionados o requests grabados por el gateway). Se despliega en blue/green: antes del cambio, una parte del tráfico real pasa por la versión nueva (canario), y hay rollback automático.
+5. **Recuerda.** Con la batería de ese mismo ataque, Immune sondea el resto de la API en un entorno aislado y parchea lo que encuentre de la misma clase.
 
-1. **Clasificar.** El gateway marca como sospechoso un request por su forma (valores fuera de gramática o de
-   esquema, segmentos `..`, rutas de dueño con identidad no confiable), no por IP ni por historial.
-2. **Detonar.** El request sospechoso se ejecuta en un clon. Si ningún oráculo dispara, se reenvía a producción
-   y el cliente recibe la respuesta real: un falso positivo cuesta latencia. La excepción es una ruta con un
-   segmento `..`, que se niega aunque el clon no dispare nada.
-3. **Contener.** Si un oráculo dispara, la sesión queda atendida por un clon. El pipeline reproduce el
-   incidente tres veces de tres y, solo entonces, publica una regla en el gateway.
-4. **Parchar.** Un modelo que solo puede leer una copia del código y editar una lista de archivos propone un
-   diff. No decide nada: el parche pasa por cinco validaciones, se despliega en blue/green y se verifica.
+El recorrido completo, con la tabla de decisiones del gateway y el estado de cada pieza (construida, parcial, no construida), está en [docs/arquitectura.md](docs/arquitectura.md).
 
-El recorrido completo, con la tabla de decisiones del gateway, está en [docs/arquitectura.md](docs/arquitectura.md).
+## Resultados medidos
 
-## Inicio rápido
+En nuestra app de prueba (7 fallas plantadas por el equipo: inyección SQL, path traversal y acceso a datos ajenos):
 
-Requisitos: Linux con Docker Engine utilizable sin `sudo`, el plugin Docker Compose, git y Python 3.12 o posterior
-con el módulo `venv` (Debian y Ubuntu: `python3-venv`). Hace falta acceso a PyPI, a Docker Hub y a los mirrors de
-Debian una vez.
-Opcional: la CLI de Claude Code (`claude`) con sesión iniciada, para los parches automáticos y los pasos con
-modelo de `immune init`.
+- 21 de 21 incidentes parchados, sin reintentos. Mediana desde que se abre el incidente: regla a los 1,9 s, parche en producción a los 24,9 s. Medido el 2026-11-21 en una máquina ARM64 de 4 núcleos compartida; datos en `docs/demo/metricas-tiempo-a-parche.json`. La medición es anterior a las correcciones de la auditoría del 2026-11-22 y al canario, y no se repitió.
+- Con 3 ataques, uno por clase, quedaron parchadas las 7 fallas: 4 las encontró la auditoría propia. Observado una vez, sin datos crudos en el repositorio.
+- Las validaciones rechazaron 15 de 15 parches defectuosos escritos a propósito y aceptaron los 7 correctos. Salida en `docs/demo/selftest-2026-11-22.txt`.
 
-### 1. Instalar
+Sobre software real:
+
+- **Grafana 8.3.0 (CVE-2021-43798).** Ciclo completo sobre la imagen oficial sin modificar: regla a los 0,6 s, parche en producción a los 54 s, medido en local en una corrida con cachés calientes, sin datos crudos en el repositorio. Ver `labs/grafana-cve-2021-43798/`.
+- **Apache HTTP Server 2.4.49.** Revisando el código, el parche propuesto se comporta igual que el oficial en 21 de 21 casos escritos por el equipo, sobre la función extraída y no sobre un servidor en marcha. Ver `docs/demo/anticipacion-apache-2.4.49.md`.
+- **FUXA v1.2.9.** Una interfaz de operación de una planta de tratamiento de agua, protegida por Immune. La demo usa evidencia sintética, marcada como tal. Ver `docs/fuxa.md`.
+- **ScadaBR 1.2.0 (CVE-2026-8602).** Escritura de datos de sensores sin autenticación: detección en el clon, regla que solo alcanza a quien no tiene identidad y parche Java propuesto por el agente, compilado y probado en un contenedor candidato. La credencial de los dispositivos legítimos la modela el gateway. Sin cifras. Ver `labs/scadabr-cve-2026-8602/`.
+- **OpenEMR 8.2.0.** Historia clínica en PHP y MariaDB, sin modificar, sobre el runtime genérico. Verificado en local por el equipo, sin datos crudos en el repositorio. Ver `docs/openemr.md`.
+
+Las fallas de Grafana y Apache son públicas: prueban el mecanismo, no un descubrimiento.
+
+Todas las cifras, con fecha, máquina, método y nivel de respaldo, están en [docs/resultados.md](docs/resultados.md).
+
+## Instalar y probar
+
+Requiere Linux con Docker Engine utilizable sin sudo, el plugin de Docker Compose, git y Python 3.12 o superior con el módulo venv.
 
 ```bash
-git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25.git inmune
-cd inmune
-./install.sh
-immune doctor --prereqs
+git clone https://github.com/platanus-hack/platanus-hack-26-cl-team-25.git immune && cd immune
+./install.sh                 # revisa requisitos, crea .venv, construye las imágenes y enlaza ~/.local/bin/immune
+immune doctor --prereqs      # qué tiene esta máquina y qué es opcional
+cd /ruta/a/tu-app && immune init && immune up
 ```
 
-`install.sh` no usa `sudo`, se puede volver a ejecutar y dice qué falta. Crea `.venv`, construye las imágenes y
-enlaza el comando `immune` en `~/.local/bin`. Si ese directorio no está en el `PATH`, use `bin/immune`.
+`install.sh` no usa sudo y se puede volver a correr. Opcionales, todos informados por `immune doctor --prereqs`:
 
-### 2. Demo incorporado
+- **Claude Code CLI** (`claude`, con sesión iniciada): los pasos con modelo de `immune init` y los parches automáticos. Sin él, `immune init --no-llm`: los ataques se detectan y se contienen con una regla, pero no se parchean.
+- **GitHub CLI** (`gh`, con sesión iniciada): solo para `repo.target: github`.
+- **`immune-cbuild:1`**: solo para `immune anticipate` (`IMMUNE_WITH_ANTICIPATE=1 ./install.sh`).
 
-El demo es una tienda (FastAPI + SQLite, en `victim/`) con siete defectos plantados.
+`immune init` cubre aplicaciones Python ASGI (FastAPI) con SQLite. Para probar sin una app propia, `immune up` desde la raíz del checkout levanta la app de prueba: la tienda queda en `http://127.0.0.1:8080` y el panel en `http://127.0.0.1:8090`. Comandos, modos, puertos, variables y recuperación: [docs/operacion.md](docs/operacion.md).
 
-```bash
-immune up        # desde la raíz del checkout
-immune status    # termina con "healthy"
-```
-
-- Tienda, a través del gateway: `http://127.0.0.1:8080`
-- Panel en vivo: `http://127.0.0.1:8090`
-
-Envíe un ataque, por ejemplo la inyección SQL en la búsqueda:
-
-```bash
-curl -s "http://127.0.0.1:8080/api/products?q=zzzzzz%27%20OR%20%271%27%3D%271"
-```
-
-La respuesta sale de un clon, con datos sintéticos. En el panel aparecen el incidente, la regla, el diff, el
-resultado de cada validación y el despliegue. `immune report` da el resumen en la terminal. Las demás peticiones
-de prueba están en `docs/demo/respuestas/tienda.md`.
-
-```bash
-immune reset     # vuelve al estado inicial
-immune down      # detiene todo
-```
-
-### 3. Su propia aplicación
-
-`immune init` soporta aplicaciones Python ASGI que exponen `openapi()` (FastAPI) con una base SQLite.
-
-```bash
-cd /ruta/a/su-app
-immune init      # analiza la app, escribe .immune/, se verifica; termina con READY o NEEDS ATTENTION
-immune up
-```
-
-`immune init` escribe `autopatch: pr`: los parches que pasan las validaciones quedan como pull request abierto.
-`immune autopatch merge` activa el merge y el despliegue automáticos.
-
-Para otros lenguajes existe un runtime genérico con oráculos fuera del proceso (`strace` y un proxy de Postgres),
-pero su perfil se escribe a mano; el ejemplo es `examples/tareas-node/`. Comandos, modos, puertos y recuperación:
-[docs/operacion.md](docs/operacion.md).
-
-## Qué se midió
-
-Todas las cifras, con fecha, máquina, método y archivo de datos, están en [docs/resultados.md](docs/resultados.md).
-
-- **Tiempo a parche (2026-11-21, ARM64 de 4 núcleos compartida, 7 defectos × 3 rondas):** 21 de 21 incidentes
-  parchados por el modelo en el primer intento. Medianas desde que se abre el incidente: regla activa a los 1.9 s,
-  release parchado en producción a los 24.9 s, verificado a través del gateway a los 51.3 s. Estas cifras son
-  anteriores a las correcciones de la auditoría del 2026-11-22 y no se volvieron a medir; en ese momento la lista
-  de defectos plantados estaba dentro del árbol que el generador de parches podía leer.
-- **Tests (2026-11-22):** 754 pasan y 6 quedan deseleccionados (los que llaman al modelo, no ejecutados) de 760.
-- **Autotest de las validaciones (2026-11-22):** los 7 parches escritos a mano pasan las cinco validaciones y los
-  15 parches inadecuados son rechazados por la validación esperada.
-- **Modo de anticipación sobre Apache httpd 2.4.49 (2026-11-21):** el parche sugerido y el cambio oficial de
-  2.4.50 cumplen 21 de 21 propiedades y coinciden en los 21 vectores, sobre la función extraída y no sobre un
-  servidor en marcha. El defecto es público: demuestra el mecanismo, no un descubrimiento a ciegas.
+Tests, sin los que llaman al modelo (necesita Docker): `.venv/bin/pytest -q -m "not live"`. El resultado de la última ejecución está en [docs/resultados.md](docs/resultados.md#2-tests-y-autotest).
 
 ## Límites
 
-La lista completa está en [docs/limites.md](docs/limites.md). Los principales:
+- Lo que los oráculos no ven, el sistema no lo aprende: fallas de lógica de negocio, credenciales robadas y ataques de segundo orden quedan afuera.
+- Lo que el clasificador no marca como sospechoso llega a producción.
+- La auditoría propia cubre hoy tres clases: inyección SQL, path traversal y acceso a datos ajenos, y está activa por defecto solo en aplicaciones Python.
+- Protege la capa HTTP. Los tiempos son de nuestra app de prueba y de un laboratorio local, no de producción.
+- La validación del diff (`policy`) es una heurística sintáctica y no hay un segundo modelo revisor.
+- Las fallas de la app de prueba las plantó el equipo. No hubo equipo rojo ni revisión independiente.
 
-- El sistema aprende solo de lo que sus oráculos ven. Fallas de lógica de negocio, IDOR de escritura y ataques de
-  segundo orden no disparan ninguno.
-- Sin una regla activa, una detonación sin veredicto concluyente deja pasar el request a producción.
-- La validación `policy` es una heurística sintáctica, y no hay un segundo modelo revisor.
-- Los defectos de las aplicaciones de demostración están plantados por el equipo. No hubo equipo rojo ni revisión
-  independiente.
-- `immune init` cubre FastAPI con SQLite. `immune deploy`, que pondría el gateway delante de un servicio
-  existente, es un esbozo experimental; el camino que funciona es `immune up`.
+La lista completa, por componente, y lo que no está construido: [docs/limites.md](docs/limites.md).
 
-## Mapa del repositorio
-
-| Directorio | Función |
-|---|---|
-| `gateway/` | Proxy inverso: clasifica, detona en un clon, decide, aplica reglas, graba |
-| `shadow/` | Instrumentación en proceso de una app Python ASGI dentro de cada clon: oráculos y veredicto |
-| `sidecar/` | Oráculos fuera del proceso para cualquier lenguaje: `strace` y proxy de Postgres |
-| `fleet/` | Pool de clones y despliegue blue/green |
-| `pipeline/` | Incidente, reproducción, regla, parche, cinco validaciones, PR, despliegue, verificación; auditoría de clase |
-| `patcher/` | Prompt, llamada a la CLI `claude` confinada, regla y variantes del PoC, parches de respaldo |
-| `dashboard/` | Bus de eventos y panel en vivo |
-| `immune/` | CLI `immune` |
-| `immune_contracts/` | Código compartido: token, gramática, headers internos, tipos de evento |
-| `sim/` | Tráfico legítimo de la tienda y cinco escenarios guionados |
-| `anticipate/` | Modo de revisión de código fuente, demostrado sobre Apache httpd 2.4.49 |
-| `victim/` | Aplicación de demostración "Tienda": FastAPI + SQLite, 7 defectos plantados |
-| `examples/notas/` | Segunda aplicación de demostración: FastAPI + SQLite, 4 defectos plantados |
-| `examples/tareas-node/` | Tercera aplicación de demostración: Node + Postgres, 3 defectos plantados, runtime genérico |
-| `labs/grafana-cve-2021-43798/` | Laboratorio guionado sobre Grafana 8.3.0 sin modificar; solo regla, sin parche |
-| `acceptance/` | Tests de aceptación de la tienda, la instrumentación y el gateway |
-| `contracts/` | Contratos de referencia: procesos, protocolos, eventos, configuración |
-| `deploy/` | Dockerfiles, archivo de Compose y dependencias fijadas |
-| `docs/` | Documentación |
-
-## Documentación
+## Más
 
 | Documento | Para qué |
 |---|---|
-| [docs/README.md](docs/README.md) | Índice completo |
-| [docs/arquitectura.md](docs/arquitectura.md) | Cómo fluye un request y un incidente; fronteras de confianza; qué está construido |
+| [docs/README.md](docs/README.md) | Índice completo de la documentación |
+| [docs/arquitectura.md](docs/arquitectura.md) | El diseño: cómo fluye un request y un incidente, fronteras de confianza, qué está construido |
 | [docs/validaciones.md](docs/validaciones.md) | Qué garantiza y qué no cada validación del parche |
-| [docs/operacion.md](docs/operacion.md) | Instalación, comandos, puertos, secretos, tests, recuperación |
-| [docs/resultados.md](docs/resultados.md) | Resultados medidos |
+| [docs/operacion.md](docs/operacion.md) | Instalación, comandos, puertos, secretos, variables, tests, recuperación |
+| [docs/resultados.md](docs/resultados.md) | Resultados medidos y su nivel de respaldo |
 | [docs/limites.md](docs/limites.md) | Límites y partes no construidas |
 | [docs/decisiones.md](docs/decisiones.md) | Decisiones de diseño y sus razones |
 | [docs/proceso.md](docs/proceso.md) | Cómo se construyó y cómo auditarlo |
-| [contracts/README.md](contracts/README.md) | Contratos entre procesos (en inglés) |
+| [contracts/README.md](contracts/README.md) | El contrato técnico del sistema (en inglés) |

@@ -6,6 +6,7 @@
     immune autopatch off|pr|merge [--project DIR]
     immune init | doctor | deploy ...      (modules immune.init, immune.doctor, immune.deploycmd)
     immune anticipate ...                  (alias of python -m anticipate)
+    immune fuxa ...                        (FUXA v1.2.9 demo)
 
 One stack per project: compose project, containers and networks are named immune-<name>[-...],
 host ports come from `ports:` in .immune/config.yaml. Host processes (fleet, pipeline) keep
@@ -37,7 +38,7 @@ HOME = icfg.IMMUNE_HOME
 COMPOSE = os.path.join(HOME, "deploy", "compose.yaml")
 DEMO_ENV = os.path.join(HOME, "deploy", "demo.env")     # placeholders: only an env_file for `compose down`
 SECRET_KEYS = ("PROD_APP_SECRET", "SHADOW_APP_SECRET", "ADMIN_TOKEN", "BUS_TOKEN")
-DISPATCH = {"init": "immune.init", "doctor": "immune.doctor", "deploy": "immune.deploycmd"}
+DISPATCH = {"init": "immune.init", "doctor": "immune.doctor", "deploy": "immune.deploycmd", "fuxa": "immune.fuxa"}
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".git")
 
 
@@ -50,7 +51,7 @@ def say(msg: str) -> None:
 
 
 def python() -> str:
-    venv = os.path.join(HOME, ".venv", "bin", "python")
+    venv = os.path.join(os.environ.get("IMMUNE_VENV_DIR") or os.path.join(HOME, ".venv"), "bin", "python")
     return venv if os.path.exists(venv) else sys.executable
 
 
@@ -125,6 +126,7 @@ def compose_env(cfg: icfg.Config, sec_file: str, run_id: str) -> dict:
         "IMMUNE_AUTH": json.dumps(cfg.auth.to_dict(), separators=(",", ":")),
         "IMMUNE_PORT_GATEWAY": str(cfg.ports["gateway"]), "IMMUNE_PORT_ADMIN": str(cfg.ports["admin"]),
         "IMMUNE_PORT_DASHBOARD": str(cfg.ports["dashboard"]),
+        "DASHBOARD_SUBTITLE": "Clínica Delta · OpenEMR 8.2.0" if cfg.name == "openemr" else "",
         "IMMUNE_UID": str(os.getuid()), "IMMUNE_GID": str(os.getgid()),
     })
     return env

@@ -13,7 +13,7 @@ legitimate customer was harmed. Both speak only HTTP and know only this shop's r
 |---|---|---|
 | `sim.scenarios.SCENARIOS` (library) | The `legit` gate, because the demo project's `.immune/config.yaml` sets `scenarios: sim.scenarios` | Inside the pipeline's runner container, against a `TestClient` |
 | `python -m sim.legit` | A person, by hand | On the host, against the gateway's data port |
-| `python -m sim.attacker` | A person, during the demo; `deploy/record_demo.sh` | On the host, against the gateway's data port (loopback only) |
+| `python -m sim.attacker` | A person, during the demo | On the host, against the gateway's data port (loopback only) |
 
 Neither opens a port.
 

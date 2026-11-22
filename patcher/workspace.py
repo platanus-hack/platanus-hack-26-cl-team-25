@@ -65,10 +65,21 @@ class Workspace:
         cmd = ["git", "--git-dir", self.gitdir, "--work-tree", self.work,
                "-c", "user.name=patcher", "-c", "user.email=patcher@localhost",
                "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
-               "-c", "core.quotepath=off", *args]
+               "-c", "core.quotepath=off",
+               # The pipeline is LF-canonical; a host with core.autocrlf=true would
+               # otherwise rewrite the work tree on checkout-like operations.
+               "-c", "core.autocrlf=false", "-c", "core.eol=lf", *args]
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         env["GIT_CONFIG_NOSYSTEM"] = "1"
-        return subprocess.run(cmd, cwd=self.work, check=check, capture_output=True, text=True, input=input, env=env)
+        if input is None:
+            return subprocess.run(cmd, cwd=self.work, check=check, capture_output=True, text=True, env=env)
+        # stdin in bytes: a text-mode pipe would translate LF to CRLF on Windows
+        # and every LF patch would stop applying.
+        raw = subprocess.run(cmd, cwd=self.work, check=check, capture_output=True,
+                             input=input.encode("utf-8"), env=env)
+        return subprocess.CompletedProcess(raw.args, raw.returncode,
+                                           raw.stdout.decode("utf-8", "replace"),
+                                           raw.stderr.decode("utf-8", "replace"))
 
     def diff(self) -> str:
         """Unified diff of the work tree against the baseline, new files included."""

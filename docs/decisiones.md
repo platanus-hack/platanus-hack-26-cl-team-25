@@ -1,6 +1,6 @@
 # Decisiones de diseño
 
-Tipo de documento: explicación. Registra por qué Inmune está diseñado como está: las fallas que tenía el primer
+Tipo de documento: explicación. Registra por qué Immune está diseñado como está: las fallas que tenía el primer
 diseño, el cambio que responde a cada una y si ese cambio está construido.
 
 Los estados usan el mismo vocabulario que la tabla "Diseñado y construido" de
@@ -77,6 +77,7 @@ obtenidos por SQLi.
 |---|---|
 | Oráculos `sql`, `file`, `proc`, `net`, `owner` | Construido (`shadow/`, `sidecar/`) |
 | Honeytoken (credencial falsa que identifica al mismo actor desde otra IP) | Parcial: solo el token firmado con el secreto de los clones |
+| Las reglas `file`, `proc` y `net` sobre prod, solo alerta, para lo que el clasificador dio por limpio o no pasó por el gateway | Parcial: `sidecar/prodwatch.py`, usado solo en el laboratorio de Grafana |
 
 Dos correcciones al oráculo SQL quedaron fijadas como tests: una consulta parametrizada con `O'Brien` no dispara,
 y `a'--` sí. Por eso el oráculo compara valores de entrada contra tokens de la sentencia ejecutada, no la
@@ -120,15 +121,17 @@ Límite: el estado que el atacante escribe en el clon no es visible desde otra s
 
 | Condición | Estado |
 |---|---|
-| Alcance mínimo: ruta + parámetro + gramática. Nunca huella, IP ni user-agent | Construido (`patcher/rule.py`) |
+| Alcance mínimo: ruta + parámetro + gramática. Nunca huella, IP ni user-agent | Construido (`patcher/rule.py`, `pipeline/rules.py`). Alcances `param`, `param_present` y `all` |
+| Regla acotada a identidades no confiables para una falta de autenticación (`identity: untrusted`) | Construido (`pipeline/rules.py`, `gateway/classifier.py`) |
 | Solo en el camino a prod: los clones siguen vulnerables, para que el cautivo no vea cambios | Construido |
-| TTL y retiro cuando el parche está desplegado | Construido (TTL por defecto 3600 s) |
+| Retiro cuando el parche está desplegado y verificado | Construido |
+| TTL | Construido como opción (`ttl_s`); por defecto la regla no vence |
 | Prueba contra un corpus de tráfico legítimo antes de activarse | No construido |
 | Reversión automática y presupuesto de reglas activas | No construido |
 
-Una regla no bloquea: fuerza la detonación de lo que no cumple la gramática, también para identidades confiables,
-y falla cerrado solo cuando no hay clon o el veredicto es `inconclusive`. La regla de kernel queda fuera de alcance
-(F12).
+Una regla no bloquea: fuerza la detonación, también para identidades confiables salvo que lleve
+`identity: untrusted`, y falla cerrado solo cuando no hay clon o el veredicto es `inconclusive`
+([arquitectura.md](arquitectura.md#33-detonación-y-decisión)). La regla de kernel queda fuera de alcance (F12).
 
 ### C7. El agente propone, no decide
 
@@ -141,6 +144,7 @@ y falla cerrado solo cuando no hay clon o el veredicto es `inconclusive`. La reg
 | Validaciones mecánicas en un runner aislado: propiedades por clase, PoC y variantes, tests, comportamiento legítimo | Construido ([validaciones.md](validaciones.md)) |
 | Reproducción del PoC contra el release actual antes de parchear | Construido |
 | Despliegue blue/green con rollback automático | Construido |
+| Canario de despliegue: una fracción del tráfico real por el release nuevo antes del cambio | Construido (`fleet/manager.py`, `gateway/core.py`) |
 
 "El PoC falla y los tests pasan" lo cumple una lista negra o una puerta trasera. Por eso las validaciones exigen
 propiedades positivas por clase y una política sobre el diff, y por eso existe un autotest con parches
@@ -177,6 +181,15 @@ Límite: un ataque de segundo orden solo se detecta si algo dentro del clon ejec
 | Identidad en el clon | Prod y clones no comparten secreto; el gateway inyecta el uid | Una cuenta creada en prod no existe en el clon: sin esto la detonación da 401 y el exploit se reenviaría a prod |
 | Cautiverio | Solo sesiones con clave reutilizable (identidad o cookie del gateway). Nunca por IP | Con clave por IP, el tráfico legítimo que comparte origen con el atacante quedaba cautivo |
 | Regla | Fuerza detonación, alcanza a identidades confiables y falla cerrado | Una regla que solo "detona" no agrega nada: lo sospechoso ya se detonaba |
+| Alcance `param_present` | Para `sqli` y `traversal`, la regla detona todo request que trae el parámetro; la gramática solo decide el caso `inconclusive` | El detector es el oráculo, no una lista de caracteres: una inyección en un contexto sin comillas solo necesita letras, dígitos y espacios (`1 UNION SELECT user,pass FROM users`) |
+| `inconclusive` con valor dentro de la gramática | Pasa a prod | Un clon tiene credenciales sintéticas: un login real da 401 ahí, y negarlo dejaría fuera de servicio el endpoint |
+| Regla por identidad | Ante una falta de autenticación, la regla `all` lleva `identity: untrusted` | Sin eso la regla detonaría también el tráfico autenticado legítimo de la ruta |
+| Vencimiento de la regla | Sin TTL por defecto; la borra el pipeline al verificar el parche | Una regla que vence deja descubierto un punto confirmado como vulnerable. El costo es que una regla sin parche queda hasta que alguien la borra |
+| PoC que no reproduce 3 de 3 | Se publica la regla y se escala a una persona; no se pide parche | El oráculo disparó una vez con tráfico real: puede ser un ataque no determinista o con estado. Sin PoC fiable no hay con qué validar un parche |
+| Canario de despliegue | El reparto se sortea por request, no por sesión; los contadores del lado canario no se mezclan con los de prod | Los dos releases ven la misma mezcla de clientes, de modo que nadie puede dirigir errores a uno de los dos para vetar o forzar un despliegue |
+| Canario: 4xx además de 5xx | El canario aborta también por una tasa de 4xx claramente mayor | Un parche que empieza a rechazar requests legítimos se ve como 4xx, no como 5xx |
+| Firmas de WAF | OWASP CRS solo marca un request como sospechoso; no bloquea | Una firma que acierta manda el request a detonar; una que se equivoca cuesta latencia, no un cliente bloqueado |
+| Vigilante de prod | eBPF filtrado por cgroup, solo alerta | `ptrace` detiene el proceso en cada syscall: aceptable en un clon, no en prod |
 | Oráculo de dueño | Marcadores por dueño en la respuesta | Contar filas leídas disparaba en el login |
 | Red | Prod y clones en redes internas; ningún contenedor tiene el socket de Docker | Un clon no debe tener ruta al gestor de contenedores ni a metadata de nube |
 | Despliegue | El release se monta de solo lectura; la base de prod vive en un directorio compartido por los dos colores | Sin `docker build` en el camino del parche (runtime `python-asgi`); un cambio de color no pierde datos creados después de la semilla |

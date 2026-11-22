@@ -248,6 +248,10 @@ def find_deploy(project: str) -> dict:
 
 def detect(project: str) -> dict:
     project = os.path.realpath(project)
+    if all(os.path.isfile(os.path.join(project, path))
+           for path in ("version.php", "sql/database.sql", "interface/globals.php", "library/sql.inc.php")):
+        return {"project": project, "runtime": "generic", "framework": "openemr", "database_kind": "mysql",
+                "problems": [], "assumptions": []}
     assumptions = []
     has_py = any(os.path.isfile(os.path.join(project, f)) for f in ("pyproject.toml", "requirements.txt", "setup.py",
                                                                     "setup.cfg", "Pipfile"))
@@ -255,8 +259,14 @@ def detect(project: str) -> dict:
                                                                       "setup.cfg", "Pipfile"))
     cands = find_asgi(project)
     if not cands:
+        for path in walk(project, exts=(".php", "composer.json")):
+            if not is_test_path(_rel(project, path)) and re.search(
+                r"\b(?:mysqli(?:_\w+)?|pdo_mysql|mysql:host)\b", _read(path), re.I
+            ):
+                return {"project": project, "runtime": "generic", "framework": "php", "database_kind": "mysql",
+                        "problems": [], "assumptions": []}
         return {"project": project, "runtime": "unknown", "framework": None, "asgi": None, "asgi_candidates": [],
-                "problems": ["no FastAPI/Starlette application instance found (only python-asgi is supported)"],
+                "problems": ["no FastAPI/Starlette or PHP/MySQL application found"],
                 "assumptions": assumptions, "deploy": find_deploy(project), "sqlite_files": find_sqlite(project)}
     c = cands[0]
     if len(cands) > 1:

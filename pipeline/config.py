@@ -77,7 +77,7 @@ class Config:
     max_retries: int = 5
     policy_max_lines: int = 120
     policy_max_files: int = 4
-    rule_ttl_s: int = 3600
+    rule_ttl_s: int | None = None   # None: a rule lives until its patch is verified (PIPELINE_RULE_TTL_S overrides)
     extra: dict = field(default_factory=dict)
     app: object = None                  # immune.config.Config of the project (None = immune.config.current())
 
@@ -157,7 +157,7 @@ class Config:
             max_retries=_i(env, "PIPELINE_MAX_RETRIES", 5),
             policy_max_lines=_i(env, "POLICY_MAX_LINES", 120),
             policy_max_files=_i(env, "POLICY_MAX_FILES", 4),
-            rule_ttl_s=_i(env, "PIPELINE_RULE_TTL_S", 3600),
+            rule_ttl_s=_i(env, "PIPELINE_RULE_TTL_S", 0) or None,
             app=app,
         )
         return c

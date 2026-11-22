@@ -7,7 +7,7 @@ pool of shadow clones. It is the only component that creates and removes those c
 containers) and the `immune` CLI (compose services, `init` and `doctor` containers) also use Docker, and no
 container has the Docker socket. It keeps the clone pool at its
 configured size, replaces clones the gateway has retired, and performs blue/green deploys with a health check, a
-smoke request and an automatic rollback.
+smoke request, a canary on a share of the production traffic, and an automatic rollback.
 
 The gateway and the dashboard are started by `deploy/compose.yaml`, not by the fleet; the fleet only restarts
 them if they were stopped (see [Reconcile loop](#reconcile-loop)).
@@ -34,8 +34,9 @@ The process does not start without `ADMIN_TOKEN` in its own environment (`Config
 | `__main__.py` | Entry point: builds the config and serves the API on 127.0.0.1 |
 | `app.py` | HTTP API, token check, starts the reconcile thread |
 | `config.py` | `Config.from_env` (environment plus `.immune/config.yaml`), `derive_smoke_path`, the app's container environment |
-| `manager.py` | `Fleet`: containers, clone pool, reset, deploy, rollback, state persistence, adoption, reconcile loop, release pruning |
-| `generic.py` | `GenericFleet` for `app.runtime: generic`: image build per release, clone triple (app, Postgres, observer), demo production database |
+| `manager.py` | `Fleet`: containers, clone pool, reset, deploy (smoke, canary, watch, rollback), state persistence, adoption, reconcile loop, release pruning |
+| `generic.py` | `GenericFleet` for `app.runtime: generic`: image build per release, the shadow-only trace image (`shadow.tracer`), clone triple (app, database, observer), demo production database |
+| `fuxa.py` | `FuxaFleet`: a separate blue/green manager for the FUXA runtime, driven by `immune fuxa` through the `docker` CLI. `python -m fleet` does not load it and it shares no code with `manager.py`; see [`immune/README.md`](../immune/README.md) |
 | `tests/` | Docker-backed tests and unit tests of the deploy logic |
 
 ## API
@@ -57,8 +58,9 @@ pool later. It always puts the given release in production, so calling it on a r
 unpatched release back. `immune up` and `immune reset` are the callers; a restarted fleet does not need it (see
 [State and restart](#state-and-restart)).
 
-The fleet publishes `deploy.started`, `deploy.done` and `pool.state` to the event bus. Publishing is best
-effort (one attempt, 1 s timeout, errors ignored).
+The fleet publishes `deploy.started`, `deploy.done` (`{release, ok, rolled_back, detail, canary}`) and
+`pool.state` to the event bus. Publishing is best effort (one attempt, 1 s timeout, errors ignored). The
+`canary.started` and `canary.done` events of a deploy are published by the gateway, not by the fleet.
 
 ## Configuration
 
@@ -88,7 +90,10 @@ when the variable is unset.
 | `SMOKE_PATH` | derived from the OpenAPI | Smoke request path; set it empty to skip the step |
 | `DEPLOY_WATCH_S` | 20 | Length of the watch window after the switch |
 | `DEPLOY_MIN_REQUESTS` | 20 | Requests needed before the 5xx rate is judged |
-| `WATCH_POLL_S` | 0.25 | Poll interval during the watch |
+| `CANARY_WEIGHT` | 0.2 | Share of the production traffic sent to the new release before the switch, clamped to 0..1. `0` turns the canary off |
+| `CANARY_S` | 8 | Length of the canary window in seconds. `0` turns the canary off |
+| `CANARY_MIN_REQUESTS` | 20 | Canary requests needed before the two releases are compared |
+| `WATCH_POLL_S` | 0.25 | Poll interval during the canary and the watch |
 | `HEALTH_TIMEOUT_S` | 40 | Time a container has to pass its health check |
 | `RECONCILE_S` | 1 | Reconcile interval |
 
@@ -165,13 +170,17 @@ reports.
    `ok: false`.
 5. Read the 5xx rate of the release being replaced from the gateway (`prod_5xx / prod_requests` of
    `GET /_admin/stats`).
-6. Switch the gateway upstream (`POST /_admin/upstream`). The gateway drains in-flight requests and zeroes its
-   production counters on the switch.
-7. Watch the counters for `DEPLOY_WATCH_S`.
-8. Without a regression: remove the old colour, replace every free clone that is not on the new release (busy
+6. Run the canary (see below). A canary judged `worse` removes the new container and ends the deploy with
+   `ok: false, rolled_back: false`: the upstream was never switched.
+7. Switch the gateway upstream (`POST /_admin/upstream`). The gateway drains in-flight requests, ends the
+   canary and zeroes its production counters on the switch.
+8. Watch the counters for `DEPLOY_WATCH_S`. After a canary with verdict `ok`, the time the canary took is
+   subtracted from the window, down to a floor of 2 s (or `DEPLOY_WATCH_S` if that is smaller).
+9. Without a regression: remove the old colour, replace every free clone that is not on the new release (busy
    and captive clones are left on theirs), prune old release directories.
 
-Steps 3 and 4 fail before the switch, so production never points at a release that did not pass them.
+Steps 3, 4 and 6 fail before the switch, so production never points at a release that did not pass them. In
+step 6 only the canary share of the requests reached the release that failed.
 
 The health check and the smoke request are made from inside a container, with `python -c
 "urllib.request.urlopen(...)"`; any HTTP error status fails them.
@@ -181,6 +190,20 @@ project's OpenAPI that has no path parameter, no required parameter and no `secu
 path. If there is none, or the path equals the health path, the step is skipped and the result says so in
 `smoke` (`skipped: no request distinct from the health check ...`). For the built-in demo the derived path is
 `GET /api/products`; for `examples/tareas-node` the step is skipped.
+
+**Canary** (`Fleet._canary`, `Fleet._worse`). The fleet asks the gateway to send `CANARY_WEIGHT` of the requests
+bound for production to the new colour (`POST /_admin/canary`) and polls `canary` of `GET /_admin/stats` every
+`WATCH_POLL_S` for up to `CANARY_S`. The gateway draws the side per request, not per session, so both releases
+receive the same mix of clients, and counts each side separately (`requests`, `5xx`, `4xx`, `conn_errors`). The
+rule that contains the incident stays active during the canary; the pipeline removes it after the deploy.
+
+| Verdict | Condition | Effect |
+|---|---|---|
+| `worse` | once the canary side has at least `CANARY_MIN_REQUESTS` requests: it has at least one 5xx and its 5xx rate is above `max(2 x stable rate, stable rate + 0.02)`; or it has at least five 4xx and its 4xx rate is above `max(2 x stable rate, stable rate + 0.10)`. Checked on every poll, so the canary ends as soon as the condition holds | `DELETE /_admin/canary`, new container removed, deploy ends before the switch |
+| `ok` | the window ended, the canary side has at least `CANARY_MIN_REQUESTS` requests and is not `worse` | the deploy goes on; the canary counts as traffic validation and as watch time |
+| `skipped` | `CANARY_WEIGHT` or `CANARY_S` is 0; the gateway refused `POST /_admin/canary`; the gateway no longer reports a canary for this release (restart, or another switch); or fewer than `CANARY_MIN_REQUESTS` requests reached the canary. With no production request at all the fleet stops waiting after `min(2, CANARY_S)` seconds | the deploy goes on with the plain switch and the full watch |
+
+The 4xx comparison exists because a fix that starts refusing legitimate requests answers 4xx, not 5xx.
 
 **Rollback rule** (`Fleet._watch`). During the watch the fleet polls the gateway counters. It rolls back when
 all three hold:
@@ -193,12 +216,22 @@ all three hold:
 On rollback the upstream is switched back, the new container is removed, and the result is `ok: false,
 rolled_back: true, detail: "prod_5xx grew after switch; rolled back"`.
 
-With fewer than `DEPLOY_MIN_REQUESTS` requests in the window, the deploy succeeds with
-`traffic_validated: false` and the detail `deployed; not validated by traffic (...)`. The result of a deploy
-that reached the watch (success or rollback) carries `smoke` and
-`watch: {seconds, requests, prod_5xx, min_requests}`; a deploy that failed before the switch carries neither.
-
 Comparing against the old release's rate means errors the old release already produced do not undo a deploy.
+
+**Result.** `POST /deploy` returns:
+
+| Field | Present | Value |
+|---|---|---|
+| `ok` | always | `true` when the release is live |
+| `rolled_back` | always | `true` only when the upstream was switched and switched back |
+| `release`, `active` | always, except on an image build failure | release and colour in production after the call |
+| `detail` | always | `deployed`; `deployed; not validated by traffic (<n> request(s) in the <s>s watch, minimum <m>; canary: <canary detail>)`; `prod_5xx grew after switch; rolled back`; `canary: <reason>; the release never took the full traffic`; `start failed: ...`; `new release failed health check`; `smoke request <path> failed`; `gateway upstream switch failed: ...`; `image build failed: ...` |
+| `canary` | when the canary step was reached, except when the upstream switch itself failed | `{verdict: ok\|worse\|skipped, detail, weight, seconds, canary: {requests, 5xx, 4xx, conn_errors}, stable: {...}}`; the two counter objects are empty when the gateway reported none |
+| `smoke` | when the watch ran | `GET <path> ok`, or the `skipped: ...` text |
+| `watch` | when the watch ran | `{seconds, requests, prod_5xx, min_requests}` |
+| `traffic_validated` | on success | `true` when `watch.requests >= min_requests` or the canary verdict is `ok` |
+| `clones_replaced` | on success | number of clones moved to the new release |
+| `build_s` | generic runtime | seconds spent in the image step |
 
 **Release pruning.** After a successful deploy `_prune_releases` keeps `t0`, the release in production, every
 release a container of this run still mounts, and the five newest of the rest; older directories are removed.
@@ -235,12 +268,31 @@ runs unmodified from its own image; the oracles run outside the process, in the 
 - **Production.** The image on prodnet as `prod-<colour>`, with the database URL from the variable named by
   `data.prod_url_env`, or the demo database below. Read-only, `cap_drop: ALL`, `no-new-privileges`, 256 pids,
   512 MB.
+- **Database kind** (`immune/dbkind.py`). `database.kind` selects what differs between the two supported
+  databases:
+
+  | | `postgres` | `mysql` |
+  |---|---|---|
+  | Image | `postgres:16-alpine` | `mariadb:11.8.8`, pinned by digest (`MARIADB_IMAGE`) |
+  | Container user | 70:70 | 999:999 |
+  | Init directory under `<runtime>/data/shadow/` | `pginit` | `myinit` |
+  | Created by the init script | role `app`, template database `seed` | user `app`, databases `seed` and `clone` |
+  | Sidecar proxy address | `127.0.0.1:5432` | `127.0.0.1:3306` |
+  | Memory limit of the clone database | 256 MB | 1 GB |
+
+  The app receives its database through the variable named by `database.url_env` and through the templates of
+  `database.env` (`{host}`, `{port}`, `{user}`, `{password}`, `{database}`, `{url}`).
+- **Trace image** (`build_trace_image`). With `shadow.tracer` set (kind `php-xdebug`), the fleet builds
+  `Facts.trace_image(<release>)`: the release image plus Xdebug in trace mode. Clones run it, with 1 GB of
+  memory and a 384 MB `/tmp`; production never does. The sidecar turns the per-request trace into the stack
+  of the evidence ([`sidecar/README.md`](../sidecar/README.md)). The Dockerfile it generates installs the
+  package with `apk`, so the release image must be Alpine-based with a PHP CLI.
 - **Clone triple.** Each clone is three containers on clonenet:
 
   | Container | Image | Notes |
   |---|---|---|
-  | `<prefix>-clone-<n>-db` | `postgres:16-alpine` | tmpfs data, `fsync=off`, uid 70, random passwords per clone; its init script (`<runtime>/data/shadow/pginit`) creates role `app` and the template database `seed` from the shadow dump |
-  | `<prefix>-clone-<n>` | `immune-<project>-app:<release>` | the app, bound to 127.0.0.1 through the variable named by `app.bind_env`, database URL pointing at `127.0.0.1:5432` (the sidecar's proxy) |
+  | `<prefix>-clone-<n>-db` | the database image above | tmpfs data, durability off, random passwords per clone; its init directory is mounted at `/docker-entrypoint-initdb.d` |
+  | `<prefix>-clone-<n>` | `immune-<project>-app:<release>`, or the trace image | the app, bound to 127.0.0.1 through the variable named by `app.bind_env`, database address pointing at the sidecar's proxy |
   | `<prefix>-clone-<n>-obs` | `immune-sidecar:1` | `python -m sidecar --config /cfg/sidecar.json`, sharing the app container's network and PID namespaces, with `SYS_PTRACE` as the only added capability |
 
   All three are read-only with `cap_drop: ALL` and `no-new-privileges`. The gateway's clone address is
@@ -251,9 +303,12 @@ runs unmodified from its own image; the oracles run outside the process, in the 
 - **Health checks.** A clone is healthy when a request to the sidecar on port 8000 succeeds (the fleet execs
   into the observer container); production is checked from the gateway container against `prod-<colour>`.
 - **Demo production database.** Without a value in the variable named by `data.prod_url_env`, `immune up`
-  starts `<prefix>-proddb` (`postgres:16-alpine` on prodnet, alias `proddb`, tmpfs data) and runs
-  `data.demo_postgres.seed_command` once in the `t0` image. It is labelled with the project only, so `/reset`
-  does not remove it. Its data lives in tmpfs and is lost when the container is removed.
+  starts `<prefix>-proddb` (the database image above on prodnet, alias `proddb`, tmpfs data) and runs
+  `data.demo_postgres.seed_command` (`data.demo_mysql.seed_command` for MySQL) once in the `t0` image
+  (`start_demo_db`). That container is read-only with all capabilities dropped unless the block sets
+  `seed_privileged: true`, which gives it a writable root filesystem and Docker's default capabilities. The
+  database is labelled with the project only, so `/reset` does not remove it. Its data lives in tmpfs and is
+  lost when the container is removed.
 
 ## Tests
 
@@ -265,16 +320,24 @@ runs unmodified from its own image; the oracles run outside the process, in the 
 test-only name prefix, label and networks against a fake gateway, in a temporary runtime directory, and removes
 them afterwards. These tests are not marked `docker`, so `-m "not docker"` does not deselect them.
 `fleet/tests/test_deploy_unit.py` runs without Docker: the watch and rollback rule, the smoke step, smoke path
-derivation, the required token and the constant-time comparison. The generic fleet has no tests in this
+derivation, the required token and the constant-time comparison. `fleet/tests/test_canary.py` runs without
+Docker: the canary verdicts against a scripted gateway, and two cases against a real `gateway.core.Gateway`
+admin API with mocked releases behind it (a release answering 5xx is dropped and clients stay on the old one;
+a healthy release passes and the switch promotes it). The generic fleet and `fuxa.py` have no tests in this
 directory.
 
 ## Limits
 
-- The rollback rule sees only 5xx answers during the watch window. It does not see a release that answers 200
-  with wrong content, and it sees nothing after the window.
-- A deploy with little traffic is not validated by traffic (`traffic_validated: false`); only the health check
-  and one smoke request stand between that release and production. When the smoke step is skipped, only the
-  health check does.
+- The rollback rule sees only 5xx answers during the watch window; the canary sees 5xx and 4xx during its
+  window. Neither sees a release that answers 200 with wrong content, and nothing is watched after the window.
+- A deploy with little traffic is not validated by traffic (`traffic_validated: false`): the canary is
+  `skipped` and the watch has too few requests, so only the health check and one smoke request stand between
+  that release and production. When the smoke step is skipped, only the health check does.
+- The canary share is drawn per request: for its duration a client can be answered by either release from one
+  request to the next. Both colours use the same production database.
+- The canary compares response status classes only, and its 4xx comparison needs at least five 4xx answers on
+  the canary side.
+- The gateway does not persist a canary. If the gateway restarts during the window the verdict is `skipped`.
 - If the gateway is unreachable during the watch, the polls fail silently and the deploy finishes with
   `traffic_validated: false`.
 - If the rollback switch itself fails, the fleet logs the error and records the old colour as live; the
@@ -283,7 +346,7 @@ directory.
   undone by a rollback.
 - One project per fleet process; `/reset`, `/deploy` and reconcile are serialised by one lock.
 - The fleet does not start at boot by itself; see [`docs/operacion.md`](../docs/operacion.md).
-- The generic runtime supports Postgres only and needs `app.build` (an image without a build context is
-  rejected by `immune/generic.py`).
+- The generic runtime supports Postgres and MySQL/MariaDB (`immune/dbkind.py`) and needs `app.build` (an image
+  without a build context is rejected by `immune/generic.py`). The trace image supports PHP on Alpine only.
 
 The project-wide list is in [`docs/limites.md`](../docs/limites.md).

@@ -1,17 +1,21 @@
-"""Sidecar in front of an unmodified shadow app (response-marker oracle; see sidecar/README.md).
+"""Sidecar in front of an unmodified shadow ScadaBR (CVE-2026-8602, authorization oracle).
 
-Speaks the same clone protocol as `shadow/` (contracts/README.md §5), so the gateway cannot tell them apart:
+Speaks the same clone protocol as `shadow/` and `python -m sidecar` (contracts/README.md §5), so the gateway
+cannot tell them apart:
 
-1. strip the x-imm-* request headers, forward the request to the shadow app with the exact request target;
+1. strip the x-imm-* request headers, forward the request to the shadow ScadaBR with the exact target;
 2. buffer the whole response (decoded);
-3. `file` oracle: the body contains a marker planted in a protected file of the shadow (grafana.ini, the
-   app database, /etc/passwd ...). The marker map says which file each marker lives in;
+3. authz oracle: the request hit the HTTP Data Source receiver (`/ScadaBR/httpds`) and at least one data
+   point value was CONSUMED -- ScadaBR reports a `Unconsumed key: <k>` line for every parameter no point
+   consumed, so a configured point parameter present in the query but absent from that report means the
+   write landed. The gateway only ever detonates this route for a request it already judged anonymous
+   (owner_scoped), so a landed write there is a privileged state change with no established identity;
 4. verdict: oracle if any event; else inconclusive on 401/404/>=500; else clean;
 5. on oracle, POST the signed evidence to {COLLECTOR_URL}/_clone/evidence before releasing the response;
 6. release the response with x-imm-verdict / x-imm-events.
 
-One request at a time (lock), as the gateway expects. No stack: the app is not instrumented, so evidence
-carries the file path and the request only.
+One request at a time (lock). No stack: ScadaBR is not instrumented, so evidence carries the request and
+the observed effect (which point parameters were written); the patch stage localises the sink from those.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from urllib.parse import parse_qsl
 
 import httpx
 
@@ -30,40 +35,51 @@ log = logging.getLogger("sidecar")
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
        "transfer-encoding", "upgrade", "host", "content-length"}
-RESP_DROP = HOP | {"content-encoding"}          # the body is sent decoded
+RESP_DROP = HOP | {"content-encoding"}
+HTTPDS_SUFFIX = "/httpds"
 
 
 @dataclass
 class Config:
-    upstream: str = "127.0.0.1:3000"          # shadow app host:port
-    markers: dict = field(default_factory=dict)   # marker -> {"path": "/etc/grafana/grafana.ini", ...}
+    upstream: str = "127.0.0.1:8080"
+    manifest: dict = field(default_factory=dict)   # {"point_params": [...], "reserved_keys": [...], "reserved_prefixes": [...]}
     clone_id: str = "sidecar-0"
     clone_key: str = ""
     collector_url: str = ""
-    release: str = "t0"
+    release: str = "1.2"
     timeout_s: float = 15.0
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
-        markers = {}
-        path = env.get("MARKERS_PATH", "")
+        manifest = {}
+        path = env.get("HTTPDS_MANIFEST", "")
         if path:
             with open(path) as f:
-                raw = json.load(f)
-            markers = {m: (v if isinstance(v, dict) else {"path": str(v)}) for m, v in raw.items()}
-        return cls(upstream=env.get("SHADOW_UPSTREAM", "127.0.0.1:3000"), markers=markers,
+                manifest = json.load(f)
+        return cls(upstream=env.get("SHADOW_UPSTREAM", "127.0.0.1:8080"), manifest=manifest,
                    clone_id=env.get("CLONE_ID", "sidecar-0"), clone_key=env.get("CLONE_KEY", ""),
-                   collector_url=env.get("COLLECTOR_URL", "").rstrip("/"), release=env.get("RELEASE", "t0"),
+                   collector_url=env.get("COLLECTOR_URL", "").rstrip("/"), release=env.get("RELEASE", "1.2"),
                    timeout_s=float(env.get("SIDECAR_TIMEOUT_S", "15")))
 
 
-def find_markers(body: bytes, markers: dict) -> list:
-    """Markers present in the body, raw or as escaped text (JSON/HTML encoders may wrap them)."""
-    found = []
-    for m, info in markers.items():
-        if m.encode() in body:
-            found.append((m, info))
-    return found
+def consumed_points(query: str, body: bytes, manifest: dict) -> list:
+    """Configured point parameters the receiver consumed: present in the query, absent from the
+    `Unconsumed key: <k>` report ScadaBR writes for every parameter no point took."""
+    point_params = set(manifest.get("point_params", []))
+    reserved = set(manifest.get("reserved_keys", []))
+    prefixes = tuple(manifest.get("reserved_prefixes", []))
+    unconsumed = set()
+    for line in body.decode("latin-1", "replace").splitlines():
+        line = line.strip()
+        if line.startswith("Unconsumed key:"):
+            unconsumed.add(line.split(":", 1)[1].strip())
+    hits = []
+    for k, _ in parse_qsl(query, keep_blank_values=True):
+        if k in reserved or (prefixes and k.startswith(prefixes)):
+            continue
+        if k in point_params and k not in unconsumed and k not in hits:
+            hits.append(k)
+    return hits
 
 
 def verdict_of(status: int, events: list) -> str:
@@ -109,8 +125,7 @@ class Sidecar:
         await send({"type": "http.response.body", "body": rbody})
 
     async def handle(self, scope, body: bytes):
-        raw_path = scope.get("raw_path") or scope.get("path", "/").encode()
-        raw_path = raw_path.decode("latin-1")
+        raw_path = (scope.get("raw_path") or scope.get("path", "/").encode()).decode("latin-1")
         query = (scope.get("query_string") or b"").decode("latin-1")
         imm, client_h = {}, []
         for k, v in scope.get("headers", []):
@@ -132,14 +147,23 @@ class Sidecar:
                 rheaders = [(k.lower(), v) for k, v in r.headers.multi_items()
                             if k.lower() not in RESP_DROP and not k.lower().startswith(wire.INTERNAL_PREFIX)]
             except httpx.HTTPError as e:
-                log.warning("shadow app unreachable: %s", e)
+                log.warning("shadow ScadaBR unreachable: %s", e)
                 return 502, [("content-type", "application/json"), (wire.H_VERDICT, wire.VERDICT_INCONCLUSIVE),
                              (wire.H_EVENTS, "0")], b'{"detail":"Bad Gateway"}'
-            events = [{"oracle": wire.ORACLE_FILE,
-                       "detail": {"path": info.get("path", ""), "realpath": info.get("path", ""), "marker": m,
-                                  "observed": "response"},
-                       "stack": []}
-                      for m, info in find_markers(rbody, self.cfg.markers)]
+            events = []
+            if raw_path.endswith(HTTPDS_SUFFIX):
+                # a POST receiver carries its parameters in the form body; merge for the consumed check
+                scan_query = query
+                if scope["method"] == "POST" and body:
+                    scan_query = (query + "&" + body.decode("latin-1", "replace")).strip("&")
+                hits = consumed_points(scan_query, rbody, self.cfg.manifest)
+                if hits:
+                    events.append({
+                        "oracle": wire.ORACLE_OWNER,
+                        "detail": {"route": raw_path, "consumed": hits,
+                                   "observed": "data point value written by a request with no established identity",
+                                   "expected": "the HTTP Data Source receiver requires an authenticated device"},
+                        "stack": []})
             verdict = verdict_of(status, events)
             if verdict == wire.VERDICT_ORACLE:
                 await self._push({
@@ -159,5 +183,5 @@ class Sidecar:
             await self.push_client.post(self.cfg.collector_url + "/_clone/evidence", content=raw, headers={
                 "content-type": "application/json", wire.H_CLONE_ID: self.cfg.clone_id,
                 wire.H_SIGNATURE: wire.sign(self.cfg.clone_key, raw)})
-        except httpx.HTTPError as e:     # collector failure must not break the response
+        except httpx.HTTPError as e:
             log.warning("evidence push failed: %s", e)

@@ -3,9 +3,9 @@
 ## Purpose
 
 Notas is a small note-taking service for teams, written with FastAPI on SQLite. It is the second demo application
-of Inmune and the one used to exercise `immune init`: unlike the built-in shop it ships without a `.immune/`
+of Immune and the one used to exercise `immune init`: unlike the built-in shop it ships without a `.immune/`
 directory, uses opaque session tokens stored in a table, and has group-shared data (teams). The app has no
-dependency on Inmune.
+dependency on Immune.
 
 Notas contains four planted defects. Their list is kept outside this directory, in
 `docs/demo/respuestas/notas.md`, because `immune init` copies this project tree for the LLM steps; an answer key
@@ -24,7 +24,7 @@ NOTAS_DB=data/notas.db uvicorn notas.main:app --port 8000
 With Docker: `docker compose up --build`. The container listens on 8000 and creates the database in the volume
 `notas-data` on first start.
 
-Under Inmune, from the repository root, after creating `data/notas.db` as above:
+Under Immune, from the repository root, after creating `data/notas.db` as above:
 
 ```
 immune init --project examples/notas --yes

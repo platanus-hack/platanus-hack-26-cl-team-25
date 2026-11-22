@@ -8,7 +8,7 @@ code. The incident flow that uses them is in `contracts/README.md` section 9.
 A module that provides three functions. The pipeline imports the module named by the environment variable
 `PATCHER_MODULE` (default `patcher`). `pipeline/stub_patcher.py` has the same signatures and is used by the
 pipeline's tests. For `app.runtime: generic` the pipeline uses `pipeline/generic_patch.py` instead
-(`pipeline/external.py`).
+(`pipeline/external.py`): it renders its prompt through `patcher.core.render` and has no pre-written diffs.
 
 ```python
 propose(release_dir: str, incident: dict, feedback: list[str] | None = None, attempt: int = 1) -> dict
@@ -47,7 +47,9 @@ and treats an exception or a non-dict result as "no proposal".
 
 The model runs through the `claude` CLI on a temporary copy of the release (`patcher/workspace.py`,
 `patcher/claude_cli.py`): it may read that copy and edit only an allow-list of files under `app.source_dirs`.
-The request, the oracle detail and the gate feedback are placed in the prompt as untrusted data.
+The request, the oracle detail and the gate feedback are placed in the prompt as untrusted data. The CLI
+process gets an environment built from an allowlist (`claude_cli.child_env`), not the pipeline's own: the
+stack secrets are not passed. The variables are listed in `patcher/README.md`, "Configuration".
 
 ### `variants`
 
@@ -64,16 +66,22 @@ Returns a rule that validates against `contracts/schemas/rule.schema.json`. `pat
 
 | Incident | Rule |
 |---|---|
-| class `sqli` or `traversal` with a parameter | scope `param`, with a grammar that the captured value does not match. For `sqli`: the safe default plus one apostrophe between two letters, never `--`. Length capped by the parameter's `maxLength` (at most 128) |
-| the same, when the captured value is unknown or would match the grammar, or the parameter is `x-sensitive` | scope `all` |
+| class `sqli` or `traversal` with a parameter the gateway can address (`query`, `path`, `json`, `form`, `header`) | scope `param_present`, with a grammar that only decides the case of an inconclusive clone (`contracts/README.md` section 6.4). The grammar is the safe default; for `sqli` it also allows one apostrophe between two letters and never `--`. Length capped by the parameter's `maxLength` (at most 128) |
+| the same, when the parameter is `x-sensitive` or in a location the gateway cannot address | scope `all` |
 | class `idor`, `other`, or no parameter | scope `all` |
 
-TTL: 3600 s (`TTL_S`). The pipeline calls it with a 30 s limit, forces `incident`, fills in `id` and `ttl_s` when the rule
-lacks them (`pipeline/rules.py`, `finalize`), checks that the
-rule targets the incident's method and route, validates it against the schema, and otherwise uses its own
-rule (`pipeline/rules.py`, `default_rule`): scope `all` for `idor` or without a parameter; else scope `param`
-with `[0-9]{1,9}` for an integer parameter, `grammar.PATH_SAFE` for a catch-all path parameter and
-`grammar.SAFE_DEFAULT` for the rest.
+`derive_rule` sets `ttl_s: null` (`TTL_S` is `None`) and never sets `identity`. It does not check the captured
+value against the grammar: with scope `param_present` every request that carries the parameter is detonated.
+
+The pipeline calls it with a 30 s limit and then (`pipeline/rules.py`, `finalize`): forces `incident`; fills in
+`id` and `ttl_s` when the rule lacks them (`ttl_s` from `PIPELINE_RULE_TTL_S`, which is unset by default, so
+`null`); checks that the rule targets the incident's method and route; adds `identity: untrusted` to a rule of
+scope `all` when the incident has the `anon` flag; validates the rule against the schema and compiles its
+grammar. If any of that fails it uses its own rule (`default_rule`): scope `all` for `idor`, without a
+parameter or for a location the gateway cannot address (with `identity: untrusted` for an `anon` incident);
+else scope `param_present` with `[0-9]{1,9}` for an integer parameter, `grammar.PATH_SAFE` for a catch-all path
+parameter and `grammar.SAFE_DEFAULT` for the rest. The escalation path and the reproduction-only mode of
+`pipeline/external.py` use `default_rule` directly.
 
 ### Incident object
 
@@ -82,6 +90,7 @@ What `propose` and `derive_rule` receive (`pipeline/incident.py`, `public`):
 ```json
 {"incident": "<id>",
  "vuln_class": "sqli|traversal|idor|other",
+ "anon": false,
  "method": "GET",
  "route": "<OpenAPI path template, or the escaped request path when no template matches>",
  "param": {"in": "query|path|json|form", "name": "q"},
@@ -94,8 +103,9 @@ What `propose` and `derive_rule` receive (`pipeline/incident.py`, `public`):
 
 | Key | Notes |
 |---|---|
+| `anon` | `true` when the primary event is an `owner` oracle on a request without an identity (missing authentication); the rule of such an incident is limited to untrusted identities |
 | `param` | `null` when no parameter could be attributed |
-| `sink` | innermost stack frame of the primary oracle event; `{"file": "", "line": 0}` when the evidence has no stack (generic runtime) |
+| `sink` | innermost stack frame of the primary oracle event; `{"file": "", "line": 0}` when the evidence has no stack (generic runtime without `shadow.tracer`) |
 | `evidence` | `contracts/schemas/evidence.schema.json` |
 | `poc` | `contracts/schemas/poc.schema.json` |
 | `route`, `param.name` | derived from attacker input when no template matches: the route is percent-encoded and capped at 200 characters, the name stripped of non-printable characters and capped at 100 (`safe_route`, `safe_name`) |
@@ -137,7 +147,7 @@ Every execution of application code by the pipeline happens in a container (`pip
 docker run --rm -i --name immune-<name>-runner-<pid>-<n> --network none --read-only \
   --tmpfs /tmp:rw,size=512m --cap-drop ALL --security-opt no-new-privileges \
   --pids-limit 256 --memory 1g --cpus 2 --user <uid>:<gid> \
-  -w /app -v <inmune home>:/opt/immune:ro -v <release>:/app:ro \
+  -w /app -v <immune home>:/opt/immune:ro -v <release>:/app:ro \
   immune-base:1 python -m pipeline.runner_entry
 ```
 
@@ -145,7 +155,7 @@ docker run --rm -i --name immune-<name>-runner-<pid>-<n> --network none --read-o
 |---|---|
 | Release under test | mounted read-only at `/app`, the working directory |
 | `.immune/` of the project | mounted read-only at `/app/.immune` when it exists |
-| Hidden from the code under test | the runtime directory and `.git` (empty tmpfs over them); `.env` of the Inmune home (masked with `/dev/null`) |
+| Hidden from the code under test | the runtime directory and `.git` (empty tmpfs over them); `.env` of the Immune home (masked with `/dev/null`) |
 | Seed | built inside the container by `data.seed_command`; without one, the stack's shadow seed is mounted read-only at `/seed` and the manifest at `/seed-manifest/manifest.json`. Production data is never mounted |
 | Job | one JSON object on stdin: `{"kind", "app": <app facts>, "seed", "app_now", "result_nonce", ...}` |
 | Time limit | `RUNNER_TIMEOUT_S` (240 s) by default; the container is killed past it |
@@ -179,9 +189,12 @@ that cannot run counts as failed.
 ### Generic runtime
 
 For `app.runtime: generic` the same job kinds (`harness`, `plain`, `replay`, `pytest`) run against a
-throw-away clone triple instead: Postgres loaded from the shadow dump, the `t0` app image with the release
-under test mounted read-only at `app.workdir`, and the observer in judge mode (`SIDECAR_JUDGE=1`), on its own
-internal Docker network (`pipeline/generic.py`, `JudgeValidator`). In judge mode every response carries
+throw-away clone triple instead: the database of `database.kind` (Postgres or MariaDB) loaded from the shadow
+dump, the app image of release `t0` (or of `JUDGE_BASE_RELEASE`) with the release under test mounted read-only
+over `app.workdir`, one mount per entry of `app.release_paths`, and the observer in judge mode
+(`SIDECAR_JUDGE=1`), on its own internal Docker network (`pipeline/generic.py`, `JudgeValidator`). The `replay`
+job applies the expressions of `legit.normalize` (`contracts/product.md` section 2) to each response body
+before comparing. In judge mode every response carries
 `x-imm-trace`: base64 of a JSON object with the oracle events, the executed statements with their bound
 parameters, the successful file opens and the marker owners. Job results have the same shape as above.
 Mounting the release over the image works for interpreted languages only.

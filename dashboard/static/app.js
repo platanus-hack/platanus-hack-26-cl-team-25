@@ -10,6 +10,24 @@
   var DIFF_LINES_MAX = 300;
   var TICKER_ROWS = 14;
 
+  var pollingFuxaRequests = false;
+  var fuxaReasons = {
+    device_control: 'Control de dispositivo',
+    tag_write: 'Escritura de tag',
+    historian_query: 'Consulta del histórico',
+    scheduler_without_token: 'Cambio de programación sin token',
+    scheduler_authorization: 'Cambio de programación sin autorización',
+    'repeated-denied-operations': 'Operaciones denegadas de forma repetida',
+    ttl: 'Restricción vencida'
+  };
+  var verdictLabels = {
+    authorized: 'Permitida',
+    blocked: 'Bloqueada',
+    unavailable: 'Evaluación no disponible',
+    restricted: 'Sesión restringida',
+    released: 'Restricción vencida'
+  };
+
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -71,7 +89,7 @@
     h.appendChild(el('span', 'tt', title));
     if (ts) {
       var when = el('span', 'when', hms(ts));
-      if (inc.t.opened && ts >= inc.t.opened) when.appendChild(el('b', null, '+' + dec(ts - inc.t.opened) + ' s'));
+      if ((!inc.fuxa || inc.fuxa.timed) && inc.t.opened && ts >= inc.t.opened) when.appendChild(el('b', null, '+' + dec(ts - inc.t.opened) + ' s'));
       h.appendChild(when);
     }
     s.appendChild(h);
@@ -87,7 +105,8 @@
     return dd;
   }
   var DETAIL_LABEL = { input: 'Entrada', location: 'Ubicación', param: 'Parámetro', reason: 'Motivo', statement: 'Consulta', path: 'Ruta pedida',
-                       realpath: 'Archivo leído', owner: 'Dueño', uid: 'Usuario', table: 'Tabla', command: 'Comando', url: 'URL', host: 'Host' };
+                       realpath: 'Archivo leído', owner: 'Dueño', uid: 'Usuario', table: 'Tabla', command: 'Comando', url: 'URL', host: 'Host',
+                       operation: 'Operación', role: 'Rol', session: 'Sesión', boundary: 'Efecto', decision: 'Qué pasó', expected: 'Esperado' };
   var CODE_KEYS = { statement: 1, command: 1 };
 
   function renderDiff(diff) {
@@ -125,8 +144,22 @@
   function statusLabel(inc, status) { return status === 'unknown' ? 'Cerrado: ' + clip(S.unknownOutcome(inc), 60) : STATUS_LABEL[status]; }
   function storyOf(inc, status) {
     if (status === 'unknown') return 'El pipeline lo cerró con un resultado que este panel no conoce: ' + clip(S.unknownOutcome(inc), 60) + '.';
+    if (inc.fuxa) {
+      var head = inc.fuxa.synthetic ? 'Evidencia simulada. ' : 'Un rol sin permiso alcanzó una operación administrativa. ';
+      var outcome = inc.closed && inc.closed.outcome;
+      if (outcome === 'patched') return head + 'El control quedó en enforce y verificado en el gateway.';
+      if (outcome === 'rolled_back') return head + 'El candidato falló tras el cambio y se restauró la revisión anterior.';
+      if (outcome === 'rejected') return head + 'El candidato no pasó las validaciones.';
+      if (inc.awaitingReview) return head + 'El candidato está validado y espera aprobación.';
+      if (inc.rule && !inc.ruleExpired) return head + 'Una regla temporal contiene la operación mientras se valida el parche.';
+      return head + 'Immune está validando el parche.';
+    }
     if (status === 'cured') return inc.verify && inc.verify.blocked ? 'Parchada y verificada en producción.' : 'Parchada.';
     if (status === 'dismissed') return 'Descartada: no se pudo reproducir.';
+    if (inc.closed && inc.closed.outcome === 'error') {
+      return 'El pipeline falló y cerró el incidente ' + (status === 'contained' ? 'con la regla del gateway activa.' : 'sin regla: el punto sigue abierto.') + ' Lo reintenta.';
+    }
+    if (inc.closed && inc.closed.outcome === 'rule_only') return 'El incidente cerró con la regla del gateway.';
     if (status === 'contained') return 'El gateway cierra este punto con una regla mientras se valida el parche.';
     if (!inc.opened) return 'En cola: el pipeline atiende un incidente a la vez.';
     return 'Confirmada en un clon. Todavía sin regla.';
@@ -145,19 +178,19 @@
       else if (s.dt != null && s.key !== 'opened') chip.appendChild(el('span', 'd', '+' + dec(s.dt) + ' s'));
       if (s.note) chip.appendChild(el('span', 'note', s.note));
       if (isGate) {
-        if (!gates) { gates = el('span', 'gate-group'); gates.appendChild(el('span', 'gl', '5 validaciones')); box.appendChild(gates); }
+        if (!gates) { gates = el('span', 'gate-group'); gates.appendChild(el('span', 'gl', inc.fuxa ? 'Validaciones' : '5 validaciones')); box.appendChild(gates); }
         gates.appendChild(chip);
       } else box.appendChild(chip);
     });
     return box;
   }
 
-  function buildDetail(inc) {
+  function buildDetail(inc, php) {
     var box = el('div', 'detail');
     var o = inc.oracles[0];
     var rq = (o && o.data.request) || inc.request;
 
-    var s1 = section(inc.origin === 'audit' ? 'Request que lo demuestra' : 'Request del atacante', inc, S.t0(inc), 'bad');
+    var s1 = section(inc.fuxa ? 'Evidencia' : inc.origin === 'audit' ? 'Request que lo demuestra' : 'Request del atacante', inc, S.t0(inc), 'bad');
     if (rq) s1.appendChild(el('div', 'req', requestText(rq)));
     else rowOf(s1, 'Punto', (inc.method ? inc.method + ' ' : '') + (inc.route || ''));
     if (o && o.req) {
@@ -172,10 +205,12 @@
     if (o) {
       var ev0 = o.data.events[0] || {};
       var fr = (ev0.stack && ev0.stack[0]) || null;
-      var sink = inc.sink || fr;
+      var sink = php || inc.sink || fr;
       var s2 = section('Oráculo ' + (ev0.oracle || '') + (inc.hits > 1 ? ', ' + inc.hits + ' disparos' : ''), inc, o.ts, 'bad');
-      if (sink && sink.file) rowOf(s2, 'Dónde', sink.file + ':' + sink.line + (fr && fr.func ? '  ' + fr.func + '()' : ''));
-      rowOf(s2, 'Respuesta', 'HTTP ' + (o.data.status == null ? '?' : o.data.status) + (o.data.mode ? ', clon ' + o.data.mode : ''));
+      var fn = php ? php.func : fr && fr.func;
+      if (sink && sink.file) rowOf(s2, 'Dónde', sink.file + (sink.line == null ? '' : ':' + sink.line) + (fn ? '  ' + fn + '()' : ''));
+      if (inc.fuxa) rowOf(s2, 'Origen', (o.data.mode || 'producción') + (o.data.status == null ? ', evento Socket.IO' : ', HTTP ' + o.data.status), 'plain');
+      else rowOf(s2, 'Respuesta', 'HTTP ' + (o.data.status == null ? '?' : o.data.status) + (o.data.mode ? ', clon ' + o.data.mode : ''));
       var dt = ev0.detail;
       if (dt && typeof dt === 'object' && !Array.isArray(dt)) {
         Object.keys(dt).slice(0, 8).forEach(function (k) {
@@ -206,23 +241,29 @@
 
     var stl = { pending: 'En curso', rejected: 'Rechazado', accepted: 'Aceptado' };
     inc.attempts.forEach(function (a) {
-      var sa = section('Parche' + (inc.attempts.length > 1 ? ', intento ' + a.attempt : ''), inc, a.diffTs || a.ts,
-        a.status === 'accepted' ? 'done' : a.status === 'rejected' ? 'bad' : 'run');
-      var ab = el('div', 'attempt ' + a.status);
+      // a finished deploy decides the attempt's result; a gate-rejected attempt stays rejected. This covers
+      // the external-lab path (validated and deployed out of band, e.g. the ScadaBR Java patch) too.
+      var result = inc.fuxa && inc.deploy && inc.deploy.doneTs
+        ? (inc.deploy.ok || inc.deploy.rolled_back ? 'accepted' : 'rejected')
+        : (a.status !== 'rejected' && inc.deploy && inc.deploy.doneTs ? (inc.deploy.ok ? 'accepted' : 'rejected') : a.status);
+      var sa = section((inc.fuxa ? 'Parche local' : 'Parche') + (inc.attempts.length > 1 ? ', intento ' + a.attempt : ''), inc, a.diffTs || a.ts,
+        result === 'accepted' ? 'done' : result === 'rejected' ? 'bad' : 'run');
+      var ab = el('div', 'attempt ' + result);
       var ah = el('div', 'attempt-head');
-      add(ah, el('span', null, S.sourceLabel(a.source)), el('span', 'st', stl[a.status] || a.status));
+      add(ah, el('span', null, S.sourceLabel(a.source)), el('span', 'st', stl[result] || result));
       ab.appendChild(ah);
       if (a.diff) ab.appendChild(renderDiff(a.diff));
       var gates = el('div', 'gates');
       S.GATES.forEach(function (g) {
         var gr = a.gates[g];
+        if (inc.fuxa && gr.state === 'pending') return;
         var ge = el('div', 'gate ' + gr.state);
         var gn = el('div', 'n');
         add(gn, el('i', 'sd'), el('span', null, GATE_LABEL[g] || g));
         add(ge, gn, gr.detail ? el('div', 'det', clip(gr.detail.replace(/^OK: /, ''), 400)) : null);
         gates.appendChild(ge);
       });
-      ab.appendChild(gates);
+      if (gates.firstChild) ab.appendChild(gates);
       sa.appendChild(ab);
       box.appendChild(sa);
     });
@@ -240,10 +281,15 @@
     if (inc.deploy || inc.prod) {
       var d = inc.deploy || {};
       var failed = d.doneTs && !d.ok;
-      var sd = section('Deploy blue/green', inc, (inc.prod && inc.prod.ts) || d.doneTs || d.startTs, failed ? 'bad' : inc.prod ? 'done' : 'run');
+      var sd = section(inc.fuxa ? (d.rolled_back ? 'Reversión' : 'Redespliegue') : 'Deploy blue/green', inc, (inc.prod && inc.prod.ts) || d.doneTs || d.startTs, failed ? 'bad' : inc.prod ? 'done' : 'run');
       rowOf(sd, 'Release', String(d.release || (inc.prod && inc.prod.release) || '?').slice(0, 12));
+      var cn = canaryText(d.canary);
+      if (cn) rowOf(sd, 'Canario', cn, 'plain');
       if (inc.prod) rowOf(sd, 'Tráfico', 'Cambiado a ' + (inc.prod.addr || '?') + ' sin cortes', 'plain');
-      if (failed) rowOf(sd, 'Resultado', 'Falló' + (d.rolled_back ? ', revertido' : '') + (d.detail ? ': ' + clip(d.detail, 300) : ''), 'plain');
+      if (inc.fuxa && d.doneTs) {
+        rowOf(sd, 'Resultado', (d.ok ? 'Verificado' : d.rolled_back ? 'Reversión verificada' : 'Falló') +
+          (d.detail ? ': ' + clip(d.detail, 300) : ''), 'plain');
+      } else if (failed) rowOf(sd, 'Resultado', 'Falló' + (d.rolled_back ? ', revertido' : '') + (d.detail ? ': ' + clip(d.detail, 300) : ''), 'plain');
       else if (d.doneTs && /not validated by traffic/.test(String(d.detail || ''))) rowOf(sd, 'Observación', 'Sin tráfico suficiente en la ventana: el despliegue no quedó validado por tráfico', 'plain');
       else if (!d.doneTs && d.startTs) rowOf(sd, 'Estado', inc.prod ? 'Retirando la versión anterior' : 'Levantando la versión nueva', 'plain');
       box.appendChild(sd);
@@ -254,7 +300,7 @@
       sv.appendChild(el('p', 'verdict', inc.verify.blocked ? 'El mismo ataque, repetido contra producción, ya no funciona.' : 'El ataque todavía funciona en producción.'));
       box.appendChild(sv);
     }
-    if (inc.closed && inc.closed.outcome !== 'patched') {
+    if ((!inc.fuxa || S.unknownOutcome(inc) != null) && inc.closed && inc.closed.outcome !== 'patched') {
       box.appendChild(section('Cerrado: ' + (inc.closed.outcome || '?'), inc, inc.closed.ts, 'mute'));
     }
     return box;
@@ -265,6 +311,15 @@
   /* one incident = one row of the list; opening it shows the whole story */
   function buildCard(inc, open) {
     var status = S.status(inc), phase = S.phase(inc);
+    var label = phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : statusLabel(inc, status);
+    if (inc.fuxa && status !== 'unknown') {
+      var outcome = inc.closed && inc.closed.outcome;
+      if (outcome === 'rejected') label = 'Requiere revisión';
+      else if (outcome === 'rolled_back') label = 'Reversión verificada';
+      else if (inc.awaitingReview) label = 'Pendiente de aprobación';
+      else if (inc.deploy && inc.deploy.ok) label = 'Parche verificado';
+      else label = inc.deploy ? 'Redesplegando' : inc.attempts.length ? 'Validando parche local' : 'Evidencia registrada';
+    }
     var live = !!(phase && inc.opened);
     var cls = CLASS[inc.vuln_class];
     var card = el('details', 'card' + (inc.origin === 'audit' ? ' audit' : '') + (live ? ' live' : ''));
@@ -272,18 +327,20 @@
     card.id = 'card-' + inc.id;
 
     var row = el('summary', 'row');
-    row.appendChild(statusIcon(!inc.opened && status === 'open' ? 'queued' : status));
+    row.appendChild(statusIcon(!inc.opened && status === 'open' ? 'queued' : status === 'rolledBack' ? 'contained' : status));
     row.appendChild(el('span', 'id', inc.id));
     var title = el('span', 'title');
+    var php = inc.closed && inc.closed.outcome === 'rule_only' ? S.phpLocation(inc) : null;
     add(title, el('span', 'cls', cls ? cls[0] : (inc.vuln_class || 'Incidente')),
       el('span', 'route', (inc.method ? inc.method + ' ' : '') + (inc.route || '')),
+      php ? el('span', 'tag source-location', php.file + ':' + php.line) : null,
       inc.origin === 'audit' ? el('span', 'tag', 'Auto-auditoría') : null);
     row.appendChild(title);
     var r = S.timeToRule(inc), p = S.timeToProd(inc);
     add(row, cell('t-rule', secs(r), r == null), cell('t-prod', secs(p), p == null));
     var stc = el('span', 'c state');
     if (live) stc.appendChild(el('i', 'pulse'));
-    stc.appendChild(el('span', null, phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : statusLabel(inc, status)));
+    stc.appendChild(el('span', null, label));
     add(row, stc, chevron());
     card.appendChild(row);
 
@@ -309,7 +366,8 @@
         pa.href = '#card-' + encodeURIComponent(inc.parent);
         prop('Hallado tras', null, pa);
       }
-      [['En cola', S.queueTime(inc)], ['Regla', r], ['Parche escrito', S.timeToDiff(inc)], ['Merge', S.timeToMerged(inc)], ['En producción', p], ['Verificado', S.timeToVerified(inc)]].forEach(function (x) {
+      var timings = inc.fuxa ? [['Tiempo a parche', p]] : [['En cola', S.queueTime(inc)], ['Regla', r], ['Parche escrito', S.timeToDiff(inc)], ['Merge', S.timeToMerged(inc)], ['En producción', p], ['Verificado', S.timeToVerified(inc)]];
+      timings.forEach(function (x) {
         if (x[1] != null) prop(x[0], secs(x[1]));
       });
       if (inc.attempts.length > 1) prop('Intentos', inc.attempts.length);
@@ -317,8 +375,8 @@
       props.title = 'Tiempos desde que el pipeline abre el incidente';
       body.appendChild(props);
 
-      if (live) body.appendChild(buildSteps(inc));
-      body.appendChild(buildDetail(inc));
+      if (live || inc.fuxa) body.appendChild(buildSteps(inc));
+      body.appendChild(buildDetail(inc, php));
       card.appendChild(body);
     }
     card.addEventListener('toggle', function () {
@@ -363,6 +421,21 @@
   }
 
   function n1(x) { return x == null ? '-' : dec(x) + ' s'; }
+  // What the canary saw, in one line. Nothing when it was off: an empty row would only be noise.
+  function canaryText(c) {
+    if (!c || (c.verdict === 'skipped' && !c.requests && !c.seconds)) return null;
+    var share = (typeof c.weight === 'number' ? Math.round(c.weight * 100) + '% del tráfico real' : 'Parte del tráfico real') +
+      (typeof c.seconds === 'number' ? ' durante ' + secs(c.seconds) : '');
+    var seen = count(c.requests, 'request', 'requests');
+    if (c.verdict === 'ok') return share + ': ' + seen + ', mismo comportamiento que la versión anterior';
+    if (c.verdict === 'worse') {
+      var what = c.e5 ? c.e5 + ' con error del servidor (la versión anterior: ' + c.stableE5 + ' de ' + c.stableRequests + ')'
+        : c.e4 + ' rechazados (la versión anterior: ' + c.stableE4 + ' de ' + c.stableRequests + ')';
+      return share + ': ' + seen + ', ' + what + '. Se descartó antes de recibir todo el tráfico';
+    }
+    return share + ': ' + seen + ', muy pocos para comparar. Se vigiló después del cambio';
+  }
+
   function count(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
   function fact(id, parts) {
     var host = $(id);
@@ -377,6 +450,11 @@
   /* the four stages of the system, each with its number from this run */
   function renderScore() {
     var s = S.scoreboard(st);
+    if (st.fuxa) {
+      $('inc-count').textContent = s.seen ? s.seen + ' · ' + s.cured + ' corregidos' : '';
+      $('conn-info').textContent = st.events ? st.events + ' eventos' : '';
+      return;
+    }
     var confirmed = s.seen - s.dismissed, live = confirmed - s.audit;
     $('fl-total').textContent = s.total.toLocaleString('es');
     fact('fl-detect-fact', [count(s.detonated, 'ejecutado en un clon', 'ejecutados en un clon'), s.deny ? count(s.deny, 'rechazado', 'rechazados') : null,
@@ -443,7 +521,8 @@
 
   function renderProd() {
     var up = st.upstream;
-    show($('upstream'), !!up);
+    show($('upstream'), !!up && !st.fuxa);
+    show($('panel-prod'), !st.fuxa);
     if (up) { $('up-addr').textContent = up.addr || '?'; $('up-rel').textContent = String(up.release || '?').slice(0, 7); }
     var host = $('prod');
     clear(host);
@@ -452,7 +531,8 @@
     add(now, el('div', 'addr', up.addr || '?'), el('div', 'k', 'Release ' + String(up.release || '?').slice(0, 12) + ' desde las ' + hms(up.ts)));
     host.appendChild(now);
     var dep = st.deploy;
-    if (dep && !dep.done) host.appendChild(el('div', 'kv deploying', 'deploy en curso: release ' + String(dep.release || '?').slice(0, 14)));
+    if (st.canary) host.appendChild(el('div', 'kv deploying', 'canario: ' + (typeof st.canary.weight === 'number' ? Math.round(st.canary.weight * 100) + '% del tráfico' : 'parte del tráfico') + ' en la release ' + String(st.canary.release || '?').slice(0, 14)));
+    else if (dep && !dep.done) host.appendChild(el('div', 'kv deploying', 'deploy en curso: release ' + String(dep.release || '?').slice(0, 14)));
     else if (dep && !dep.ok) host.appendChild(el('div', 'kv bad', 'último deploy falló' + (dep.rolled_back ? ' (rollback)' : '') + ': release ' + String(dep.release || '?').slice(0, 14)));
     var sw = st.switches;
     for (var i = sw.length - 1; i >= 1 && i >= sw.length - 4; i--) {
@@ -503,20 +583,155 @@
     var host = $('ticker');
     clear(host);
     if (!st.ticker.length) { host.appendChild(el('p', 'empty', 'Sin tráfico todavía')); return; }
-    st.ticker.slice(0, TICKER_ROWS).forEach(function (t) {
+    var fuxaLabels = { suspect: 'Sospechoso', evidence: 'Ataque confirmado', blocked: 'Ataque bloqueado', simulation: 'Simulación' };
+    var ticker = st.fuxa ? st.ticker.slice().sort(function (a, b) { return b.ts - a.ts; }) : st.ticker;
+    ticker.slice(0, TICKER_ROWS).forEach(function (t) {
       var rc = t.route === 'prod' ? 'prod' : t.route === 'deny' ? 'deny' : t.route ? 'shadow' : '';
       var row = el('div', 'row cls-' + (/^[a-z]+$/.test(t.cls || '') ? t.cls : 'x') + (t.verdict === 'oracle' ? ' oracle' : ''));
       var path = el('span', 'path', (t.method || '') + ' ' + (t.path || ''));
       path.title = (t.method || '') + ' ' + (t.path || '') + (t.reasons && t.reasons.length ? '  [' + t.reasons.join(', ') + ']' : '');
-      add(row, el('span', 'ts', hms(t.ts)), el('span', 'rt ' + rc, t.route ? (ROUTE_LABEL[t.route] || t.route) : (t.cls || '...')),
+      if (st.fuxa && fuxaReasons[t.reason]) {
+        path.textContent += ' · ' + fuxaReasons[t.reason];
+        path.title = path.textContent;
+      }
+      var label = st.fuxa ? (fuxaLabels[t.cls] || verdictLabels[t.cls]) : (ROUTE_LABEL[t.route] || t.route);
+      add(row, el('span', 'ts', hms(t.ts)), el('span', 'rt ' + rc, label || t.cls || '…'),
         path, el('span', 'st', t.verdict === 'oracle' ? 'oráculo' : (t.status == null ? '' : t.status)));
       host.appendChild(row);
     });
   }
 
+  var projectSubtitle = '';
+
+  function renderFuxa() {
+    var live = st.fuxa;
+    document.body.classList.toggle('fuxa', !!live);
+    var subtitle = live ? 'Estación Delta · FUXA v1.2.9' : projectSubtitle;
+    $('dashboard-subtitle').textContent = subtitle;
+    show($('dashboard-subtitle'), !!subtitle);
+    show($('fuxa-summary'), !!live);
+    show($('traffic-legend'), !live);
+    $('production-column').textContent = live ? 'Tiempo a parche' : 'En producción';
+    $('traffic-title').textContent = live ? 'Detecciones de Immune' : 'Tráfico';
+    show($('fuxa-requests-panel'), !!live);
+    if (!live) return;
+    if (!pollingFuxaRequests) {
+      pollingFuxaRequests = true;
+      pollFuxaRequests();
+    }
+    $('fuxa-revision').textContent = live.active ? 'Revisión activa ' + live.active : 'FUXA sin revisión activa';
+    $('fuxa-monitor').textContent = live.monitor ? 'Monitor activo' : 'Monitor sin señal reciente';
+    var persistence = $('fuxa-persistence');
+    persistence.hidden = !live.persistent;
+    persistence.textContent = 'Proyecto y sesiones persistentes';
+    var patchMode = $('fuxa-patch-mode');
+    patchMode.hidden = !live.patch_mode;
+    if (live.patch_mode) {
+      patchMode.textContent = live.patch_mode === 'review' ?
+        'Parches sujetos a aprobación' : 'Parches con despliegue automático';
+    }
+    var validation = $('fuxa-validation');
+    validation.hidden = !live.validation;
+    if (live.validation) {
+      validation.textContent = 'Validación aislada · ' + live.validation.checks + ' comprobaciones con ' +
+        live.validation.identities + ' identidades sintéticas' +
+        (live.validation.evaluator === 'metadata' ? ' · Autorización aislada antes del efecto' : '');
+    }
+    var legitimate = $('fuxa-legitimate');
+    legitimate.hidden = !live.legitimate;
+    if (live.legitimate) {
+      var flows = { project: 'proyecto HMI', guest_access: 'acceso de invitados', realtime: 'conexión en vivo' };
+      legitimate.textContent = 'Flujos verificados · ' +
+        live.legitimate.flows.map(function (flow) { return flows[flow] || flow; }).join(', ');
+    }
+    $('fuxa-pending').textContent = live.pending + ' entradas del inventario con cobertura pendiente' +
+      (live.partial ? ' · ' + live.partial + ' con cobertura parcial' : '');
+    var audit = $('fuxa-audit');
+    audit.hidden = !live.coverage_audit;
+    if (live.coverage_audit) {
+      audit.textContent = 'Auditoría de cobertura · ' + live.coverage_audit.write_review + ' rutas de escritura, ' +
+        live.coverage_audit.read_review + ' rutas de lectura y ' + live.coverage_audit.event_review +
+        ' eventos por revisar';
+    }
+    var list = $('fuxa-coverage');
+    var labels = { 'settings.write': 'Escritura de configuración', 'system-function.run': 'Funciones del sistema' };
+    clear(list);
+    live.coverage.forEach(function (id) {
+      list.appendChild(el('li', null, (labels[id] || id) + ' · ' + (live.enforced.indexOf(id) >= 0 ? 'control activo' : 'en observación')));
+    });
+    (live.protected || []).forEach(function (id) {
+      list.appendChild(el('li', null, (fuxaReasons[id] || id) + ' · control activo'));
+    });
+  }
+
+  function renderRestrictions() {
+    var host = $('restrictions');
+    if (!host) return;
+    var active = Object.keys(st.restrictions).map(function (key) { return st.restrictions[key]; });
+    active.sort(function (a, b) { return (a.expires || 0) - (b.expires || 0); });
+    var countLabel = $('fuxa-restricted-count');
+    countLabel.hidden = !st.fuxa || active.length === 0;
+    countLabel.textContent = count(active.length, 'sesión restringida', 'sesiones restringidas');
+    var panel = $('restrictions-panel');
+    if (panel) panel.hidden = !st.fuxa || active.length === 0;
+    clear(host);
+    if (!st.fuxa || !active.length) {
+      if (st.fuxa) host.appendChild(el('p', 'empty', 'Sin restricciones de sesión.'));
+      return;
+    }
+    var now = Date.now() / 1000;
+    active.forEach(function (r) {
+      var row = el('div', 'row cls-blocked');
+      var ops = (r.operations || []).map(function (op) { return fuxaReasons[op] || op; }).join(', ');
+      var left = typeof r.expires === 'number' ? Math.max(0, Math.round(r.expires - now)) : null;
+      var path = el('span', 'path', ops || 'operación restringida');
+      path.title = fuxaReasons[r.reason] || r.reason || '';
+      add(row, el('span', null, hms(r.ts || r.expires)), el('span', 'rt deny', 'Restringida'),
+        path, el('span', null, left == null ? '—' : 'vence en ' + left + ' s'));
+      host.appendChild(row);
+    });
+  }
+
+  async function pollFuxaRequests() {
+    var host = $('fuxa-requests');
+    try {
+      var response = await fetch('/fuxa/requests', { cache: 'no-store' });
+      if (!response.ok) throw new Error('Request feed unavailable');
+      var feed = await response.json();
+      clear(host);
+      if (!feed.available || !feed.requests.length) {
+        host.appendChild(el('p', 'empty', feed.available ?
+          'Esperando peticiones al gateway de FUXA.' : 'Gateway no disponible.'));
+      }
+      feed.requests.slice(0, 15).forEach(function (request) {
+        var row = el('div', 'row cls-' + request.class);
+        var status = request.status == null ? '—' : request.status;
+        var labels = { suspect: 'Sospechosa', blocked: 'Bloqueada', clean: 'Sin señales', uninspected: 'Sin cobertura' };
+        var verdict = verdictLabels[request.verdict];
+        var classification = el('span', 'rt', verdict || labels[request.class] || labels.uninspected);
+        var reason = fuxaReasons[request.reason];
+        if (request.class === 'suspect' || request.class === 'blocked') {
+          classification.title = reason || 'El servidor rechazó el acceso (' + status + ')';
+        }
+        var requestText = (request.transport === 'websocket' ? 'WS' : request.method) + ' ' + request.path;
+        var path = el('span', 'path', reason ? requestText + ' · ' + reason : requestText);
+        if (reason) path.title = path.textContent;
+        add(row, el('span', null, hms(request.ts)),
+          classification, path,
+          el('span', null, status), el('span', null, request.ms + ' ms'));
+        host.appendChild(row);
+      });
+    } catch {
+      clear(host);
+      host.appendChild(el('p', 'empty', 'No se pudo cargar el tráfico del gateway.'));
+    } finally {
+      window.setTimeout(pollFuxaRequests, 2000);
+    }
+  }
+
   function render() {
     dirty = false;
-    [renderScore, renderRun, renderIncidents, renderProd, renderAudits, renderAttacks, renderTicker].forEach(function (f) {
+    [renderFuxa, renderScore, renderRun, renderIncidents, renderProd, renderAudits, renderAttacks, renderTicker, renderRestrictions].forEach(function (f) {
       try { f(); } catch (e) { /* one broken panel must not blank the rest */ }
     });
   }
@@ -582,6 +797,8 @@
       var h;
       try { h = JSON.parse(m.data); } catch (e) { return; }
       if (!h || typeof h.gen !== 'string') return;
+      var subtitle = typeof h.subtitle === 'string' ? h.subtitle : '';
+      if (projectSubtitle !== subtitle) { projectSubtitle = subtitle; schedule(); }
       var stale = st.lastSeq > 0 && ((gen !== null && h.gen !== gen) || (typeof h.seq === 'number' && h.seq < st.lastSeq));
       gen = h.gen;
       if (stale) { resetState(); connect(); }

@@ -127,8 +127,9 @@ For every occurrence of an input in a statement, `sqltaint.classify` decides:
 4. Otherwise fire: `reason: token` when it covers one non-literal token, `reason: structure` when it spans
    several.
 
-The tokenizer follows SQLite's lexical rules, comments included. The app's constants are collected from the code
-objects of its loaded modules.
+The tokenizer follows SQLite's lexical rules, comments included. `sqltaint.check` also accepts `dialect="mysql"`
+(backslash escapes inside quotes, double-quoted strings, `#` comments), which only the sidecar uses. The app's
+constants are collected from the code objects of its loaded modules.
 
 Multipart bodies are parsed with the Content-Type header as sent, because the boundary is case-sensitive.
 
@@ -174,7 +175,7 @@ Wire-level detail (headers, evidence schema) is in [`contracts/`](../contracts/R
 
 ```
 .venv/bin/pytest shadow/tests -q
-.venv/bin/pytest acceptance/wp2_shadow -q
+.venv/bin/pytest acceptance/shadow -q
 ```
 
 Neither needs Docker or the LLM.

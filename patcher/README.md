@@ -58,13 +58,20 @@ For `app.runtime: generic` the pipeline uses `pipeline/generic_patch.py` instead
 | `PATCHER_CLAUDE_CONFIG_DIR` | unset (the machine's Claude Code login) | Passed to the CLI as `CLAUDE_CONFIG_DIR`: the patcher's own login and config |
 | `PATCHER_ANTHROPIC_API_KEY` | unset | Passed to the CLI as `ANTHROPIC_API_KEY` (and `ANTHROPIC_AUTH_TOKEN` is dropped): the patcher's own key |
 
-The CLI process does not inherit the caller's environment. `child_env` passes an allowlist (`PATH`, `HOME`, locale,
-temp dir, proxy and CA settings, `ANTHROPIC_*`, `CLAUDE_*`, and the Bedrock/Vertex provider variables) plus the
-identity above, so the stack secrets the pipeline holds (`ADMIN_TOKEN`, `BUS_TOKEN`, app secrets, `GH_TOKEN`) never
-reach it. `identity()` names the credentials in use without printing them.
+The CLI process does not inherit the caller's environment. `claude_cli.child_env` builds it from an allowlist:
 
-The CLI inherits the environment of the pipeline process unchanged (including `ANTHROPIC_BASE_URL` and any API
-credentials) and uses the login already configured for the invoking user.
+| Passed | Variables |
+|---|---|
+| By name (`ENV_ALLOW`) | `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TERM`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (and their lower-case forms), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR` |
+| By prefix (`ENV_ALLOW_PREFIXES`) | `ANTHROPIC_*`, `CLAUDE_*`, `AWS_*`, `GOOGLE_*`, `CLOUD_ML_*`, `VERTEX_*` (provider settings and credentials, including `ANTHROPIC_BASE_URL`) |
+| Never | `CLAUDE_BIN`, every `PATCHER_*` variable, and everything not listed above: `ADMIN_TOKEN`, `BUS_TOKEN`, `PROD_APP_SECRET`, `SHADOW_APP_SECRET`, `GH_TOKEN` |
+
+Then the identity is applied: `PATCHER_CLAUDE_CONFIG_DIR` becomes `CLAUDE_CONFIG_DIR`; `PATCHER_ANTHROPIC_API_KEY`
+becomes `ANTHROPIC_API_KEY` and removes `ANTHROPIC_AUTH_TOKEN`. With neither set the CLI uses the operator's
+`ANTHROPIC_*` credentials if present in the environment, else the Claude Code login of the invoking user.
+`claude_cli.identity()` names which of these is in use without printing a secret. `tests/test_cli_env.py` covers
+the allowlist and the identity. The allowlist passes the whole `AWS_*` and `GOOGLE_*` families, so cloud
+credentials present in the pipeline's environment do reach the CLI process.
 
 Project facts come from `.immune/config.yaml`: `app.release_paths` (what is copied), `app.source_dirs` (where
 editable files may be), `database.kind` (prompt hint).
@@ -81,7 +88,10 @@ editable files may be), `database.kind` (prompt hint).
 2. `editable_files` builds the edit allow-list from the evidence: the files in the oracle events' stacks that are
    `.py` files under `app.source_dirs` and exist in the copy, plus the incident's sink file. A file that appears only
    as the innermost frame below other app frames is excluded (the database helper the statement reached, not where
-   it was built).
+   it was built). An incident that carries `editable_files` overrides this: those of its entries that exist in the
+   copy are the allow-list, in any language. An incident that carries `app_subdirs` replaces `app.release_paths` as
+   the list of paths copied in step 1. The pipeline sets neither key; `labs/scadabr-cve-2026-8602/patch_java.py`
+   sets both.
 3. `claude_cli.run` starts the CLI with `cwd=<tmp>/work` and the prompt on stdin.
 4. The result is `git diff` of the copy against the baseline, with paths relative to the release. The model's reply
    text is only copied into `notes` (first 2000 characters). Nothing the model writes outside the copy, and nothing
@@ -134,7 +144,8 @@ Everything derived from the request is data, not instruction:
   `<redacted>`. Strings longer than 1500 characters are truncated and lists are cut to 20 items.
 - The route and the parameter name appear outside the fence; the pipeline sanitises them when it builds the incident
   (`safe_route`, `safe_name` in `pipeline/incident.py`).
-- The values of `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are removed from the CLI's
+- The values of `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `PATCHER_ANTHROPIC_API_KEY`
+  are removed from the CLI's
   output and error text before they reach `notes`.
 
 The fence does not make the model obey. The defence against a patch steered by attacker text is the tool confinement
@@ -163,14 +174,28 @@ shown in the dashboard and stated in the pull request body and the commit messag
 
 ### derive_rule
 
-`rule.py`. The result always has `id: rule-<incident>`, the incident's method and route, and `ttl_s: 3600`.
+`rule.py`. The result always has `id: rule-<incident>`, the incident's method and route, and `ttl_s: null`: the rule
+does not expire and lives until the pipeline deletes it after a verified fix, or it is deleted through the gateway
+admin API.
 
-- `sqli` or `traversal` with a parameter: `scope: "param"`. The grammar is the character set of
-  `grammar.SAFE_DEFAULT` with the length capped by the parameter's OpenAPI `maxLength` (at most 128). For `sqli` it
-  also accepts one apostrophe between two letters (`O'Brien`) and never accepts `--`.
-- The captured value must not match the grammar. If it does, `SAFE_DEFAULT` is tried; if the value matches that too,
-  or cannot be found, the rule is `scope: "all"`.
-- `idor`, `other`, no parameter, or a parameter marked `x-sensitive`: `scope: "all"`, `grammar: null`.
+| Incident | `scope` | `param`, `grammar` |
+|---|---|---|
+| `sqli` or `traversal` with a parameter in `query`, `path`, `json`, `form` or `header` | `param_present` | The parameter; grammar below |
+| `idor` or `other`; no parameter; a parameter marked `x-sensitive` in the OpenAPI (the gateway never reads it); a parameter in a location the gateway cannot address (cookie, raw body) | `all` | `null`, `null` |
+
+With `scope: param_present` the gateway detonates every request that carries the parameter, whatever its value;
+the verdict of the clone decides. The grammar is used only when the clone is inconclusive: a value inside it goes
+to production, a value outside it is denied. A character allow-list is not the detector, because an injection into
+an unquoted context needs only letters, digits and spaces. The captured value is therefore not tested against the
+grammar (`tests/test_rule.py::test_benign_looking_capture_still_gets_a_parameter_rule`).
+
+The grammar (`build_grammar`) is the character set of `grammar.SAFE_DEFAULT` with the length capped by the
+parameter's OpenAPI `maxLength` (at most 128, and 128 when absent). For `sqli` it also accepts one apostrophe between
+two letters (`O'Brien`) and never accepts `--`.
+
+`derive_rule` never emits `scope: param` nor `identity`. The schema also allows `scope: param` (detonate only when
+the value is outside the grammar) and `identity: untrusted`; the latter is added by `pipeline/rules.py` for a
+missing-authentication incident.
 
 The pipeline validates the rule against the schema and replaces it with its built-in rule if it is invalid
 (`pipeline/rules.py`). The rule is not replayed against legitimate traffic before activation. How the gateway
@@ -201,7 +226,7 @@ variants that fire the oracle on the unpatched release.
 
 Run from the repository root. The first command needs neither Docker nor the LLM: it covers rules, variants (in the
 in-process shadow harness), fallbacks (each applies to the `t0` code, the demo shop's tests pass, the documented
-exploit fires before and not after), CLI failure handling with a stubbed CLI, the prompt fencing, and that the
+exploit fires before and not after), CLI failure handling with a stubbed CLI, the prompt fencing, the CLI environment allowlist (`tests/test_cli_env.py`), and that the
 workspace of the demo release holds no answer key. The second command calls the real `claude` CLI
 (`tests/test_live.py`): a fix per class, and two confinement checks that plant a canary file outside the workspace.
 
@@ -218,10 +243,13 @@ recorded incidents and prints seconds per fix.
   by the LLM.
 - The edit allow-list of `propose` contains only `.py` files. Other languages go through
   `pipeline/generic_patch.py`.
-- The CLI process itself is not sandboxed by the operating system: it runs as the invoking user with the pipeline's
-  environment, and the confinement is the CLI's own tool and permission enforcement.
+- The CLI process itself is not sandboxed by the operating system: it runs as the invoking user with the allowlisted
+  environment, and the confinement is the CLI's own tool and permission enforcement. Unless
+  `PATCHER_CLAUDE_CONFIG_DIR` or `PATCHER_ANTHROPIC_API_KEY` is set, it runs on the operator's own credentials.
 - Fallbacks exist only for the demo shop and are tied to its `t0` code; after unrelated changes to the same lines
   they may not apply.
 - `derive_rule` handles `sqli` and `traversal` parameters; every other case yields a rule scoped to the whole route.
+- A `param_present` rule sends every request carrying the parameter through a clone until the fix is verified, so
+  its cost is detonation latency on that parameter, and its strength is that of the oracle.
 
 The full list is in [`../docs/limites.md`](../docs/limites.md).

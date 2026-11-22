@@ -26,6 +26,11 @@ let t = 1000;
 const mk = (type, data, o = {}) => Object.assign({ type, ts: (t += 1), run: 'r', src: 's', rid: null, incident: null, data }, o);
 const b64 = (s) => Buffer.from(s).toString('base64');
 const sink = { file: 'app/routes/files.py', line: 27 };
+const phpFrame = { file: 'library/sql.inc.php', line: 99 };
+const phpEvidence = [{ data: { events: [{ stack: [sink, phpFrame] }] } }];
+assert.deepStrictEqual(S.phpLocation({ sink, oracles: phpEvidence }), phpFrame);
+assert.deepStrictEqual(S.phpLocation({ sink: phpFrame, oracles: [] }), phpFrame);
+assert.strictEqual(S.phpLocation({ sink, oracles: [] }), null);
 const oracle = (rid, o = {}) => mk('oracle.fired', Object.assign({
   clone: 'c', rid, mode: 'L2', release: 'r0', verdict: 'oracle', status: 200,
   request: { method: 'GET', path: '/api/download', query: 'file=../x', headers: {}, body_b64: b64('<img src=x onerror=alert(1)>') },
@@ -330,7 +335,7 @@ assert.deepStrictEqual([s4.auditOrder[s4.auditOrder.length - 1], s4.audits.p2.vu
   const d = S.newState();
   const I = { incident: 'inc-r' };
   const run = (ok) => {
-    S.reduce(d, mk('incident.opened', { incident: 'inc-r', vuln_class: 'idor', route: '/api/orders/{id}' }, I));
+    S.reduce(d, mk('incident.opened', { incident: 'inc-r', vuln_class: 'idor', route: '/api/orders/{id}', sink: phpFrame }, I));
     S.reduce(d, mk('rule.active', { id: 'rule-r', incident: 'inc-r', route: '/api/orders/{id}' }, I));
     S.reduce(d, mk('patch.attempt', { incident: 'inc-r', attempt: 1, source: ok ? 'llm' : 'fallback' }, I));
     S.reduce(d, mk('patch.diff', { incident: 'inc-r', attempt: 1, diff: ok ? '+x' : '' }, I));
@@ -341,7 +346,10 @@ assert.deepStrictEqual([s4.auditOrder[s4.auditOrder.length - 1], s4.audits.p2.vu
     S.reduce(d, mk('upstream.switched', { release: 'abc', addr: 'prod-b:8000' }));
     S.reduce(d, mk('incident.closed', { incident: 'inc-r', outcome: 'patched' }, I));
   };
-  run(false); run(true);
+  run(false);
+  assert.strictEqual(d.incidents['inc-r'].closed.outcome, 'rule_only');
+  assert.deepStrictEqual(S.phpLocation(d.incidents['inc-r']), phpFrame);
+  run(true);
   const i = d.incidents['inc-r'];
   assert.strictEqual(i.runs, 2);
   assert.strictEqual(i.attempts.length, 1); assert.strictEqual(i.attempts[0].status, 'accepted');
@@ -380,6 +388,10 @@ assert.deepStrictEqual([s4.auditOrder[s4.auditOrder.length - 1], s4.audits.p2.vu
   S.reduce(d, mk('request.routed', { route: 'prod', status: 200 }, { rid: 'x3', run: 'live-2' }));
   assert.strictEqual(S.showAttacks(d), false);                            // another run started: its panel is gone
   assert.strictEqual(d.attacks.v.length, 1);                              // the reducer still keeps the events
+  S.reduce(d, mk('attack.attempt', { vuln: 'v', ok: true, saw_real_data: false }, { run: 'live-2' }));
+  assert.strictEqual(S.showAttacks(d), true);
+  S.reduce(d, mk('fuxa.status', { active: 'r1', coverage: [], enforced: [], pending: 0 }, { run: 'live-2' }));
+  assert.strictEqual(S.showAttacks(d), false);                            // the FUXA view has no attack panel
 }
 
 // --- who wrote a patch: only llm and fallback are named, anything else is unknown and never the LLM
@@ -410,6 +422,27 @@ assert.strictEqual(S.sourceLabel('fallback'), 'Fuente: fallback');
   const b = S.scoreboard(d);
   assert.deepStrictEqual([b.unknown, b.contained, b.open, b.cured], [2, 1, 0, 0]);
   assert.strictEqual(S.stages(d.incidents.u1).find((s) => s.key === 'closed').note, 'failed_before_rule');
+  // error (the pipeline failed before it could post a rule) is known: the incident is what its state says, open or contained
+  S.reduce(d, mk('incident.opened', { incident: 'e1', vuln_class: 'sqli', route: '/e1' }, { incident: 'e1' }));
+  S.reduce(d, mk('incident.closed', { incident: 'e1', outcome: 'error', outcome_detail: 'transient' }, { incident: 'e1' }));
+  assert.deepStrictEqual([S.status(d.incidents.e1), S.unknownOutcome(d.incidents.e1)], ['open', null]);
+  // rule_only / escalated (fired live, not on every replay) is rule_only: contained while its rule is active
+  S.reduce(d, mk('incident.opened', { incident: 'e2', vuln_class: 'sqli', route: '/e2' }, { incident: 'e2' }));
+  S.reduce(d, mk('rule.active', { id: 're2', incident: 'e2', route: '/e2' }, { incident: 'e2' }));
+  S.reduce(d, mk('incident.closed', { incident: 'e2', outcome: 'rule_only', outcome_detail: 'escalated' }, { incident: 'e2' }));
+  assert.deepStrictEqual([S.status(d.incidents.e2), S.unknownOutcome(d.incidents.e2)], ['contained', null]);
+  // rolled_back and rejected are outcomes of the FUXA monitor only: known there, unknown on any other incident
+  const fx = (id, outcome, fuxa) => {
+    S.reduce(d, mk('incident.opened', Object.assign({ incident: id, vuln_class: 'authz', route: '/' + id }, fuxa ? { fuxa: { synthetic: false, timed: true } } : {}), { incident: id }));
+    S.reduce(d, mk('incident.closed', { incident: id, outcome }, { incident: id }));
+    return [S.status(d.incidents[id]), S.unknownOutcome(d.incidents[id])];
+  };
+  assert.deepStrictEqual(fx('f1', 'rolled_back', true), ['rolledBack', null]);
+  assert.deepStrictEqual(fx('f2', 'rejected', true), ['open', null]);
+  assert.deepStrictEqual(fx('f3', 'rolled_back', false), ['unknown', 'rolled_back']);
+  assert.deepStrictEqual(fx('f4', 'something_new', true), ['unknown', 'something_new']);
+  const b2 = S.scoreboard(d);
+  assert.deepStrictEqual([b2.unknown, b2.rolledBack], [4, 1]);
 }
 
 // --- what a reader without the bus token gets (dashboard/server.py redact): markers instead of body and statement
@@ -463,3 +496,19 @@ if (process.argv[2]) {
   assert.deepStrictEqual(S.scoreboard(d2), sb);
 }
 console.log('reducer ok');
+
+// ---- canary summary on deploy.done
+(function () {
+  var st = S.newState();
+  var seq = 9000;
+  function ev(type, data) { return { type: type, ts: 100 + seq / 1000, seq: ++seq, run: 'r', src: 't', incident: 'inc-c', data: data }; }
+  S.reduce(st, ev('incident.opened', { incident: 'inc-c', vuln_class: 'sqli', method: 'GET', route: '/x' }));
+  S.reduce(st, ev('deploy.started', { release: 'abc' }));
+  S.reduce(st, ev('deploy.done', { release: 'abc', ok: false, rolled_back: false, detail: 'canary: worse',
+    canary: { verdict: 'worse', weight: 0.1, seconds: 3.2, canary: { requests: 30, '5xx': 9, '4xx': 0 }, stable: { requests: 270, '5xx': 1, '4xx': 2 } } }));
+  var c = st.incidents['inc-c'].deploy.canary;
+  if (!c || c.verdict !== 'worse' || c.requests !== 30 || c.e5 !== 9 || c.stableRequests !== 270 || c.weight !== 0.1) throw new Error('canary summary: ' + JSON.stringify(c));
+  S.reduce(st, ev('deploy.done', { release: 'abc', ok: true, rolled_back: false, canary: { verdict: 'nonsense' } }));
+  if (st.incidents['inc-c'].deploy.canary !== null) throw new Error('unknown canary verdict must be dropped');
+  console.log('canary ok');
+})();

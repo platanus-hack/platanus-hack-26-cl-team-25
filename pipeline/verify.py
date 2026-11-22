@@ -128,6 +128,42 @@ def register_fresh(cfg, spec: dict | None = None):
         return None, None, "registering a fresh account through the gateway failed: %s" % e
 
 
+def login_session(cfg):
+    """auth.login (apps without self-registration, e.g. OpenEMR): log in through the gateway with a seeded
+    account, like a browser, and return its session cookie -> ({header: value}, uid, why)."""
+    proj = getattr(cfg, "project", None)
+    raw = (((getattr(proj, "raw", None) or {}).get("auth") or {}).get("login")) if proj is not None else None
+    if not isinstance(raw, dict) or not raw.get("path"):
+        return None, None, "no auth.login in the project config"
+    user = os.environ.get(str(raw.get("user_env") or ""), "") or str(raw.get("default_user") or "")
+    pw = os.environ.get(str(raw.get("password_env") or ""), "") or str(raw.get("default_password") or "")
+    if not user or not pw:
+        return None, None, "auth.login: no verification account (set %s / %s)" % (raw.get("user_env"),
+                                                                                    raw.get("password_env"))
+    form = {str(k): str(v).replace("{login}", user).replace("{password}", pw)
+            for k, v in (raw.get("form") or {}).items()}
+    base = cfg.gateway_url.rstrip("/")
+    auth = proj.auth
+    try:
+        with httpx.Client(timeout=cfg.http_timeout_s * 3, follow_redirects=False) as c:
+            r = c.post(base + str(raw["path"]), data=form)
+            if r.status_code >= 400:
+                return None, None, "auth.login %s answered %d" % (raw["path"], r.status_code)
+            jar = "; ".join("%s=%s" % (k, v) for k, v in c.cookies.items() if k != "gwsid")
+            if not jar:
+                return None, None, "auth.login %s set no session cookie" % raw["path"]
+            me = c.get(base + auth.path, headers={"cookie": jar})
+            try:
+                uid = int(me.json().get(auth.uid_field or "id"))
+            except (TypeError, ValueError, AttributeError):
+                uid = None
+            if uid is None:
+                return None, None, "auth.login: %s does not recognise the new session" % auth.path
+            return {"cookie": jar}, uid, ""
+    except httpx.HTTPError as e:
+        return None, None, "auth.login through the gateway failed: %s" % e
+
+
 def _identity(cfg, ev: dict, manifest: dict | None):
     """Authorization header for a fresh session with the same trust class as the attacker."""
     uid = ev.get("uid")
@@ -138,6 +174,13 @@ def _identity(cfg, ev: dict, manifest: dict | None):
     auth = proj.auth if proj is not None else None
     kind = auth.kind if auth is not None else "immune-token"
     seed_max = int((manifest or {}).get("seed_max_uid") or 0)
+    login = (((getattr(proj, "raw", None) or {}).get("auth") or {}).get("login")) if proj is not None else None
+    if kind == "introspect" and isinstance(login, dict) and seed_max and int(uid) <= seed_max:
+        # no self-registration: a seeded account logs in, the same trust class as the seeded attacker
+        hdr, fresh, why = login_session(cfg)
+        if why:
+            return None, None, why
+        return hdr, "uid:%d" % fresh, ""
     if kind == "introspect":
         if seed_max and int(uid) <= seed_max:
             return None, None, ("auth.kind introspect: the attacker was a seeded (trusted) user; the pipeline cannot "
@@ -227,7 +270,9 @@ def through_gateway(cfg, inc: dict, gateway_admin, manifest: dict | None = None)
     auth, session, why = _identity(cfg, ev, manifest)
     if why:
         return False, why
-    if auth:
+    if isinstance(auth, dict):
+        headers.update(auth)          # a session cookie (auth.login)
+    elif auth:
         headers["authorization"] = auth
     try:
         since = int(busmod.history(cfg.bus_url, 10 ** 12, timeout=3).get("next") or 0)

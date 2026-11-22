@@ -233,7 +233,7 @@ def test_audit_disabled_or_not_reproducible_does_not_schedule(env, events):
     p = make(env, validator=FakeJudge(reproducible=False), audit=True)
     a = p.enqueue(events["sqli"])
     p.step()
-    assert p.state.incident(a)["outcome"] == "not_reproducible" and not p.state.data.get("audit_pending")
+    assert p.state.incident(a)["outcome_detail"] == "escalated" and not p.state.data.get("audit_pending")
     p2 = make(env, validator=FakeJudge(), audit=False)
     b = p2.enqueue(events["traversal"])
     p2.step()

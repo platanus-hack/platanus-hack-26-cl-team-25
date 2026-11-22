@@ -75,11 +75,13 @@ def test_file_negative(h):
 
 
 def test_file_positive(h):
+    # A real file outside the allowed roots: /etc/hostname on POSIX, win.ini on Windows.
+    tail = "etc/hostname" if os.name != "nt" else "Windows/win.ini"
     for p in ("/file", "/send"):
-        r = h.send("GET", p, query="name=../../../../../../../../../../etc/hostname")
+        r = h.send("GET", p, query="name=../../../../../../../../../../" + tail)
         assert r.verdict == "oracle" and kinds(r) == ["file"], r.events
         ev = r.events[0]
-        assert ev["detail"]["realpath"] == os.path.realpath("/etc/hostname")
+        assert ev["detail"]["realpath"] == os.path.realpath("/" + tail)
         assert ev["stack"] and ev["stack"][-1]["file"] == "demo_app/main.py"
     r = h.send("GET", "/ls", query="d=../../../../../../../../etc")
     assert kinds(r) == ["file"]

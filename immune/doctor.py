@@ -27,17 +27,17 @@ import time
 
 import yaml
 
-from immune import _cfg, shadowdata
+from immune import _cfg, dbkind, generic, shadowdata
 from immune.initsteps import docker, openapi as oa, hostrun
 
 NAMES = {1: "config, release, clone health", 2: "profile identity", 3: "legitimate GETs are clean",
          4: "synthetic canaries", 5: "L1 reset", 6: "no real data in the shadow", 7: "tests in the runner",
-         8: "legit scenarios deterministic"}
+         8: "legit scenarios deterministic", 9: "pinned container images"}
 SECRET = hostrun.SHADOW_SECRET
 
 
-def _check(i, ok, reason, owner="none", detail=None, status=None):
-    return {"id": i, "name": NAMES[i], "ok": bool(ok), "status": status or ("pass" if ok else "fail"),
+def _check(i, ok, reason, owner="none", detail=None, status=None, name=None):
+    return {"id": i, "name": name or NAMES[i], "ok": bool(ok), "status": status or ("pass" if ok else "fail"),
             "reason": reason, "owner": owner if not ok else "none", "detail": detail or {}}
 
 
@@ -346,6 +346,8 @@ def run(project: str | None = None, only: list[int] | None = None) -> list[dict]
         cfg = _cfg.load(project)
     except Exception as e:  # noqa: BLE001
         return [_check(1, False, "config invalid: %s" % str(e).replace("\n", " "), "config")]
+    if cfg.app.runtime == "generic" and cfg.database.kind == "mysql":
+        return _mysql_checks(cfg, only)
     m, cols, doc = _manifest(cfg), _columns(cfg), _openapi(cfg)
     release = build_release(cfg)
     out = []
@@ -365,6 +367,53 @@ def run(project: str | None = None, only: list[int] | None = None) -> list[dict]
     finally:
         shutil.rmtree(release, ignore_errors=True)
     return out
+
+
+def _pinned_bases(dockerfile: str) -> list[str]:
+    with open(dockerfile, encoding="utf-8") as fh:
+        return list(dict.fromkeys(re.findall(
+            r"^\s*FROM\s+(?:--platform=\S+\s+)?([^\s$]+@sha256:[a-f0-9]{64})(?=\s|$)",
+            fh.read(), re.I | re.M,
+        )))
+
+
+def openemr_images() -> list[str]:
+    dockerfile = os.path.join(_cfg.IMMUNE_HOME, "examples", "openemr", "overlay", "Dockerfile.immune")
+    return [*_pinned_bases(dockerfile), dbkind.MARIADB_IMAGE]
+
+
+def run_mysql(project: str) -> list[dict]:
+    try:
+        cfg = _cfg.load(project)
+    except (OSError, ValueError) as exc:
+        return [_check(1, False, str(exc), "config")]
+    if cfg.app.runtime != "generic" or cfg.database.kind != "mysql":
+        return [_check(1, False, "PHP/MySQL requires app.runtime: generic and database.kind: mysql", "config")]
+    return _mysql_checks(cfg)
+
+
+def _mysql_checks(cfg, only=None) -> list[dict]:
+    want = set(only or (1, 9))
+    checks = []
+    try:
+        facts = generic.facts(cfg)
+        dockerfile = os.path.join(cfg.project_dir, facts.context, facts.dockerfile)
+        bases = _pinned_bases(dockerfile)
+    except (generic.GenericError, OSError) as exc:
+        return [_check(1, False, str(exc), "config", name="generic MySQL configuration")]
+    if 1 in want:
+        checks.append(_check(1, True, "configuration and Dockerfile are present", name="generic MySQL configuration"))
+    if 9 in want:
+        images = list(dict.fromkeys([*bases, facts.db.image, docker.IMAGE, generic.SIDECAR_IMAGE]))
+        missing = [image for image in images if not _tool(["docker", "image", "inspect", image, "--format", "present"])[0]]
+        reason = "local images: " + ", ".join(images)
+        if missing:
+            reason = "missing local images: " + ", ".join(missing)
+        checks.append(_check(9, not missing, reason, detail={"images": images, "missing": missing}))
+    for check in sorted(want - {1, 9}):
+        if check in NAMES:
+            checks.append(_check(check, True, "this doctor check requires the Python/SQLite runtime", status="skip"))
+    return checks
 
 
 # ------------------------------------------------------------------------------------- prerequisites
@@ -389,7 +438,7 @@ def _claude_bin() -> str:
         return os.environ.get("CLAUDE_BIN") or "claude"
 
 
-def prereqs() -> list[dict]:
+def prereqs(openemr: bool = False) -> list[dict]:
     """What the product needs on this host, beyond a project. required=False rows only limit a feature.
     Each row: {"name", "ok", "required", "reason", "fix" (what to do, when not ok), "needed_for"}."""
     out = []
@@ -406,10 +455,14 @@ def prereqs() -> list[dict]:
     add("docker compose", ok, True, why, "immune up", "install the Compose plugin (docker-compose-plugin / docker-compose-v2)")
     for img, required, needed_for, fix in (
             (docker.IMAGE, True, "immune up, init, doctor", "run ./install.sh in the immune checkout"),
-            ("immune-sidecar:1", False, "apps with app.runtime: generic", "run ./install.sh in the immune checkout"),
+            (generic.SIDECAR_IMAGE, openemr, "apps with app.runtime: generic", "run ./install.sh in the immune checkout"),
             ("immune-cbuild:1", False, "immune anticipate", "IMMUNE_WITH_ANTICIPATE=1 ./install.sh")):
         ok, why = _tool(["docker", "image", "inspect", img, "--format", "present"]) if docker_ok else (False, "docker not usable")
         add("image " + img, ok, required, why if ok else "not built", needed_for, fix)
+    if openemr:
+        for img in openemr_images():
+            ok, why = _tool(["docker", "image", "inspect", img, "--format", "present"]) if docker_ok else (False, "Docker unavailable")
+            add("image " + img, ok, True, why, "OpenEMR", "run IMMUNE_WITH_OPENEMR=1 ./install.sh")
     ok, why = _tool(["git", "--version"])
     add("git", ok, True, why, "building and applying patches", "install git")
     ok, why = _tool([_claude_bin(), "--version"])
@@ -438,9 +491,12 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--only", default="", help="comma-separated check numbers")
     ap.add_argument("--prereqs", action="store_true", help="check the host prerequisites only (no project needed)")
+    ap.add_argument("--openemr", action="store_true", help="include OpenEMR images with --prereqs")
     a = ap.parse_args(argv)
+    if a.openemr and not a.prereqs:
+        ap.error("--openemr requires --prereqs")
     if a.prereqs:
-        rows = prereqs()
+        rows = prereqs(openemr=True) if a.openemr else prereqs()
         ok = all(r["ok"] for r in rows if r["required"])
         if a.json:
             print(json.dumps({"ok": ok, "prereqs": rows}, indent=1))

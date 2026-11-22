@@ -1,0 +1,81 @@
+# OpenEMR 8.2.0 (tag v8_2_0, commit 6125a2fd8089c8bcc3848071c1293c60e27a7585) protected by Immune with the
+# same flow as the Tienda: gateway (L0, rules, sessions) -> shadow clones with oracles -> incident ->
+# containment rule -> patch (5 gates) -> blue/green deploy -> dashboard. OpenEMR's code is unmodified.
+# Prepared by examples/openemr/fetch.py; run with: bin/immune up --project examples/openemr/app
+version: 1
+name: openemr
+app:
+  runtime: generic
+  # what a release holds: OpenEMR's PHP sources (the image already has vendor/ and the built assets) plus the
+  # onboarding's runtime files; Dockerfile.immune copies them over the pinned official image
+  release_paths: [interface, library, src, apis, portal, controllers, oauth2, templates, gacl, ccr, sql,
+                  version.php, controller.php, index.php, immune-runtime, Dockerfile.immune]
+  # the only places a patch may edit
+  source_dirs: [interface, library, src, apis, portal, controllers, oauth2, controller.php]
+  build: {context: ., dockerfile: Dockerfile.immune}
+  command: [/immune/start.sh]
+  port: 8080
+  health: /meta/health/readyz
+  workdir: /var/www/localhost/htdocs/openemr
+  bind_env: HOST                     # 0.0.0.0 in prod, 127.0.0.1 in shadow clones
+  # OpenEMR includes its own PHP files lazily from the docroot; its writable tree is /tmp/openemr
+  allowed_file_roots: [/var/www/localhost/htdocs/openemr, /tmp/openemr, /tmp/immune-trace, /usr/share/zoneinfo,
+                       /usr/share/icu, /etc/localtime, /etc/ssl/certs, /usr/share/ca-certificates]
+  warmup_paths: ["/interface/login/login.php?site=default", /apis/default/fhir/metadata, /_immune/whoami,
+                 /meta/health/livez]
+  env: {}
+database:
+  kind: mysql
+  env:                               # OpenEMR reads these through immune-runtime/sqlconf.php
+    MYSQL_HOST: "{host}"
+    MYSQL_PORT: "{port}"
+    MYSQL_USER: "{user}"
+    MYSQL_PASS: "{password}"
+    MYSQL_DATABASE: "{database}"
+data:
+  prod_url_env: OPENEMR_DATABASE_URL # mysql://user:pass@host:3306/openemr to protect a real database
+  demo_mysql:                        # otherwise: the pinned MariaDB on the prod network, installed by OpenEMR's
+    database: openemr                # own installer and seeded with the synthetic Clínica Delta
+    user: openemr
+    seed_command: [sh, /immune/seed.sh]
+    seed_privileged: true            # the installer writes sites/default/sqlconf.php
+auth:
+  kind: introspect                   # the gateway asks prod who owns the session cookie
+  path: /_immune/whoami
+  uid_field: id
+  role_field: role
+  admin_values: [admin]
+  cache_s: 30
+  login:                             # post-deploy verification (OpenEMR has no self-registration)
+    path: /interface/main/main_screen.php?auth=login&site=default
+    form: {authUser: "{login}", clearPass: "{password}", new_login_session_management: "1", languageChoice: "1"}
+    user_env: OPENEMR_VERIFY_USER
+    password_env: OPENEMR_VERIFY_PASSWORD
+    default_user: medico1
+    default_password: Inmune-medico1-82
+openapi: .immune/openapi.yaml
+shadow:
+  profile: openemr_identity          # .immune/openemr_identity.py, loaded by the observer
+  columns: .immune/shadow/columns.yaml
+  tracer:                            # clones run the shadow-only -trace image (Xdebug): evidence gets the PHP stack
+    kind: php-xdebug
+    dir: /tmp/immune-trace
+    exclude: [/vendor/]
+legit:
+  normalize:                         # per-session values in OpenEMR pages, ignored when legit replays are compared
+    - 'csrf_token(?:_js|_form)?["'']?\s*[:=,]\s*["''][0-9a-f]{40}["'']'
+    - 'api_csrf_token_js\s*=\s*"[^"]*"'
+    - 'token_main=[A-Za-z0-9]+'
+    - '\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b'
+    - 'value="[0-9a-f]{40}"'
+tests:
+  command: sh /immune/tests.sh
+repo:
+  target: local
+  t0_tag: openemr-t0
+autopatch: merge
+mode: enforce
+pool_size: 2
+audit:
+  enabled: false
+ports: {gateway: 8280, admin: 8281, dashboard: 8290, fleet: 8270}

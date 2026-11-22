@@ -9,11 +9,15 @@ del incidente está en [arquitectura.md](arquitectura.md#5-ciclo-de-vida-de-un-i
 
 Un solo modelo propone el parche. No hay un segundo modelo revisor: deciden estas validaciones.
 
+Este documento describe las validaciones de un stack levantado con `immune up` (`pipeline/gates.py`). La etapa
+de parche para aplicaciones externas que usa el laboratorio de Grafana tiene otras cinco, descritas en la
+sección 12.
+
 ## 1. Resumen
 
 | Orden | Validación | Dónde corre | Qué exige | Se puede omitir |
 |---|---|---|---|---|
-| 0 | Reproducción | runner, release sin parche | El PoC dispara el oráculo del incidente 3 de 3 veces | No |
+| 0 | Reproducción | runner, release sin parche | El PoC dispara el oráculo del incidente 3 de 3 veces. Si no, no se pide ningún parche | No |
 | 1 | `policy` | host, sobre el diff (no ejecuta código de la app) | El diff respeta una política sintáctica | No |
 | 2 | `properties` | runner, release parchado | Propiedades positivas de la clase del defecto | No |
 | 3 | `poc` | runner, release parchado | El PoC y sus variantes no disparan ningún oráculo | No |
@@ -40,7 +44,10 @@ otro defecto, no una reproducción.
 En la misma ejecución se prueban las variantes del PoC. Solo las que disparan el oráculo en el release sin parche
 se cuentan para la validación `poc`.
 
-Si el PoC no reproduce 3 de 3, el incidente se cierra como `not_reproducible`.
+Si el PoC no reproduce 3 de 3, no se pide ningún parche: sin un PoC fiable no hay con qué validarlo. El pipeline
+publica la regla incorporada y cierra el incidente como `rule_only` con `outcome_detail: escalated`
+(`Pipeline.escalate` en `pipeline/orchestrator.py`). El incidente queda contenido y a la espera de una persona;
+evidencia nueva para el mismo punto lo reabre.
 
 Qué no garantiza: la comprobación del archivo se omite cuando el incidente no tiene archivo de origen. Es el caso
 del runtime genérico, donde los oráculos observan desde fuera del proceso y la evidencia no trae pila.
@@ -64,8 +71,11 @@ Rechaza un diff que:
 - quita comprobaciones de 401 o 403;
 - agrega cadenas de alta entropía.
 
-Para código que no es Python la comprobación es léxica: imports, tokens peligrosos, acceso calculado a miembros,
-cantidad de referencias a autenticación, entropía, y prohibición de tocar archivos de tests o de dependencias.
+Para código que no es Python la comprobación es léxica (`pipeline/generic.py`): imports (incluidos `include` y
+`require` de PHP), tokens peligrosos (por ejemplo `shell_exec`, `unserialize` o `curl_exec` en PHP), acceso
+calculado a miembros, cantidad de referencias a autenticación (entre ellas `aclCheckCore` y `verifyCsrfToken`, de
+modo que un parche que quita una de esas comprobaciones se rechaza), entropía, y prohibición de tocar archivos de
+tests o de dependencias.
 
 **Es una heurística sobre la sintaxis, no una prueba.** No sigue el flujo de datos. No detecta:
 
@@ -149,6 +159,11 @@ Para la tienda de demostración los escenarios son cinco, guionados y determinis
 `anonymous_catalog`, `new_customer_obrien`, `existing_customer`, `second_customer`, `admin`. **El corpus legítimo
 del demo es sintético**: no es tráfico de usuarios reales.
 
+En el runtime genérico, la clave `legit.normalize` de `.immune/config.yaml` es una lista de expresiones regulares
+cuyo texto coincidente se reemplaza antes de comparar los cuerpos (`norm_body` en `pipeline/jobshape.py`). Sirve
+para valores que cambian en cada sesión, como tokens CSRF y marcas de tiempo. Una expresión demasiado amplia oculta
+diferencias reales.
+
 Qué no garantiza: un cambio de comportamiento en una ruta o con una entrada que ningún escenario ni grabación
 ejercita. En el modo de grabaciones solo se repiten requests GET.
 
@@ -171,8 +186,8 @@ Pasar las cinco validaciones no cierra el incidente. Después del despliegue hay
 request enviado por el gateway desde una sesión nueva es reenviado a prod, lo que se confirma con
 `forwarded: true` en el `prodlog` del gateway. Si falla, la regla se vuelve a publicar.
 
-El despliegue tiene su propio control, la observación de la tasa de 5xx con rollback, descrito en
-[operacion.md](operacion.md#despliegue-y-rollback).
+El despliegue tiene sus propios controles, el canario de despliegue y la observación de la tasa de 5xx con
+rollback, descritos en [operacion.md](operacion.md#despliegue-y-rollback).
 
 ## 10. Parches de respaldo
 
@@ -206,3 +221,28 @@ sustituto de los tests (`pipeline/stub_patcher.py`), y `pipeline/tests/test_poli
 
 Alcance: son parches escritos a mano para la tienda de demostración, no salidas del modelo. El autotest prueba
 las validaciones contra un conjunto conocido; no mide cuántos parches inadecuados de un modelo dejarían pasar.
+
+## 12. Validaciones de la etapa de parche para aplicaciones externas
+
+`pipeline/extfix.py` (`GATES = ("policy", "build", "tests", "poc", "legit")`) valida el parche de una aplicación
+externa descrita por un archivo `target.yaml`. Solo la usa el laboratorio de Grafana
+(`labs/grafana-cve-2021-43798/target.yaml`). Comparte nombres con las validaciones anteriores, pero no su
+contenido. Corren en orden; la salida de la que falla se entrega al modelo en el intento siguiente.
+
+| Validación | Dónde corre | Qué exige |
+|---|---|---|
+| `policy` | host, sobre el diff | Diff no vacío; solo archivos bajo `source_dirs` que no terminen en `_test.go`; como máximo `policy.max_files` archivos y `policy.max_lines` líneas (2 y 60 por defecto); no agrega `"os/exec"`, `"net/http"`, `"unsafe"` ni directivas `//go:` |
+| `build` | contenedor `sandbox.image`, `--network none` | El comando `sandbox.build` termina con código 0 y produce el artefacto |
+| `tests` | el mismo contenedor | El comando `sandbox.tests` termina con código 0 |
+| `poc` | contenedor candidato con el artefacto y la configuración del clon | El request original y las mutaciones de `pipeline/poc.py` no producen ningún marcador en la respuesta y, con `oracles` configurado, ningún evento `file`, `proc` o `net` del observador del sidecar |
+| `legit` | candidato frente al clon actual | Cada ruta de `legit` da el mismo estado y, donde se declara `compare: body`, el mismo cuerpo |
+
+Qué no garantiza:
+
+- `policy` es una lista corta de cadenas, escrita para Go. No hace el análisis sintáctico de la sección 3.
+- No hay validación `properties`.
+- `poc` solo ve lo que ven los oráculos configurados; en el laboratorio de Grafana, los archivos protegidos de
+  `sidecar.json`.
+- `legit` compara las rutas que alguien escribió en `target.yaml`: 7 en el laboratorio.
+- No tiene autotest con parches inadecuados, y sus tests (`pipeline/tests/test_extfix.py`) cubren `policy`, el
+  prompt y los eventos publicados, no `build`, `tests`, `poc` ni `legit`.

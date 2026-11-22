@@ -5,7 +5,8 @@
 The gateway is the L7 reverse proxy in front of the protected app. For every request it classifies the request
 from its shape and the caller's identity, detonates the suspect ones in a clone, and routes on the clone's verdict:
 to production, to the clone's answer, to a decoy, or to a 404. It also applies the rules posted by the pipeline,
-records the traffic, and publishes events to the bus.
+splits production traffic between two releases during a deploy canary, records the traffic, and publishes
+events to the bus.
 
 It decides by execution, not by score: a request is treated as an attack when an oracle fires in a clone
 (see [`shadow/`](../shadow/README.md) and [`sidecar/`](../sidecar/README.md)).
@@ -31,11 +32,12 @@ It has no Docker access; clones are created by [`fleet/`](../fleet/README.md), w
 | File | Role |
 |---|---|
 | `__main__.py` | Starts the three listeners and handles SIGINT/SIGTERM once for all of them |
-| `core.py` | `Config`, `Gateway`: request reading, routing decision, forwarding to prod and clones, upstream switch with drain, persisted state, recording, admin app, ingest app |
+| `core.py` | `Config`, `Gateway`: request reading, routing decision, forwarding to prod and clones, canary split, upstream switch with drain, persisted state, recording, admin app, ingest app |
 | `classifier.py` | `classify()`: reasons and class of a request; `Rule`; `Manifest`; `EnumTracker`; the built-in traversal rule; redaction helpers for the recording |
 | `spec.py` | OpenAPI loading (local `$ref`), path-template matching on both readings of the path, per-value schema checks |
 | `pool.py` | Clone states and captive sessions: acquire, bind, evict, idle expiry |
 | `l0.py` | Fixed list of scanner paths and their deterministic decoy answers |
+| `waf.py` | `WafClient`: HTTP client of the optional OWASP CRS detection service ([`waf/`](../waf/README.md)) |
 | `bus.py` | Non-blocking event publisher with a retry buffer |
 | `tests/` | Unit tests and a gateway run as a real process against fake prod, clone and bus (`tests/world.py`) |
 
@@ -67,12 +69,14 @@ Environment variables read by `Config.from_env` and `Recorder` in `core.py`. `im
 | `MANIFEST_PATH` | empty | `manifest.json` of the shadow data (seed uid limit, ownership, canaries, groups) |
 | `RECORD_PATH` | empty | Request recording (JSONL). Empty disables recording |
 | `RECORD_MAX_MB` | `256` | Size at which the recording rotates to `<RECORD_PATH>.1` (one generation kept) |
+| `WAF_URL` | empty | Base URL of the detection service of [`waf/`](../waf/README.md). Empty disables the check. `deploy/compose.yaml` does not set it, so a stack started by `immune up` does not use it |
 
 With `auth.kind: jwt-hs256` the production secret is read from the variable named by `auth.secret_env`
 (`immune/auth.py`, `prod_secret_for`).
 
 Fixed constants in `core.py`: request body limit 10 MiB (`MAX_BODY`), body read timeout 30 s, wait for a free clone
-0.3 s (`CLONE_WAIT_S`), production timeout 30 s (connect 3 s), clone timeout 20 s (connect 1 s).
+0.3 s (`CLONE_WAIT_S`), production timeout 30 s (connect 3 s), clone timeout 20 s (connect 1 s), detection
+service timeout 1.5 s (`WafClient`).
 
 ## Behaviour
 
@@ -85,7 +89,9 @@ flowchart TD
     B -- no --> C{scanner path<br/>not in the OpenAPI}
     C -- yes --> L0[decoy answer]
     C -- no --> D[classify]
-    D -- clean --> P[production]
+    D -- clean --> W{WAF_URL set and<br/>the service reports an anomaly}
+    W -- no --> P[production]
+    W -- yes --> F
     D -- evidence --> E{trusted}
     E -- yes --> X[deny 404]
     E -- no --> L2
@@ -111,7 +117,8 @@ This is `Gateway.handle` in enforce mode. The steps in detail, numbered as in `c
    captive after it logs in.
 4. **L0**. A path in `l0.SCANNER_PATHS` (or under `/wp-admin/`, `/phpmyadmin/`) that the OpenAPI does not define
    gets a fake answer whose content is derived from a hash of path and session. No production call is made.
-5. **Classification** (`classifier.classify`), then the decision below.
+5. **Classification** (`classifier.classify`). A request classified `clean` is then sent to the detection
+   service when `WAF_URL` is set (`_waf_upgrade`); an anomaly makes it `suspect`. Then the decision below.
 
 ### Classification reasons
 
@@ -132,8 +139,9 @@ makes it `suspect`.
 | `owner_scoped:anonymous`, `owner_scoped:untrusted` | The operation is `x-owner-scoped` and the identity is not trusted | yes |
 | `owner_scoped:mismatch:<param>` | The operation is `x-owner-scoped`, the identity is trusted and not admin, and the manifest attributes the addressed object to someone else | yes |
 | `canary:<param>` | A path parameter equals a canary id of the manifest and the caller is neither its owner nor admin | yes |
-| `enumeration` | One session addressed more than 8 distinct parameter tuples on one `x-owner-scoped` template within 30 s | yes |
+| `enumeration` | One session addressed more than 8 distinct parameter tuples on one `x-owner-scoped` template within 30 s. The tuple is the path parameters; query parameters whose OpenAPI declaration carries `x-owner-id: true` are counted the same way | yes |
 | `rule:<id>` | An active rule matches (see Rules) | no |
+| `waf:<rule id>` | Added by `core.py` (`_waf_upgrade`) to a request `classify` called clean, when the detection service answers `anomalous: true`. `<rule id>` is the CRS rule that interrupted the evaluation, or `crs` when the answer names none | no |
 | `scanner` | Assigned by `core.py` to L0 requests | no |
 | `captive` | Prefixed by `core.py` for requests of a captive session | no |
 
@@ -155,7 +163,10 @@ Details that change what is caught:
 
 `Gateway._detonation` runs the request in a free clone in mode L1 (the clone resets itself afterwards) and
 decides. "Fail closed" means: a rule matched, or the reason `traversal:path` is present, or any reason starts
-with `schema:`, `grammar:`, `dup_query:` or `traversal:`.
+with `schema:`, `grammar:`, `dup_query:` or `traversal:`. A rule matches "strictly" (`Result.rule_strict`) when
+its scope is `all` or `param`, or its scope is `param_present` and the value is outside its grammar (see Rules).
+The function returns `prod`, `deny`, `rule_deny` or `shadow_l1`; `rule_deny` is a deny decided without an
+oracle, recorded with route `deny` and counted in the `denied` statistic of each rule that matched.
 
 | Clone verdict | Identity | Condition | Route | Client receives |
 |---|---|---|---|---|
@@ -165,7 +176,7 @@ with `schema:`, `grammar:`, `dup_query:` or `traversal:`.
 | `oracle` | untrusted | | `shadow_l1` | the clone's response; the session becomes captive |
 | `clean` or `inconclusive` | any | reason `traversal:path` present | `deny` | 404 |
 | `clean` | any | otherwise | `prod` | production's response |
-| `inconclusive` | any | a rule matched | `deny` | 404 |
+| `inconclusive` | any | a rule matched strictly | `deny` | 404 |
 | `inconclusive` | any | otherwise | `prod` | production's response |
 
 "No clone answered" covers no free clone within 0.3 s and a clone that failed (it is retired; the fleet replaces
@@ -192,23 +203,48 @@ captive at once and the request is replayed in its L2 clone (deny when no clone 
 
 ### Rules
 
-A rule is `{id, method, route, scope, param, grammar, ttl_s, incident}` (`classifier.Rule`). `scope: all` matches
-every request on the route. `scope: param` matches when a value of the named parameter (`in`: `path`, `query`,
-`header`, `json`, `form`) falls outside the rule's grammar. `method` may be `*`; a `GET` rule also covers `HEAD`.
-Rules are never scoped to an IP address, a fingerprint or a user agent.
+A rule marks a point confirmed vulnerable (`classifier.Rule`, `contracts/schemas/rule.schema.json`). Rules are
+never scoped to an IP address, a fingerprint or a user agent.
 
-A rule hit does not block by itself. It makes the request suspect and fail closed: the request is detonated, and
-it reaches production only when the clone says `clean`. A rule is therefore as strong as the oracle behind it.
-Rules apply to every identity, trusted ones included. They expire after `ttl_s` and are removed by the pipeline
-when the fix is deployed.
+| Field | Meaning |
+|---|---|
+| `id`, `incident` | Identifier (posting an existing id replaces the rule) and the incident it belongs to |
+| `method`, `route` | HTTP method (`*` and `ANY` match all; a `GET` rule also covers `HEAD`) and path template, matched on both readings of the path; the route does not have to be in the OpenAPI |
+| `scope` | `param`, `param_present` or `all` (table below) |
+| `param` | `{in, name}` with `in` one of `path`, `query`, `header`, `json`, `form`; required unless the scope is `all` |
+| `grammar` | Full-match regular expression; when absent and the scope is not `all`, `grammar.SAFE_DEFAULT` |
+| `identity` | Optional. `untrusted`: the rule is skipped for a trusted identity. Absent: it applies to every identity, trusted included |
+| `ttl_s` | Lifetime in seconds, at least 1. `null` or absent: the rule has no expiry and lives until it is deleted |
+
+| Scope | The rule matches when | Strict match |
+|---|---|---|
+| `all` | any request on the route | always |
+| `param` | a value of the parameter is outside the grammar | always |
+| `param_present` | the request carries the parameter, whatever its value | only when a value is outside the grammar |
+
+A rule hit does not block by itself. It adds the reason `rule:<id>`, which makes the request suspect and fail
+closed: the request is detonated, and it reaches production only when the clone says `clean`, or when the clone
+is `inconclusive` and the match is not strict. A rule is therefore as strong as the oracle behind it. The
+non-strict case exists because a clone holds synthetic credentials: a real user's login is a 401 there, and
+denying every inconclusive request that carries the parameter would close the endpoint. When no clone answers,
+any rule hit denies, strict or not.
+
+A rule ends by its TTL when it has one (`rule.expired`, reason `ttl`), by `DELETE /_admin/rules/{id}` (reason
+`deleted`; the pipeline does this once the fix is deployed and verified) or by `POST /_admin/reset` (reason
+`reset`).
+
+Each rule keeps three counters, returned as `stats` by `GET /_admin/rules`: `hits` (detonations the rule
+caused), `oracle` (of those, an oracle fired) and `denied` (denied without an oracle: no clone, or a strict
+match with an inconclusive verdict). A growing `denied` means the rule is refusing requests that no oracle
+confirmed. The counters are in memory only and are not updated in observe mode.
 
 ### Modes
 
 | Mode | Behaviour |
 |---|---|
 | `enforce` | As described above |
-| `observe` | Classifies and detonates like enforce, answers every request from production, never evicts or captures. The decision enforce would have taken is recorded as `would_route`, and events carry `observe: true` |
-| `passthrough` | Classifies for the record and forwards everything to production. No detonation |
+| `observe` | Classifies and detonates like enforce, answers every request from production, never evicts or captures. The decision enforce would have taken is recorded as `would_route`, and events carry `observe: true`. The detection service is not consulted |
+| `passthrough` | Classifies for the record and forwards everything to production. No detonation, no detection service, and no `request.classified` event |
 
 `immune mode` switches between `observe` and `enforce`. `passthrough` is reachable only through `GW_MODE` or
 `POST /_admin/mode`.
@@ -221,6 +257,16 @@ clone). If an oracle fires, the evidence opens an incident as for any detonation
 recording so it stays out of the legitimate corpus, and an untrusted session becomes captive from its next
 request.
 
+### Detection service (WAF)
+
+With `WAF_URL` set, `_waf_upgrade` posts each request that `classify` called clean, in enforce mode, to
+`<WAF_URL>/eval` (`waf.py`, `WafClient.check`: method, path, query, headers, base64 body). When the answer is
+200 with `anomalous: true`, the request becomes `suspect` with the reason `waf:<rule id>` and is detonated like
+any other suspect request. The service never blocks: a `waf:` reason does not make a request fail closed, so
+without a clone or with an `inconclusive` verdict the request goes to production. Any error, timeout (1.5 s) or
+non-200 answer leaves the request clean. The call is made inline, so it adds its latency to every clean request.
+Captive sessions, scanner paths and the `observe` and `passthrough` modes do not consult it.
+
 ### Forwarding to production
 
 - The request target is sent byte for byte as the client sent it; dot segments are not resolved.
@@ -230,14 +276,33 @@ request.
   retried once for `GET`, `HEAD` and `OPTIONS` only. A timeout answers 504, any other failure 502.
 - A request that cannot be put on the wire as sent answers 400 and is not counted as a production error.
 - `POST /_admin/upstream` closes the gate for new production requests, waits up to 30 s for in-flight ones,
-  switches, resets the statistics and reopens.
+  ends a running canary, switches, resets the statistics and reopens.
+
+### Canary
+
+`POST /_admin/canary {addr, release, weight}` (`start_canary`) makes `to_prod` send each production-bound
+request to `addr` with probability `weight` (0 < weight <= 1) and to the stable upstream otherwise. The side is
+drawn per request, not per session, so both releases receive the same mix of clients. The fleet uses it before
+the upstream switch of a deploy ([`fleet/README.md`](../fleet/README.md)).
+
+- Counters are kept per side as `{requests, 5xx, 4xx, conn_errors}` and returned in `canary` of
+  `GET /_admin/stats` and by `GET /_admin/canary`. Requests answered by the canary are not counted in
+  `prod_requests`, `prod_5xx` or `prod_conn_errors`, which describe the stable release.
+- A connection refused by the canary is counted against it (one request, one 5xx, one connection error) and
+  the request is sent to the stable upstream instead; the client does not see the failure.
+- A request answered by the canary is recorded with the canary's release id in `release`.
+- The canary ends by `DELETE /_admin/canary` (`canary.done`, reason `aborted`), by an upstream switch (reason
+  `promoted` when the new upstream is the canary address, else `superseded`) or by `POST /_admin/reset` (no
+  event). It is not persisted: a restarted gateway serves the stable upstream only.
 
 ### Persisted state
 
 With `GW_STATE_PATH` set, the upstream, the mode and the active rules (with their expiry times) are written to
 that file on every change and restored at start when the file's `run_id` equals `RUN_ID`. `immune up` points it
-at `<runtime>/stack/gateway-state.json`. Captive sessions, the clone set, the production log, enumeration counters
-and statistics are in memory only; the fleet registers the clone set again.
+at `<runtime>/stack/gateway-state.json`. A rule without a TTL is stored with an infinite expiry (the JSON token
+`Infinity`, which Python's `json` writes and reads). Captive sessions, the clone set, a running canary, the
+production log, enumeration counters, per-rule counters and statistics are in memory only; the fleet registers
+the clone set again.
 
 ### Admin API (port 8081)
 
@@ -247,13 +312,14 @@ Every route requires `x-admin-token` (constant-time comparison); otherwise 403.
 |---|---|
 | `GET /_admin/health` | Mode, upstream, pool counts |
 | `GET /_admin/pool`, `PUT /_admin/pool` | Read or replace the full clone set `{clones:[{id, addr, key, release}]}` |
-| `GET /_admin/rules`, `POST /_admin/rules`, `DELETE /_admin/rules/{id}` | Active rules; add one or a list (201, or 422 when invalid); remove |
+| `GET /_admin/rules`, `POST /_admin/rules`, `DELETE /_admin/rules/{id}` | Active rules, each with `expires_in` (`null` without a TTL) and `stats: {hits, oracle, denied}`; add one or a list (201, or 422 when invalid); remove |
 | `GET /_admin/upstream`, `POST /_admin/upstream` | Read or switch the upstream `{addr, release}` |
+| `GET /_admin/canary`, `POST /_admin/canary`, `DELETE /_admin/canary` | Read, start (`{addr, release, weight}`, 422 unless `0 < weight <= 1`) or stop the canary; each answers `{canary: <view or null>}` |
 | `GET /_admin/sessions` | Captive sessions |
 | `POST /_admin/mode` | `{mode: enforce|observe|passthrough}` |
 | `GET /_admin/prodlog?rid=` | `{forwarded, status}` for one request id (last 50000 requests) |
-| `GET /_admin/stats` | Counters since the last upstream switch: production requests, 5xx, connection errors, by class, by route, after-check, events dropped |
-| `POST /_admin/reset` | Releases every captive session, removes every rule, clears counters. Does not truncate the recording |
+| `GET /_admin/stats` | Counters since the last upstream switch: production requests, 5xx, connection errors, by class, by route, after-check, events dropped; `canary` holds the canary view or `null` |
+| `POST /_admin/reset` | Releases every captive session, removes every rule, drops a running canary, clears counters. Does not truncate the recording |
 
 ### Clone ingest (port 9000)
 
@@ -267,7 +333,8 @@ of the request and publishes `oracle.fired`.
   class, reasons, route, verdict, status, latency, release, mode. `Authorization`, `Cookie` and
   `Proxy-Authorization` values and every `x-sensitive` value (path, header, query, JSON, form fields) are redacted.
 - Events published: `request.classified`, `request.routed`, `oracle.fired`, `session.captured`,
-  `session.released`, `rule.active`, `rule.expired`, `upstream.switched`. Publishing never blocks a request.
+  `session.released`, `rule.active`, `rule.expired`, `upstream.switched`, `canary.started`, `canary.done`.
+  Publishing never blocks a request.
   `request.*` events are dropped when the bus fails; the others are retried for 120 s (at most 2000 kept). The HTTP
   timeout is 1.0 s, connect 0.3 s.
 
@@ -277,15 +344,28 @@ Wire-level detail (headers, schemas, event payloads) is in [`contracts/`](../con
 
 ```
 .venv/bin/pytest gateway/tests -q
-.venv/bin/pytest acceptance/wp3_gateway -q
+.venv/bin/pytest acceptance/gateway -q
 ```
 
 Neither needs Docker or the LLM. `gateway/tests` runs the gateway as a subprocess against in-process fakes;
-the acceptance suite does the same with the fixture app in `acceptance/fixture/`.
+the acceptance suite does the same with the fixture app in `acceptance/fixture/`. `tests/test_rule_present.py`
+covers the `param_present` scope (strict and non-strict matches, per-rule counters, deny without a clone) and the
+persistence of rules across a gateway restart; `tests/test_waf.py`
+covers `WafClient` against a mocked transport (anomaly, connection error, non-200) and `_waf_upgrade` (an
+anomaly turns a clean request into a suspect one; no service or a benign answer leaves it clean).
+No test of this directory runs the Go service of `waf/`. The canary is tested in `fleet/tests/test_canary.py`.
 
 ## Limits
 
-- An `inconclusive` verdict (the clone answered 401, 404 or 5xx) without an active rule fails open to production.
+- An `inconclusive` verdict (the clone answered 401, 404 or 5xx) fails open to production unless a rule matched
+  strictly. This includes a `param_present` rule whose value is inside its grammar: an attack value made only
+  of grammar characters that leaves the clone inconclusive reaches production.
+- A rule with `identity: untrusted` does not apply to trusted identities: a seeded account can still reach the
+  vulnerable point.
+- A rule without a TTL stays until something deletes it. The pipeline deletes it after a verified fix; a rule of
+  an incident that never gets a fix is removed only by `DELETE /_admin/rules/{id}` or a reset.
+- The detection service is optional, fails open, and only widens what is detonated; it is not wired into
+  `deploy/compose.yaml`.
 - `gwsid` is supplied by the client and unsigned. Captivity of an anonymous client holds only while the client
   keeps sending the cookie.
 - The built-in traversal rule recognises `..` segments only. Absolute paths and other file-access tricks depend

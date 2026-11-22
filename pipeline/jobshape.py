@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 
 
 def short(v, n=400):
@@ -21,7 +22,17 @@ def body_info(body: bytes) -> dict:
     return {"sha": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b""), "head": text[:300]}
 
 
-def norm_body(body: bytes):
+def norm_body(body: bytes, normalize=None):
+    """A replayed body as compared by the legit gate. `normalize` (legit.normalize of the project config):
+    regexes of per-session values (CSRF tokens, timestamps) replaced before comparing."""
+    if normalize:
+        text = (body or b"").decode("utf-8", "replace")
+        for rx in normalize:
+            try:
+                text = re.sub(rx, "<normalized>", text)
+            except re.error:
+                continue
+        body = text.encode("utf-8")
     try:
         return json.loads(body)
     except (ValueError, UnicodeDecodeError):

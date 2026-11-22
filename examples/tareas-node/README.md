@@ -10,7 +10,7 @@ because `immune init` supports Python ASGI apps only.
 
 ## How it runs
 
-Under Inmune, from the repository root (needs the images built by `install.sh`, including `immune-sidecar:1`):
+Under Immune, from the repository root (needs the images built by `install.sh`, including `immune-sidecar:1`):
 
 ```bash
 immune up --project examples/tareas-node
@@ -25,7 +25,7 @@ immune down --project examples/tareas-node
 To use an existing database instead of the demo one, export `TAREAS_DATABASE_URL` with a URL reachable from
 the stack's production network.
 
-Standalone, without Inmune:
+Standalone, without Immune:
 
 ```bash
 cd examples/tareas-node
@@ -49,7 +49,7 @@ docker compose exec app node db/seed.js       # sample data
 | `db/schema.sql`, `db/seed.js` | Schema (`users`, `sessions`, `tasks`) and sample data |
 | `test/api.test.js` | The app's test suite (`node --test`) |
 | `Dockerfile` | Installs dependencies from `package-lock.json` one level above `/app`, so they stay in place when a release directory is mounted over `/app` |
-| `.immune/config.yaml` | Project configuration for Inmune |
+| `.immune/config.yaml` | Project configuration for Immune |
 | `.immune/openapi.yaml` | Hand-written OpenAPI with the `x-owner-scoped` and `x-sensitive` marks |
 | `.immune/tareas_identity.py` | Identity profile loaded by the sidecar: `ensure_user`, `mint_token`, `public_paths`, `hash_password` |
 | `.immune/shadow/columns.yaml` | Which columns are owner keys, private or secret, for the shadow data |
@@ -123,7 +123,7 @@ DATABASE_URL=postgres://tareas:tareas@127.0.0.1:5432/tareas npm test
 ```
 
 (The compose file does not publish the database port; point `DATABASE_URL` at any reachable Postgres.) The
-suite exercises every route with legitimate input. Under Inmune the same command runs as the `tests` gate in
+suite exercises every route with legitimate input. Under Immune the same command runs as the `tests` gate in
 the app image against a fresh copy of the shadow seed. The repository's `pytest` does not run this suite.
 
 ## Limits

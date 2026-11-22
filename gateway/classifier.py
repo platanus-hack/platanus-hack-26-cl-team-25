@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from collections import defaultdict, deque
@@ -14,6 +15,7 @@ from .spec import (Spec, check_json_value, check_string_value, is_catchall, matc
                    split_template)
 
 CLEAN, SUSPECT, EVIDENCE, CAPTIVE = "clean", "suspect", "evidence", "captive"
+SCOPES = ("param", "param_present", "all")
 SAFE_KEY = re.compile(r"[A-Za-z0-9_\-]{1,64}")
 REDACTED = "<redacted>"
 
@@ -67,7 +69,16 @@ class Who:
 # ---------------------------------------------------------------- rules
 
 class Rule:
-    def __init__(self, d: dict, now: float | None = None):
+    """A confirmed-vulnerable point (contracts/schemas/rule.schema.json).
+
+    scope "param": values of `param` outside `grammar` are suspect.
+    scope "param_present": every request that carries `param` is suspect, whatever its value; `grammar` only
+        decides what happens when the clone is inconclusive (outside it -> deny, inside -> prod).
+    scope "all": every request on the route is suspect.
+    ttl_s None: no expiry; the rule lives until it is deleted.
+    """
+
+    def __init__(self, d: dict, now: float | None = None, expires: float | None = None):
         now = time.time() if now is None else now
         self.raw = dict(d)
         self.id = str(d["id"])
@@ -76,25 +87,38 @@ class Rule:
         self.segments = split_template(self.route)
         self.param = d.get("param") or None
         self.scope = d.get("scope")
-        if self.scope not in ("param", "all"):
-            raise ValueError("scope must be param|all")
-        if self.scope == "param" and not (isinstance(self.param, dict) and self.param.get("in") and self.param.get("name")):
-            raise ValueError("scope=param needs param.in and param.name")
-        self.grammar = d.get("grammar") or (grammar.SAFE_DEFAULT if self.scope == "param" else None)
+        if self.scope not in SCOPES:
+            raise ValueError("scope must be %s" % "|".join(SCOPES))
+        self.identity = d.get("identity") or None   # "untrusted": only anonymous/untrusted callers (missing-auth, CWE-306)
+        if self.identity not in (None, "untrusted"):
+            raise ValueError("identity must be 'untrusted' or absent")
+        if self.scope != "all" and not (isinstance(self.param, dict) and self.param.get("in") and self.param.get("name")):
+            raise ValueError("scope=%s needs param.in and param.name" % self.scope)
+        self.grammar = d.get("grammar") or (grammar.SAFE_DEFAULT if self.scope != "all" else None)
         if self.grammar:
             re.compile(self.grammar)
-        self.ttl_s = int(d["ttl_s"])
-        if self.ttl_s < 1:
-            raise ValueError("ttl_s must be >= 1")
+        ttl = d.get("ttl_s")
+        self.ttl_s = None if ttl is None else int(ttl)
+        if self.ttl_s is not None and self.ttl_s < 1:
+            raise ValueError("ttl_s must be >= 1 or null")
+        self.raw["ttl_s"] = self.ttl_s
         self.raw.setdefault("created", now)
         self.raw.setdefault("incident", None)
         self.raw.setdefault("param", None)
         self.raw.setdefault("grammar", None)
-        self.expires = now + self.ttl_s
+        # `expires` restores a persisted rule without restarting its clock
+        self.expires = expires if expires is not None else (math.inf if self.ttl_s is None else now + self.ttl_s)
+        # hits: requests the rule matched; oracle: of those, confirmed attacks; denied: refused with no oracle
+        # fired (no clone, or inconclusive). A growing `denied` means the rule is hurting legitimate traffic.
+        self.stats = {"hits": 0, "oracle": 0, "denied": 0}
 
     def to_dict(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
-        return {**self.raw, "expires_in": max(0.0, round(self.expires - now, 1))}
+        left = None if self.expires == math.inf else max(0.0, round(self.expires - now, 1))
+        return {**self.raw, "expires_in": left, "stats": dict(self.stats)}
+
+    def to_store(self) -> dict:
+        return {"rule": self.raw, "expires": None if self.expires == math.inf else self.expires}
 
     def applies(self, method: str, raw_path: str) -> dict | None:
         m = method.upper()
@@ -123,6 +147,7 @@ class Result:
     cls: str = CLEAN
     reasons: list = field(default_factory=list)
     rule_hit: list = field(default_factory=list)       # ids of rules that matched
+    rule_strict: list = field(default_factory=list)    # of those, the ones that deny on an inconclusive clone
     # {"query": {names}, "json": {dotted}, "form": {names}, "header": {lower names}, "path": {decoded values}}
     sensitive: dict = field(default_factory=dict)
 
@@ -380,15 +405,24 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
         if enum is not None and op.owner_scoped and path_params:
             if enum.hit(session, op.template, tuple(sorted(path_params.items()))):
                 res.add("enumeration")
+        # file-based apps carry the entity in the query string (sl_eob_invoice.php?id=): query params
+        # declared x-owner-id on an owner-scoped route count for the same session-window heuristic
+        if enum is not None and op.owner_scoped:
+            qhits = tuple(sorted((k, str(v)) for k, v in pairs
+                                 if (op.params.get(("query", k)) or {}).get("x-owner-id")))
+            if qhits and enum.hit(session, op.template, qhits):
+                res.add("enumeration")
 
-    # ---- active rules (apply to every identity; route may be off-spec)
+    # ---- active rules (route may be off-spec). `identity: untrusted` rules skip a trusted caller,
+    #      so a missing-auth containment rule does not detonate legitimate authenticated traffic.
     for rule in rules:
         rp = rule.applies(view.method, view.raw_path)
         if rp is None:
             continue
+        if rule.identity == "untrusted" and who.trusted:
+            continue
         if rule.scope == "all":
-            res.rule_hit.append(rule.id)
-            res.add(f"rule:{rule.id}")
+            _rule_hit(res, rule, strict=True)
             continue
         where, name = rule.param["in"], str(rule.param["name"])
         if where == "path":
@@ -410,15 +444,25 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
             vals = values.get((where, name), [])
             if not vals and where == "form" and view.body:
                 vals = [v for k, v in (parse_form(view.body) or []) if k == name]
-        if any(not grammar.matches(rule.grammar, str(v)) for v in vals):
-            res.rule_hit.append(rule.id)
-            res.add(f"rule:{rule.id}")
+        outside = any(not grammar.matches(rule.grammar, str(v)) for v in vals)
+        if rule.scope == "param_present":
+            if vals:   # the parameter is in the request: detonate whatever the value looks like
+                _rule_hit(res, rule, strict=outside)
+        elif outside:
+            _rule_hit(res, rule, strict=True)
 
     if any(r == "honeytoken" or r.startswith("canary:") for r in res.reasons):
         res.cls = EVIDENCE
     elif res.reasons:
         res.cls = SUSPECT
     return res
+
+
+def _rule_hit(res: Result, rule: Rule, strict: bool):
+    res.rule_hit.append(rule.id)
+    if strict:
+        res.rule_strict.append(rule.id)
+    res.add(f"rule:{rule.id}")
 
 
 def _strip_indices(dotted: str) -> str:

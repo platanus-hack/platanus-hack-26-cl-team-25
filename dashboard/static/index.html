@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
-<title>Inmune</title>
+<title>Immune</title>
 <link rel="preload" href="/static/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -13,7 +13,8 @@
 <header class="bar">
   <div class="brand">
     <svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1.8 16.6 4.3v5.1c0 4.1-2.7 7.2-6.6 8.8-3.9-1.6-6.6-4.7-6.6-8.8V4.3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 10.1 2.2 2.2L13.2 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    <h1>Inmune</h1>
+    <h1>Immune</h1>
+    <span class="sub" id="dashboard-subtitle" hidden></span>
   </div>
   <div class="bar-right">
     <div class="chip" id="upstream" hidden><span class="k">Producción</span><b id="up-addr"></b><span class="k" id="up-rel"></span></div>
@@ -55,7 +56,7 @@
   <section class="panel incidents">
     <div class="panel-head">
       <h2>Incidentes <span class="count" id="inc-count"></span></h2>
-      <div class="cols-head" aria-hidden="true"><span>Regla</span><span>En producción</span><span>Estado</span></div>
+      <div class="cols-head" aria-hidden="true"><span class="t-rule">Regla</span><span id="production-column">En producción</span><span>Estado</span></div>
     </div>
     <div class="empty-box" id="inc-empty">
       <p class="empty-title">Sin incidentes todavía</p>
@@ -73,14 +74,39 @@
       <h2>Auto-auditoría</h2>
       <div id="audits"></div>
     </section>
+    <section class="block" id="fuxa-summary" hidden>
+      <h2>Estado de FUXA</h2>
+      <p id="fuxa-revision"></p>
+      <p id="fuxa-monitor"></p>
+      <p id="fuxa-persistence" hidden></p>
+      <p id="fuxa-patch-mode" hidden></p>
+      <p id="fuxa-validation" hidden></p>
+      <p id="fuxa-legitimate" hidden></p>
+      <ul id="fuxa-coverage"></ul>
+      <p id="fuxa-pending" class="empty"></p>
+      <p id="fuxa-audit" hidden></p>
+    </section>
+    <section class="block" id="fuxa-requests-panel" hidden>
+      <h2>Peticiones al gateway</h2>
+      <div id="fuxa-requests" class="ticker">
+        <p class="empty">Esperando peticiones al gateway de FUXA.</p>
+      </div>
+    </section>
+    <section class="block" id="restrictions-panel" hidden>
+      <h2>Restricciones de sesión</h2>
+      <p id="fuxa-restricted-count" hidden></p>
+      <div id="restrictions" class="ticker">
+        <p class="empty">Sin restricciones de sesión.</p>
+      </div>
+    </section>
     <section class="block" id="panel-attacks" hidden>
       <h2>Bot atacante</h2>
       <div class="legend-row"><span><i class="c-leak"></i>Datos reales</span><span><i class="c-exec"></i>Ejecutó</span><span><i class="c-blocked"></i>Bloqueado</span></div>
       <div id="attacks"></div>
     </section>
     <section class="block">
-      <h2>Tráfico</h2>
-      <div class="legend-row"><span><i class="r-prod"></i>Producción</span><span><i class="r-shadow"></i>Clon sombra</span><span><i class="r-deny"></i>Rechazado</span></div>
+      <h2 id="traffic-title">Tráfico</h2>
+      <div class="legend-row" id="traffic-legend"><span><i class="r-prod"></i>Producción</span><span><i class="r-shadow"></i>Clon sombra</span><span><i class="r-deny"></i>Rechazado</span></div>
       <div id="ticker" class="ticker"><p class="empty">Sin tráfico todavía</p></div>
     </section>
   </aside>

@@ -85,6 +85,12 @@ class Gateway:
     def stats(self):
         return self.call("GET", "/_admin/stats")
 
+    def start_canary(self, addr, release, weight):
+        return self.call("POST", "/_admin/canary", {"addr": addr, "release": release, "weight": weight})
+
+    def stop_canary(self):
+        return self.call("DELETE", "/_admin/canary")
+
     def reset(self):
         self.call("POST", "/_admin/reset")
 
@@ -486,7 +492,8 @@ class Fleet:
             self.publish("deploy.started", {"release": release})
             res = self._deploy(release, old, old_rel, new)
             self.publish("deploy.done", {"release": release, "ok": res["ok"],
-                                         "rolled_back": res["rolled_back"], "detail": res["detail"]})
+                                         "rolled_back": res["rolled_back"], "detail": res["detail"],
+                                         "canary": res.get("canary")})
             return res
 
     def _deploy(self, release, old, old_rel, new):
@@ -523,14 +530,24 @@ class Fleet:
             before_rate = int(st.get("prod_5xx", 0)) / max(1, int(st.get("prod_requests", 0)))
         except (GatewayError, ValueError, TypeError):
             pass
+        t_canary = time.time()
+        canary = self._canary(release, new)
+        if canary["verdict"] == "worse":
+            res = fail("canary: %s; the release never took the full traffic" % canary["detail"], c)
+            res["canary"] = canary
+            return res
         try:
             self.gw.set_upstream(self._addr(new), release)
         except GatewayError as e:
             return fail(f"gateway upstream switch failed: {e}", c)
         self.active, self.release = new, release
         self._save()
-        grew, reqs, errs = self._watch(before_rate)
-        watch = {"seconds": self.cfg.deploy_watch_s, "requests": reqs, "prod_5xx": errs,
+        # a canary that passed already watched the release under real traffic: that time counts as watch time
+        watch_s = self.cfg.deploy_watch_s
+        if canary["verdict"] == "ok":
+            watch_s = max(min(watch_s, 2.0), watch_s - (time.time() - t_canary))
+        grew, reqs, errs = self._watch(before_rate, watch_s)
+        watch = {"seconds": round(watch_s, 2), "requests": reqs, "prod_5xx": errs,
                  "min_requests": self.cfg.deploy_min_requests}
         if grew:
             try:
@@ -539,12 +556,14 @@ class Fleet:
                 log.error("rollback switch failed: %s", e)
             self.active, self.release = old, old_rel
             self._save()
-            return dict(fail("prod_5xx grew after switch; rolled back", c, rolled_back=True), smoke=smoke, watch=watch)
-        validated = reqs >= self.cfg.deploy_min_requests
+            return dict(fail("prod_5xx grew after switch; rolled back", c, rolled_back=True), smoke=smoke, watch=watch,
+                        canary=canary)
+        # validated by traffic: enough requests in the watch, or a canary that compared both releases under it
+        validated = reqs >= self.cfg.deploy_min_requests or canary["verdict"] == "ok"
         detail = "deployed"
         if not validated:
-            detail = ("deployed; not validated by traffic (%d request(s) in the %gs watch, minimum %d)"
-                      % (reqs, self.cfg.deploy_watch_s, self.cfg.deploy_min_requests))
+            detail = ("deployed; not validated by traffic (%d request(s) in the %gs watch, minimum %d; canary: %s)"
+                      % (reqs, watch_s, self.cfg.deploy_min_requests, canary["detail"]))
             log.warning("deploy %s: %s", release, detail)
         try:
             self.destroy_name(f"{self.cfg.name_prefix}-prod-{old}")
@@ -553,10 +572,11 @@ class Fleet:
         replaced = self._refresh_clones(release)
         self._prune_releases()
         return {"ok": True, "rolled_back": False, "release": release, "active": new, "detail": detail,
-                "clones_replaced": replaced, "smoke": smoke, "watch": watch, "traffic_validated": validated}
+                "clones_replaced": replaced, "smoke": smoke, "watch": watch, "traffic_validated": validated,
+                "canary": canary}
 
-    def _watch(self, before_rate: float) -> tuple[bool, int, int]:
-        """Watch the gateway's prod counters for deploy_watch_s after the switch (the gateway zeroes them on the
+    def _watch(self, before_rate: float, watch_s: float) -> tuple[bool, int, int]:
+        """Watch the gateway's prod counters for watch_s seconds after the switch (the gateway zeroes them on the
         switch). -> (regressed, requests seen, 5xx seen). A regression is a 5xx rate clearly above the one the
         old release had, over at least deploy_min_requests requests: one failed request is not a rate."""
         baseline = 0
@@ -564,7 +584,7 @@ class Fleet:
             baseline = int(self.gw.stats().get("prod_5xx", 0))
         except GatewayError:
             pass
-        deadline = time.time() + self.cfg.deploy_watch_s
+        deadline = time.time() + watch_s
         reqs = errs = 0
         while True:
             try:
@@ -578,6 +598,77 @@ class Fleet:
             if time.time() >= deadline:
                 return False, reqs, max(0, errs)
             time.sleep(min(self.cfg.watch_poll_s, max(0.0, deadline - time.time())))
+
+    # -- canary: part of the real traffic on the new release, next to the old one, before it takes everything
+    @staticmethod
+    def _worse(c: dict, s: dict) -> str | None:
+        """Why the canary side `c` is clearly worse than the stable side `s` over the same window, or None.
+        Both sides get the same mix of clients (the gateway draws per request), so the old release is the
+        yardstick: errors it also has are not held against the new one."""
+        n, m = max(1, int(c.get("requests", 0))), max(1, int(s.get("requests", 0)))
+        e5, s5 = int(c.get("5xx", 0)) / n, int(s.get("5xx", 0)) / m
+        if int(c.get("5xx", 0)) > 0 and e5 > max(2 * s5, s5 + 0.02):
+            return "5xx on %.0f%% of its requests against %.0f%% on the current release" % (100 * e5, 100 * s5)
+        # a fix that starts refusing legitimate requests shows up as 4xx, not as 5xx
+        e4, s4 = int(c.get("4xx", 0)) / n, int(s.get("4xx", 0)) / m
+        if int(c.get("4xx", 0)) >= 5 and e4 > max(2 * s4, s4 + 0.10):
+            return "4xx on %.0f%% of its requests against %.0f%% on the current release" % (100 * e4, 100 * s4)
+        return None
+
+    def _canary(self, release, new) -> dict:
+        """Run the canary window. verdict: ok (same behaviour, enough traffic) | worse (abort the deploy) |
+        skipped (turned off, gateway without canary support, or too little traffic to say anything)."""
+        cfg = self.cfg
+        out = {"verdict": "skipped", "detail": "canary is off", "weight": cfg.canary_weight, "seconds": 0.0,
+               "canary": {}, "stable": {}}
+        if cfg.canary_weight <= 0 or cfg.canary_s <= 0:
+            return out
+        t0 = time.time()
+        try:
+            self.gw.start_canary(self._addr(new), release, cfg.canary_weight)
+        except GatewayError as e:
+            out["detail"] = "gateway did not start the canary (%s)" % e
+            return out
+        deadline, why, lost = t0 + cfg.canary_s, None, False
+        while True:
+            try:
+                view = self.gw.stats().get("canary")
+                if not view or view.get("release") != release:
+                    lost = True            # the gateway restarted or someone else switched: nothing to compare
+                    break
+                out["canary"], out["stable"] = view.get("canary") or {}, view.get("stable") or {}
+                # judged as it goes: a broken release leaves as soon as it shows, not at the end of the window
+                if int(out["canary"].get("requests", 0)) >= cfg.canary_min_requests:
+                    why = self._worse(out["canary"], out["stable"])
+                    if why:
+                        break
+            except (GatewayError, ValueError, TypeError, AttributeError):
+                pass
+            # no traffic at all: waiting longer compares nothing, it only delays the fix
+            idle = time.time() - t0 >= min(2.0, cfg.canary_s) and not (
+                int(out["canary"].get("requests", 0)) + int(out["stable"].get("requests", 0)))
+            if idle or time.time() >= deadline:
+                break
+            time.sleep(min(cfg.watch_poll_s, max(0.0, deadline - time.time())))
+        out["seconds"] = round(time.time() - t0, 1)
+        if why:
+            # stop the share first: whatever happens next, clients are back on the release that was working
+            try:
+                self.gw.stop_canary()
+            except GatewayError as e:
+                log.error("canary stop failed: %s", e)
+            out["verdict"], out["detail"] = "worse", why
+        elif lost:
+            out["detail"] = "the gateway lost the canary"
+        elif int(out["canary"].get("requests", 0)) < cfg.canary_min_requests:
+            out["detail"] = "only %d request(s) reached the canary in %.0f s" % (
+                int(out["canary"].get("requests", 0)), out["seconds"])
+        else:
+            out["verdict"] = "ok"
+            out["detail"] = "%d request(s) on the canary, same behaviour as the current release" % int(
+                out["canary"]["requests"])
+        # ok / too little traffic: the switch that follows promotes the canary (the gateway ends it itself)
+        return out
 
     def _refresh_clones(self, release):
         """Replace every free clone not on `release`; captive/busy clones are left alone."""

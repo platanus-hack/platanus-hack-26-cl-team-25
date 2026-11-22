@@ -34,6 +34,7 @@ class Syscall:
     args: list[str]
     ret: str            # raw text after '='
     retval: int | None  # None for '?'
+    errno: str | None
     retpath: str | None  # fd decoration of the return value (-y), e.g. the opened file's path
 
 
@@ -169,7 +170,7 @@ class Parser:
         raw = rm.group(1)
         retval = None if raw == "?" else int(raw, 16) if raw.startswith("0x") else int(raw)
         return Syscall(pid=pid, name=name, args=args, ret=rest.strip().lstrip("=").strip(),
-                       retval=retval, retpath=rm.group(2))
+                       retval=retval, errno=rm.group(3), retpath=rm.group(2))
 
 
 _SA_FAMILY = re.compile(r"sa_family=(AF_[A-Z0-9]+)")
@@ -213,11 +214,14 @@ def resolve(path: str, base: str | None) -> str:
     return posixpath.normpath(path) if path else path
 
 
-def observe(sc: Syscall, cwd_of=None) -> Observation | None:
-    """Classify one syscall. ``cwd_of(pid)`` gives a fallback cwd for relative paths without -y."""
+def observe(sc: Syscall, cwd_of=None, attempts: bool = False) -> Observation | None:
+    """Classify one syscall. ``cwd_of(pid)`` gives a fallback cwd for relative paths without -y.
+    ``attempts``: failed opens are observations too (detail ``result`` = errno), for the protected-path rule,
+    where trying to open the file is already the signal."""
     name = sc.name
     if name in OPEN_CALLS:
-        if sc.retval is None or sc.retval < 0:
+        failed = sc.retval is None or sc.retval < 0
+        if failed and not (attempts and sc.errno):
             return None  # failed open: the app did not get the file
         idx = OPEN_CALLS[name]
         if len(sc.args) <= idx:
@@ -229,6 +233,8 @@ def observe(sc: Syscall, cwd_of=None) -> Observation | None:
         real = sc.retpath if sc.retpath and sc.retpath.startswith("/") else resolve(raw, base)
         if real.endswith(" (deleted)"):
             real = real[: -len(" (deleted)")]
+        if failed:
+            return Observation("file", sc.pid, {"path": raw, "realpath": real, "result": sc.errno})
         return Observation("file", sc.pid, {"path": raw, "realpath": real})
     if name in EXEC_CALLS:
         if sc.retval != 0:

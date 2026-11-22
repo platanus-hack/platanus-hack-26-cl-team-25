@@ -3,8 +3,8 @@
 ## Purpose
 
 `victim/` is the demo application "Tienda": a small online shop written with FastAPI on SQLite. It is the app
-behind the built-in demo project `tienda`, which Inmune protects when `immune up` runs from the repository root.
-The app is written without any knowledge of Inmune; it reads four environment variables and nothing else.
+behind the built-in demo project `tienda`, which Immune protects when `immune up` runs from the repository root.
+The app is written without any knowledge of Immune; it reads four environment variables and nothing else.
 
 Tienda contains planted defects, put there on purpose so the demo has something to detect and patch. They were
 planted, not discovered. Their list is kept outside this directory, in `docs/demo/respuestas/tienda.md`: this
@@ -17,7 +17,7 @@ The repository's own `.immune/config.yaml` declares this app as project `tienda`
 `app.release_paths: [victim]`, `app.source_dirs: [victim/app]`, `app.asgi: victim.app.main:app`, port 8000,
 health route `/health`, `shadow.profile: victim.shadow_profile`, OpenAPI document `contracts/openapi.yaml`.
 
-Under Inmune the app never runs from this directory. `immune up` copies `victim/` into
+Under Immune the app never runs from this directory. `immune up` copies `victim/` into
 `runtime/releases/t0/`, and the fleet starts that release as the production container and, wrapped by
 `shadow.run`, as each clone. See [`fleet/README.md`](../fleet/README.md) and
 [`shadow/README.md`](../shadow/README.md).

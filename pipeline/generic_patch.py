@@ -2,9 +2,9 @@
 
 Same contract as `patcher.propose` (contracts/interfaces.md) and the same confined Claude Code call
 (`patcher.claude_cli`: Read + Edit only, Edit allowed only on the listed files, on a throw-away copy of
-the release). What differs: there are no stack frames from outside the process, so the editable files
-are located from the incident itself, by scoring every source file under `app.source_dirs` (tests and
-vendored code excluded) on
+the release). What differs: stack frames exist only when the clone runs a tracer (shadow.tracer); files
+they name become editable first. The remaining editable files are located from the incident itself, by
+scoring every source file under `app.source_dirs` (tests and vendored code excluded) on
   - the route: its static path segments (e.g. `/api/tasks/search`, `export`),
   - the parameter name (`q`, `name`, `task_id`),
   - the observed sink: constant fragments of the executed SQL statement around the attacker input
@@ -104,10 +104,39 @@ def _owner_tables(inc: dict, cfg) -> list:
         return []
 
 
+def stack_frames(incident: dict) -> list:
+    """Evidence stack frames ({file, line, func}) of the incident, innermost (the sink) first; empty without a
+    tracer. Evidence stacks are stored outermost first."""
+    out = []
+    for e in (incident.get("evidence") or {}).get("events") or []:
+        for fr in reversed(e.get("stack") or []):
+            if isinstance(fr, dict) and fr.get("file") and fr not in out:
+                out.append(fr)
+    return out
+
+
+def stack_files(incident: dict, cfg, files: list) -> list:
+    """Release-relative source files named by the evidence stack (app frames only), innermost first."""
+    workdir = ""
+    try:
+        workdir = str(((cfg.raw or {}).get("app") or {}).get("workdir") or "").rstrip("/")
+    except Exception:  # noqa: BLE001
+        pass
+    known = set(files)
+    out = []
+    for fr in stack_frames(incident):
+        f = str(fr["file"])
+        rel = f[len(workdir) + 1:] if workdir and f.startswith(workdir + "/") else f.lstrip("/")
+        if rel in known and rel not in out:
+            out.append(rel)
+    return out
+
+
 def locate(workdir: str, incident: dict, cfg) -> tuple[list, dict]:
-    """-> (editable files, {file: score detail}) ranked from the incident (no stack frames)."""
+    """-> (editable files, {file: score detail}) ranked from the incident (stack frames first when recorded)."""
     cls = incident.get("vuln_class") or "other"
     files = _sources(workdir, cfg.app.source_dirs)
+    from_stack = stack_files(incident, cfg, files)
     route_toks = _segments(incident.get("route") or "")
     param = (incident.get("param") or {}).get("name") or ""
     frags = _statement_fragments(incident) if cls == "sqli" else []
@@ -151,7 +180,9 @@ def locate(workdir: str, incident: dict, cfg) -> tuple[list, dict]:
         if cls == "idor" and route_toks and route_toks[-1] in src and re.search(r"\bSELECT\b", src):
             s += 2
         route_score[f], sink_score[f], why[f] = r, s, notes
-    chosen = []
+    chosen = list(from_stack[:MAX_EDITABLE])
+    for f in chosen:
+        why.setdefault(f, []).insert(0, "evidence stack")
     by_route = sorted((f for f in files if route_score.get(f)), key=lambda f: (-route_score[f], f))
     by_sink = sorted((f for f in files if sink_score.get(f)), key=lambda f: (-sink_score[f], -route_score.get(f, 0), f))
     for f in by_sink[:2] + by_route[:1] + by_sink[2:]:
@@ -164,10 +195,16 @@ def locate(workdir: str, incident: dict, cfg) -> tuple[list, dict]:
 def render(incident: dict, editable: list, feedback, attempt: int, cfg=None) -> str:
     dirs, db_kind = pcore._project(cfg)
     cls = incident.get("vuln_class") or "other"
+    frames = stack_frames(incident)
+    bug_lines = ["- Observed at the sink: " + OBSERVED.get(cls, "(unknown)")]
+    if frames:   # recorded by the clone's call tracer (file, line and function names of the app, no request text)
+        bug_lines.append("- Where in the code (innermost first): " + "; ".join(
+            "%s:%s %s" % (f.get("file"), f.get("line"), f.get("func")) for f in frames[:6]))
     return pcore.render(
         incident, feedback, attempt, editable, source_dirs=dirs, db_kind=db_kind,
-        observed_how="observed from outside the process: no stack trace is available",
-        bug_lines=["- Observed at the sink: " + OBSERVED.get(cls, "(unknown)")],
+        observed_how="call stack recorded by the shadow clone's tracer" if frames else
+                     "observed from outside the process: no stack trace is available",
+        bug_lines=bug_lines,
         editable_note="They were located from the route, the parameter and the observed sink; read other files if "
                       "you need to (e.g. how the route is dispatched), but the fix belongs in the listed files.",
         start="Start by reading the listed files, then make the edit.")

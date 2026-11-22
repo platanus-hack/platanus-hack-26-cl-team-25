@@ -19,10 +19,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import posixpath
 import re
 from dataclasses import dataclass, field, asdict
-
-import yaml
 
 IMMUNE_HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_REL = os.path.join(".immune", "config.yaml")
@@ -40,7 +39,9 @@ AUTH_KINDS = ("immune-token", "jwt-hs256", "introspect", "none")
 AUTOPATCH = ("off", "pr", "merge")
 MODES = ("observe", "enforce")
 REPO_TARGETS = ("local", "github")
-DB_KINDS = ("sqlite", "postgres")
+DB_KINDS = ("sqlite", "postgres", "mysql")
+DB_ENV_TOKENS = {"host", "port", "user", "password", "database", "url"}
+TRACER_KINDS = ("php-xdebug",)
 ENV_TOKENS = {"db", "static", "secret"}
 SEED_TOKENS = {"prod_db", "shadow_db", "manifest", "markers", "seed"}
 DEFAULT_PORTS = {"gateway": 8080, "admin": 8081, "dashboard": 8090, "fleet": 8070}
@@ -79,6 +80,7 @@ class DatabaseConfig:
     kind: str = "sqlite"
     path_env: str = "APP_DB"
     url_env: str = ""
+    env: dict = field(default_factory=dict)   # generic: NAME -> template of {host} {port} {user} {password} {database} {url}
 
 
 @dataclass
@@ -108,6 +110,7 @@ class AuthConfig:
 class ShadowConfig:
     profile: str = ""
     columns: str = ""                      # absolute, or ''
+    tracer: dict = field(default_factory=dict)   # generic: {kind: php-xdebug, dir, exclude} (shadow-only image)
 
 
 @dataclass
@@ -213,9 +216,12 @@ class Config:
 
     # ------------------------------------------------------------------ substitution
     def app_env(self, *, db: str, secret: str, root: str = CONTAINER_APP) -> dict:
-        """app.env with {db} {static} {secret} substituted; the db path env var is always set."""
+        """app.env with {db} {static} {secret} substituted; the db path env var is always set.
+
+        The env values are container paths (POSIX), so the join keeps forward slashes
+        regardless of the host platform."""
         vals = {"db": db, "secret": secret,
-                "static": os.path.join(root, self.app.static) if self.app.static else ""}
+                "static": posixpath.join(root, self.app.static) if self.app.static else ""}
         out = {k: substitute(str(v), vals) for k, v in self.app.env.items()}
         if self.database.kind == "sqlite" and self.database.path_env:
             out.setdefault(self.database.path_env, db)
@@ -362,6 +368,8 @@ def find_project(start: str | None = None) -> str:
 
 def load(project_dir: str | None = None, *, check_paths: bool = True) -> Config:
     """Read and validate `<project_dir>/.immune/config.yaml`. Raises ConfigError."""
+    import yaml
+
     project = os.path.realpath(os.path.abspath(project_dir or IMMUNE_HOME))
     path = os.path.join(project, CONFIG_REL)
     if not os.path.isdir(project):
@@ -483,8 +491,26 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
                               url_env=v.str_(d, "url_env", "database.url_env"))
     if database.path_env and not ENV_NAME_RE.match(database.path_env):
         v.err("database.path_env", "invalid variable name %r" % database.path_env)
-    if database.kind == "postgres" and app.runtime != "generic":
-        v.err("database.kind", "postgres is only supported with app.runtime generic")
+    if database.kind in ("postgres", "mysql") and app.runtime != "generic":
+        v.err("database.kind", "%s is only supported with app.runtime generic" % database.kind)
+    denv = d.get("env") or {}
+    if not isinstance(denv, dict):
+        v.err("database.env", "must be a mapping of NAME: template")
+        denv = {}
+    for k, val in denv.items():
+        if not isinstance(k, str) or not ENV_NAME_RE.match(k):
+            v.err("database.env", "invalid variable name %r" % (k,))
+            continue
+        if isinstance(val, (dict, list)) or val is None:
+            v.err("database.env.%s" % k, "must be a scalar")
+            continue
+        bad = tokens(str(val)) - DB_ENV_TOKENS
+        if bad:
+            v.err("database.env.%s" % k, "unknown placeholder(s) %s (allowed: %s)" % (
+                ", ".join("{%s}" % b for b in sorted(bad)), " ".join("{%s}" % t for t in sorted(DB_ENV_TOKENS))))
+        database.env[k] = str(val)
+    if database.kind == "mysql" and not (database.env or database.url_env):
+        v.err("database.env", "database.kind mysql needs database.env (or database.url_env) to hand the app its database")
 
     # data
     dd = v.section(raw, "data")
@@ -536,6 +562,22 @@ def from_dict(raw, project: str, path: str = "<config>", *, check_paths: bool = 
         v.err("shadow.profile", "must be a python module name (got %r)" % shadow.profile)
     cols = v.str_(s, "columns", "shadow.columns")
     shadow.columns = abspath(cols) if cols else ""
+    tr = s.get("tracer") or {}
+    if not isinstance(tr, dict):
+        v.err("shadow.tracer", "must be a mapping {kind, dir, exclude}")
+        tr = {}
+    if tr:
+        if app.runtime != "generic":
+            v.err("shadow.tracer", "is only supported with app.runtime generic")
+        if tr.get("kind", "php-xdebug") not in TRACER_KINDS:
+            v.err("shadow.tracer.kind", "must be one of %s" % ", ".join(TRACER_KINDS))
+        if tr.get("dir") is not None and not str(tr["dir"]).startswith("/tmp/"):
+            v.err("shadow.tracer.dir", "must be under /tmp/ (the only writable path of a clone)")
+        if tr.get("exclude") is not None and not (isinstance(tr["exclude"], list)
+                                                  and all(isinstance(x, str) for x in tr["exclude"])):
+            v.err("shadow.tracer.exclude", "must be a list of path fragments")
+        shadow.tracer = {"kind": str(tr.get("kind", "php-xdebug")), "dir": str(tr.get("dir") or "/tmp/immune-trace"),
+                         "exclude": list(tr.get("exclude") or ["/vendor/"])}
 
     # tests / scenarios / repo / policy
     t = v.section(raw, "tests")
@@ -608,6 +650,8 @@ def reset_cache() -> None:
 
 def set_key(project_dir: str, key: str, value) -> str:
     """Rewrite one top-level scalar key of config.yaml in place (keeps comments). -> path."""
+    import yaml
+
     path = os.path.join(os.path.realpath(project_dir), CONFIG_REL)
     with open(path, encoding="utf-8") as f:
         lines = f.read().splitlines(keepends=True)
