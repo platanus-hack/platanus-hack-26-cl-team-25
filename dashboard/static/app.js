@@ -139,8 +139,12 @@
   var CLASS = {
     sqli: ['Inyección SQL', 'El texto del request terminaba dentro de una consulta a la base de datos.'],
     traversal: ['Lectura de archivos ajenos', 'Un nombre de archivo del request permitía salir de la carpeta prevista.'],
-    idor: ['Datos de otro usuario', 'Cambiando un id en la URL, un usuario leía datos que no eran suyos.']
+    idor: ['Datos de otro usuario', 'Cambiando un id en la URL, un usuario leía datos que no eran suyos.'],
+    authz: ['Falta de autenticación', 'El endpoint aceptó una escritura sin ninguna sesión: cualquiera, sin login, podía escribir.'],
+    rce: ['Ejecución de comandos', 'El request consiguió ejecutar un comando del sistema operativo en el servidor.']
   };
+  /* owner oracle with no identity = missing-authentication (CWE-306), shown apart from classic IDOR */
+  function classKey(inc) { return inc.vuln_class === 'idor' && inc.anon ? 'authz' : inc.vuln_class; }
   function statusLabel(inc, status) { return status === 'unknown' ? 'Cerrado: ' + clip(S.unknownOutcome(inc), 60) : STATUS_LABEL[status]; }
   function storyOf(inc, status) {
     if (status === 'unknown') return 'El pipeline lo cerró con un resultado que este panel no conoce: ' + clip(S.unknownOutcome(inc), 60) + '.';
@@ -188,7 +192,7 @@
       if (key === 'gates') { st = gstate; ts = gts; note = gt ? gp + '/' + gt : null; }
       else { var s = byKey[key] || { state: 'pending' }; st = s.state; ts = s.ts; dt = s.dt; note = s.note; }
       var node = el('span', 'node ' + st);
-      node.appendChild(el('i', 'nd'));
+      node.appendChild(el('i', 'ic'));
       node.appendChild(el('b', null, m[1]));
       if (key === 'gates' && gt) node.appendChild(el('span', 'gc', gp + '/' + gt));
       if (ts) node.title = m[1] + ' · ' + hms(ts) + (dt != null ? ' (+' + dec(dt) + ' s)' : '');
@@ -334,7 +338,7 @@
       else label = inc.deploy ? 'Redesplegando' : inc.attempts.length ? 'Validando parche local' : 'Evidencia registrada';
     }
     var live = !!(phase && inc.opened);
-    var cls = CLASS[inc.vuln_class];
+    var cls = CLASS[classKey(inc)];
     var card = el('details', 'card' + (inc.origin === 'audit' ? ' audit' : '') + (live ? ' live' : ''));
     card.setAttribute('data-status', status);
     card.id = 'card-' + inc.id;

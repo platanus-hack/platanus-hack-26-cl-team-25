@@ -127,20 +127,44 @@ summary.row::-webkit-details-marker { display: none; }
 .props dd { font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 1px; }
 .hint { font-size: 12px; color: var(--text-3); margin-top: 8px; }
 
-/* flow rail: always visible in the collapsed card, spans the full row width */
-.card > .row .rail { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; row-gap: 4px; margin-top: 2px; }
-.rail .node { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-3); white-space: nowrap; padding-right: 10px; position: relative; }
-.rail .node::after { content: ''; width: 10px; height: 1px; background: var(--line); margin-left: 4px; }
-.rail .node:last-child { padding-right: 0; } .rail .node:last-child::after { display: none; }
-.rail .nd { width: 8px; height: 8px; border-radius: 50%; flex: none; background: none; box-shadow: inset 0 0 0 1.5px var(--text-3); }
-.rail .gc { font-variant-numeric: tabular-nums; color: var(--text-3); font-size: 11px; }
-.rail .node.done { color: var(--text-2); } .rail .node.done .nd { background: var(--green); box-shadow: none; }
-.rail .node.done::after { background: var(--green); }
-.rail .node.active { color: var(--text); font-weight: 600; } .rail .node.active .nd { background: var(--text); box-shadow: none; animation: pulse 1.6s ease-in-out infinite; }
-.rail .node.fail { color: var(--text-2); } .rail .node.fail .nd { background: var(--red); box-shadow: none; }
-.rail .node.fail::after { background: var(--red); }
-.rail .node.skip { opacity: .5; }
-@media (prefers-reduced-motion: reduce) { .rail .node.active .nd { animation: none; } }
+/* flow rail: always visible in the collapsed card, spans the full row width.
+   GitHub-Actions style: a status glyph per stage (check / spinner / x / ring), joined by a connector.
+   The icon carries the state; the one-word label is secondary. Deep detail lives in the expanded body. */
+.card > .row .rail { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; row-gap: 6px; margin-top: 6px; }
+.rail .node { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-3); white-space: nowrap; position: relative; padding-right: 20px; }
+.rail .node:last-child { padding-right: 0; }
+/* connector between stages */
+.rail .node:not(:last-child)::after { content: ''; position: absolute; right: 6px; width: 8px; height: 2px; border-radius: 1px; background: var(--line-2); }
+.rail .node.done:not(:last-child)::after { background: var(--green); }
+.rail .node b { font-weight: 500; }
+.rail .gc { font-variant-numeric: tabular-nums; color: inherit; opacity: .8; font-size: 10.5px; }
+
+/* the 16px status icon */
+.rail .ic { width: 16px; height: 16px; border-radius: 50%; flex: none; position: relative; box-sizing: border-box; }
+
+/* pending: hollow ring */
+.rail .node.pending .ic { border: 2px solid var(--line-2); }
+
+/* skipped: dimmed dashed ring */
+.rail .node.skip { opacity: .5; } .rail .node.skip .ic { border: 2px dashed var(--line-2); }
+
+/* done: filled green disc + white check */
+.rail .node.done { color: var(--text-2); }
+.rail .node.done .ic { background: var(--green); }
+.rail .node.done .ic::after { content: ''; position: absolute; left: 5px; top: 2.5px; width: 4px; height: 7px; border: solid var(--bg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+
+/* fail: filled red disc + white x */
+.rail .node.fail { color: var(--text-2); }
+.rail .node.fail .ic { background: var(--red); }
+.rail .node.fail .ic::before, .rail .node.fail .ic::after { content: ''; position: absolute; left: 7px; top: 3.5px; width: 2px; height: 9px; background: var(--bg); border-radius: 1px; }
+.rail .node.fail .ic::before { transform: rotate(45deg); } .rail .node.fail .ic::after { transform: rotate(-45deg); }
+
+/* active: amber spinner (GitHub's in-progress look) */
+.rail .node.active { color: var(--text); font-weight: 600; }
+.rail .node.active .ic { border: 2px solid var(--line-2); border-top-color: var(--amber); animation: spin .7s linear infinite; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .rail .node.active .ic { animation: none; border-top-color: var(--amber); } }
 
 .steps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 16px; }
 .step { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 12.5px; white-space: nowrap; max-width: 100%; }
