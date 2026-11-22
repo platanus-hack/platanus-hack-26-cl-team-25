@@ -81,6 +81,7 @@ class Policy:
     protected: list = field(default_factory=list)    # path globs: opening one is a `file` event
     exec_allow: list = field(default_factory=list)   # program path globs the app may execute
     net_allow: list = field(default_factory=list)    # "ip:port" globs the app may connect to
+    prod_ignore: list = field(default_factory=list)  # protected paths prod opens in normal operation (prodwatch)
 
     @classmethod
     def load(cls, path: str = "", extra_protected=()) -> "Policy":
@@ -89,7 +90,8 @@ class Policy:
             with open(path) as f:
                 raw = json.load(f)
         prot = sorted(set(raw.get("protected") or []) | {p for p in extra_protected if p})
-        return cls(prot, list(raw.get("exec_allow") or []), list(raw.get("net_allow") or []))
+        return cls(prot, list(raw.get("exec_allow") or []), list(raw.get("net_allow") or []),
+                   list(raw.get("prod_ignore") or []))
 
     def relevant(self, ev: dict) -> bool:
         if ev["kind"] == "file":

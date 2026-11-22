@@ -37,6 +37,7 @@ PR_MERGED = "pr.merged"                 # data: {incident, url, sha}
 INCIDENT_CLOSED = "incident.closed"     # data: {incident, outcome: patched|rule_only|not_reproducible, seconds_to_rule, seconds_to_patch}
 VERIFY_RESULT = "verify.result"         # data: {incident, exploit_blocked_on_prod: bool}
 # sim
+PROD_ALERT = "prod.alert"               # data: {container, oracle: file|proc|net, detail, candidates, confirmed:[{method,path,query}], note}
 ATTACK_ATTEMPT = "attack.attempt"       # data: {vuln, ok: bool, saw_real_data: bool}
 
 TYPES = tuple(v for k, v in list(globals().items()) if k.isupper() and isinstance(v, str) and "." in v)
