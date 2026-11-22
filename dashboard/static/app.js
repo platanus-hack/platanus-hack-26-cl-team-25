@@ -235,8 +235,11 @@
 
     var stl = { pending: 'En curso', rejected: 'Rechazado', accepted: 'Aceptado' };
     inc.attempts.forEach(function (a) {
+      // a finished deploy decides the attempt's result; a gate-rejected attempt stays rejected. This covers
+      // the external-lab path (validated and deployed out of band, e.g. the ScadaBR Java patch) too.
       var result = inc.fuxa && inc.deploy && inc.deploy.doneTs
-        ? (inc.deploy.ok || inc.deploy.rolled_back ? 'accepted' : 'rejected') : a.status;
+        ? (inc.deploy.ok || inc.deploy.rolled_back ? 'accepted' : 'rejected')
+        : (a.status !== 'rejected' && inc.deploy && inc.deploy.doneTs ? (inc.deploy.ok ? 'accepted' : 'rejected') : a.status);
       var sa = section((inc.fuxa ? 'Parche local' : 'Parche') + (inc.attempts.length > 1 ? ', intento ' + a.attempt : ''), inc, a.diffTs || a.ts,
         result === 'accepted' ? 'done' : result === 'rejected' ? 'bad' : 'run');
       var ab = el('div', 'attempt ' + result);
