@@ -127,36 +127,37 @@ summary.row::-webkit-details-marker { display: none; }
 .props dd { font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 1px; }
 .hint { font-size: 12px; color: var(--text-3); margin-top: 8px; }
 
-/* flow rail: always visible in the collapsed card, spans the full row width.
-   GitHub-Actions style: a status glyph per stage (check / spinner / x / ring), joined by a connector.
-   The icon carries the state; the one-word label is secondary. Deep detail lives in the expanded body. */
-.card > .row .rail { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; row-gap: 6px; margin-top: 6px; }
-.rail .node { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-3); white-space: nowrap; position: relative; padding-right: 20px; }
+/* flow rail: always visible in the collapsed card. GitHub-Actions style: a status glyph per stage
+   (check / spinner / x / ring) joined by a connector. It is INDENTED under the title (grid-column 3),
+   not at the far left, and its glyphs are smaller than the incident's own status icon, so the rail reads as
+   a sub-line of its card and never as a separate incident row. Deep detail lives in the expanded body. */
+.card > .row .rail { grid-column: 3 / -1; display: flex; flex-wrap: wrap; align-items: center; row-gap: 6px; margin-top: 7px; }
+.rail .node { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-3); white-space: nowrap; position: relative; padding-right: 18px; }
 .rail .node:last-child { padding-right: 0; }
 /* connector between stages */
-.rail .node:not(:last-child)::after { content: ''; position: absolute; right: 6px; width: 8px; height: 2px; border-radius: 1px; background: var(--line-2); }
+.rail .node:not(:last-child)::after { content: ''; position: absolute; right: 5px; width: 8px; height: 2px; border-radius: 1px; background: var(--line-2); }
 .rail .node.done:not(:last-child)::after { background: var(--green); }
 .rail .node b { font-weight: 500; }
-.rail .gc { font-variant-numeric: tabular-nums; color: inherit; opacity: .8; font-size: 10.5px; }
+.rail .gc { font-variant-numeric: tabular-nums; color: inherit; opacity: .8; font-size: 10px; }
 
-/* the 16px status icon */
-.rail .ic { width: 16px; height: 16px; border-radius: 50%; flex: none; position: relative; box-sizing: border-box; }
+/* the status glyph: 13px, deliberately smaller than the incident status icon so the rail reads as secondary */
+.rail .ic { width: 13px; height: 13px; border-radius: 50%; flex: none; position: relative; box-sizing: border-box; }
 
 /* pending: hollow ring */
 .rail .node.pending .ic { border: 2px solid var(--line-2); }
 
 /* skipped: dimmed dashed ring */
-.rail .node.skip { opacity: .5; } .rail .node.skip .ic { border: 2px dashed var(--line-2); }
+.rail .node.skip { opacity: .45; } .rail .node.skip .ic { border: 2px dashed var(--line-2); }
 
 /* done: filled green disc + white check */
 .rail .node.done { color: var(--text-2); }
 .rail .node.done .ic { background: var(--green); }
-.rail .node.done .ic::after { content: ''; position: absolute; left: 5px; top: 2.5px; width: 4px; height: 7px; border: solid var(--bg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.rail .node.done .ic::after { content: ''; position: absolute; left: 4.5px; top: 2px; width: 3px; height: 6px; border: solid var(--bg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 
 /* fail: filled red disc + white x */
 .rail .node.fail { color: var(--text-2); }
 .rail .node.fail .ic { background: var(--red); }
-.rail .node.fail .ic::before, .rail .node.fail .ic::after { content: ''; position: absolute; left: 7px; top: 3.5px; width: 2px; height: 9px; background: var(--bg); border-radius: 1px; }
+.rail .node.fail .ic::before, .rail .node.fail .ic::after { content: ''; position: absolute; left: 5.5px; top: 2.5px; width: 2px; height: 8px; background: var(--bg); border-radius: 1px; }
 .rail .node.fail .ic::before { transform: rotate(45deg); } .rail .node.fail .ic::after { transform: rotate(-45deg); }
 
 /* active: amber spinner (GitHub's in-progress look) */
@@ -279,6 +280,7 @@ summary.row::-webkit-details-marker { display: none; }
   body:not(.fuxa) .sub:not([hidden]) { display: inline; font-size: 12px; }
   .card > .row { padding: 8px 12px; } .body { padding: 4px 12px 16px; }
   .gates { grid-template-columns: minmax(0, 1fr); }
+  .card > .row .rail { grid-column: 2 / -1; }   /* title is column 2 at this width */
 }
 
 /* found in a real browser at 1920x1080: the state of an incident in progress ("Validando parche #1 (4/5 gates)")

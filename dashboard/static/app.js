@@ -175,26 +175,29 @@
   var RAIL = [['detect', 'Detecta'], ['poc', 'PoC'], ['rule', 'Regla'], ['patch', 'Parche'],
               ['gates', 'Gates'], ['prod', 'Producción'], ['verify', 'Verifica']];
   function buildRail(inc) {
-    var byKey = Object.create(null), gp = 0, gt = 0, gactive = false, gfail = false, gts = null;
+    var byKey = Object.create(null), gp = 0, gskip = 0, gactive = false, gfail = false, gts = null;
     S.stages(inc).forEach(function (s) {
       if (s.key.indexOf('gate:') === 0) {
-        gt++;
         if (s.state === 'done') gp++;
         else if (s.state === 'fail') gfail = true;
         else if (s.state === 'active') gactive = true;
+        else if (s.state === 'skip') gskip++;
         if (s.ts) gts = s.ts;
       } else byKey[s.key] = s;
     });
-    var gstate = gfail ? 'fail' : gactive ? 'active' : (gt && gp === gt) ? 'done' : gp ? 'active' : 'pending';
+    // The Gates node reflects only the gates that actually ran. A lab may emit fewer than the generic five
+    // (ScadaBR runs just poc+legit) and a closed incident skips the rest, so once we are past the gates the
+    // node settles on 'done' (gates passed, none pending) instead of spinning forever on a 2/5 count.
+    var gstate = gfail ? 'fail' : gactive ? 'active' : gp ? 'done' : gskip ? 'skip' : 'pending';
     var rail = el('div', 'rail');
     RAIL.forEach(function (m) {
-      var key = m[0], st, note = null, ts = null, dt = null;
-      if (key === 'gates') { st = gstate; ts = gts; note = gt ? gp + '/' + gt : null; }
+      var key = m[0], st, note = null, ts = null, dt = null, count = null;
+      if (key === 'gates') { st = gstate; ts = gts; count = gp || null; note = gp ? gp + ' gates ok' : null; }
       else { var s = byKey[key] || { state: 'pending' }; st = s.state; ts = s.ts; dt = s.dt; note = s.note; }
       var node = el('span', 'node ' + st);
       node.appendChild(el('i', 'ic'));
       node.appendChild(el('b', null, m[1]));
-      if (key === 'gates' && gt) node.appendChild(el('span', 'gc', gp + '/' + gt));
+      if (count != null) node.appendChild(el('span', 'gc', String(count)));   // passed-gate count (no misleading /N)
       if (ts) node.title = m[1] + ' · ' + hms(ts) + (dt != null ? ' (+' + dec(dt) + ' s)' : '');
       else if (note) node.title = note;
       rail.appendChild(node);

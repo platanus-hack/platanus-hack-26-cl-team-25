@@ -411,6 +411,12 @@
             target.deploy.doneTs = ts; target.deploy.ok = !!d.ok;
             target.deploy.rolled_back = !!d.rolled_back; target.deploy.detail = text(d.detail); target.t.deploy = ts;
             target.deploy.canary = canaryOf(d.canary);
+            /* external-patch flow (e.g. the ScadaBR lab) has no PR/merge, so upstream.switched never sets prod
+               (it requires target.merged). A successful deploy.done IS the switch to production there. */
+            if (d.ok && !d.rolled_back && !target.prod) {
+              target.prod = { ts: ts, release: str(d.release), addr: str(d.addr) || null };
+              target.t.inProd = target.t.inProd || ts;
+            }
           }
           touch(target);
         }
