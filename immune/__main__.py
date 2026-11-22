@@ -18,6 +18,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import secrets as pysecrets
 import shutil
 import signal
@@ -182,47 +183,118 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def start_host(cfg, name: str, module: str, env: dict) -> None:
-    pf = _pidfile(cfg, name)
+def _read_pid(path: str) -> int | None:
     try:
-        if _alive(int(open(pf).read().strip())):
-            return
+        return int(open(path).read().strip())
     except (OSError, ValueError):
+        return None
+
+
+def _unit(cfg, name: str) -> str:
+    return "immune-%s-%s" % (re.sub(r"[^A-Za-z0-9_.-]", "-", cfg.name), name)
+
+
+def _systemd_user() -> bool:
+    """A systemd user manager we can start transient units on (IMMUNE_NO_SYSTEMD=1 turns it off)."""
+    if os.environ.get("IMMUNE_NO_SYSTEMD") or not shutil.which("systemd-run") or not shutil.which("systemctl"):
+        return False
+    try:
+        p = subprocess.run(["systemctl", "--user", "is-system-running"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.stdout.strip() in ("running", "degraded", "starting")
+
+
+def _systemctl(*args) -> None:
+    try:
+        subprocess.run(["systemctl", "--user", *args], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
         pass
+
+
+def host_pids(cfg, name: str) -> tuple:
+    """(supervisor pid, child pid); None for whichever is not running."""
+    pf = _pidfile(cfg, name)
+    sup, child = _read_pid(pf), _read_pid(pf + ".child")
+    return (sup if sup and _alive(sup) else None, child if child and _alive(child) else None)
+
+
+def start_host(cfg, name: str, module: str, env: dict) -> None:
+    """Start `python -m <module>` under immune.supervise (restarted when it dies), outside this session.
+
+    With a systemd user manager it runs as the transient unit immune-<project>-<name>: a process started from
+    a terminal, SSH or agent session shares that session's cgroup and is killed when the session ends.
+    """
+    if host_pids(cfg, name)[0]:
+        return
     os.makedirs(cfg.rt("logs"), exist_ok=True)
-    log = open(cfg.rt("logs", name + ".log"), "wb")
-    p = subprocess.Popen([python(), "-m", module], cwd=HOME, env=env, stdout=log, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True)
-    with open(pf, "w") as f:
-        f.write(str(p.pid))
+    os.makedirs(cfg.rt("stack"), exist_ok=True)
+    pf = _pidfile(cfg, name)
+    spec_path = cfg.rt("stack", name + ".supervise.json")
+    spec = {"name": name, "argv": [python(), "-m", module], "cwd": HOME, "env": env,
+            "log": cfg.rt("logs", name + ".log"), "pidfile": pf}
+    fd = os.open(spec_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(spec, f)
+    argv = [python(), "-m", "immune.supervise", spec_path]
+    senv = dict(os.environ, PYTHONPATH=HOME)
+    started = False
+    if _systemd_user():
+        unit = _unit(cfg, name)
+        _systemctl("stop", unit + ".service")
+        _systemctl("reset-failed", unit + ".service")
+        p = subprocess.run(["systemd-run", "--user", "--quiet", "--collect", "--unit", unit,
+                            "--working-directory", HOME, "--setenv", "PYTHONPATH=" + HOME,
+                            "-p", "Restart=on-failure", "-p", "RestartSec=2", "-p", "KillMode=mixed",
+                            "-p", "TimeoutStopSec=20", *argv], capture_output=True, text=True, timeout=30)
+        started = p.returncode == 0
+    if not started:
+        with open(os.devnull, "wb") as null:
+            subprocess.Popen(argv, cwd=HOME, env=senv, stdout=null, stderr=null, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if all(host_pids(cfg, name)):
+            return
+        time.sleep(0.1)
+    raise CliError("%s did not start; see %s" % (name, spec["log"]))
 
 
 def stop_host(cfg) -> None:
     d = cfg.rt("logs")
     if not os.path.isdir(d):
         return
+    systemd = _systemd_user()
     pids = []
-    for fn in os.listdir(d):
-        if fn.endswith(".pid"):
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".pid"):
+            continue
+        name = fn[:-len(".pid")]
+        pf = os.path.join(d, fn)
+        sup, child = _read_pid(pf), _read_pid(pf + ".child")
+        if systemd:
+            _systemctl("stop", _unit(cfg, name) + ".service")
+        if sup and _alive(sup):
             try:
-                pid = int(open(os.path.join(d, fn)).read().strip())
-                os.kill(pid, signal.SIGTERM)
-                pids.append(pid)
-            except (OSError, ValueError):
+                os.kill(sup, signal.SIGTERM)      # the supervisor stops its child, then exits
+            except OSError:
                 pass
+        pids += [p for p in (sup, child) if p]
+    deadline = time.time() + 15
+    while time.time() < deadline and any(_alive(p) for p in pids):
+        time.sleep(0.2)
+    for p in pids:
+        if _alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+    for fn in os.listdir(d):
+        if fn.endswith(".pid") or fn.endswith(".pid.child"):
             try:
                 os.remove(os.path.join(d, fn))
             except OSError:
                 pass
-    deadline = time.time() + 10
-    while pids and time.time() < deadline:
-        pids = [p for p in pids if _alive(p)]
-        time.sleep(0.2)
-    for p in pids:
-        try:
-            os.kill(p, signal.SIGKILL)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------- http
@@ -291,6 +363,9 @@ def seed(cfg: icfg.Config) -> str:
         shutil.rmtree(target, ignore_errors=True)
     for d in ("data/shadow", "recordings", "bus", "releases", "logs"):
         os.makedirs(os.path.join(rt, d), exist_ok=True)
+    for fn in os.listdir(os.path.join(rt, "logs")):      # logs belong to the run; restarts within it append
+        if fn.endswith(".log"):
+            os.remove(os.path.join(rt, "logs", fn))
     os.makedirs(cfg.prod_data_dir, exist_ok=True)
     shadow_markers = os.path.join(cfg.shadow_dir, "markers.json")
     if cfg.data.seed_command:
@@ -327,7 +402,105 @@ def seed(cfg: icfg.Config) -> str:
 
 
 # ---------------------------------------------------------------------------- commands
+def existing_run(cfg: icfg.Config) -> str | None:
+    """The run id of a stack that can be resumed: seeded, with the fleet's record of what is in production."""
+    try:
+        run_id = open(cfg.rt("run_id")).read().strip()
+        with open(cfg.rt("stack", "fleet-state.json")) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not run_id or not isinstance(st, dict) or st.get("run_id") != run_id or not st.get("release"):
+        return None
+    if not os.path.isdir(cfg.release_dir(str(st["release"]))):
+        return None
+    if cfg.app.runtime == "generic":
+        # `immune down` removes this runtime's app images and demo database: resume only a stack still standing
+        if not docker("ps", "-aq", "--filter", "label=immune.project=%s" % cfg.name, "--filter",
+                      "label=immune.role=prod", check=False).split():
+            return None
+    return run_id
+
+
+def check_ports(cfg: icfg.Config, names) -> None:
+    """Fail with the port and the config key when something else already listens there. Call it only for
+    ports this stack does not hold itself at that moment."""
+    import socket
+    busy = []
+    for n in names:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", int(cfg.ports[n])))
+        except OSError:
+            busy.append("%d (ports.%s)" % (cfg.ports[n], n))
+        finally:
+            s.close()
+    if busy:
+        raise CliError("port%s %s already in use on 127.0.0.1 by something that is not this stack. Free %s or set "
+                       "other values under `ports:` in %s" % ("s" if len(busy) > 1 else "", ", ".join(busy),
+                                                             "them" if len(busy) > 1 else "it",
+                                                             os.path.join(cfg.dot_immune, "config.yaml")))
+
+
+def services_running(cfg: icfg.Config) -> set:
+    out = docker("ps", "--format", "{{.Names}}", "--filter", "label=immune.project=%s" % cfg.name, check=False)
+    return {n[len(cfg.prefix) + 1:] for n in out.split() if n.startswith(cfg.prefix + "-")}
+
+
+def wait_fleet(cfg, tok: str, timeout: float = 180.0) -> dict:
+    """Block until the fleet has taken over the run (prod serving). -> its /state."""
+    url = "http://127.0.0.1:%d/state" % cfg.ports["fleet"]
+    deadline, st = time.time() + timeout, {}
+    while time.time() < deadline:
+        try:
+            st = http("GET", url, token=tok, timeout=3)
+            if st.get("ready") and (st.get("prod") or {}).get("active"):
+                if len(st.get("clones") or []) >= int(st.get("pool_size") or 0) and st.get("gateway_ok"):
+                    return st
+            elif st.get("ready"):
+                break
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.5)
+    if (st.get("prod") or {}).get("active"):
+        say("warning: production is serving but the clone pool is at %d/%s; suspicious requests are held back "
+            "until it fills (see %s)" % (len(st.get("clones") or []), st.get("pool_size"), cfg.rt("logs", "fleet.log")))
+        return st
+    raise CliError("the fleet could not take over the existing run (state: %s); see %s, or start from t0 with "
+                   "`immune reset`" % (json.dumps(st.get("prod")), cfg.rt("logs", "fleet.log")))
+
+
+def cmd_resume(cfg: icfg.Config, sec: dict, run_id: str) -> int:
+    """`immune up` on a stack that already ran: bring back whatever is missing, keep the release that is in
+    production, the containment rules and the open incidents. Never goes back to t0 (that is `immune reset`)."""
+    sec_file = write_stack_env(cfg, sec)
+    up = services_running(cfg)
+    check_ports(cfg, [n for n in ("gateway", "admin") if "gateway" not in up]
+                + [n for n in ("dashboard",) if "dashboard" not in up]
+                + [n for n in ("fleet",) if not host_pids(cfg, "fleet")[0]])
+    compose(cfg, compose_env(cfg, sec_file, run_id), "up", "-d")
+    tok = sec["ADMIN_TOKEN"]
+    wait_url("http://127.0.0.1:%d/health" % cfg.ports["dashboard"])
+    wait_url("http://127.0.0.1:%d/_admin/health" % cfg.ports["admin"], tok)
+    henv = host_env(cfg, sec, run_id)
+    start_host(cfg, "fleet", "fleet", henv)
+    st = wait_fleet(cfg, tok)
+    if not os.environ.get("NO_PIPELINE"):
+        start_host(cfg, "pipeline", "pipeline", henv)
+    eff, why = cfg.effective_autopatch()
+    say("stack immune-%s resumed (run %s, release %s in production, %d clone(s)): gateway http://127.0.0.1:%d  "
+        "dashboard http://127.0.0.1:%d  autopatch=%s%s"
+        % (cfg.name, run_id, st["prod"]["release"], len(st.get("clones") or []), cfg.ports["gateway"],
+           cfg.ports["dashboard"], eff, (" (%s)" % "; ".join(why)) if why else ""))
+    return 0
+
+
 def cmd_up(cfg: icfg.Config, reset: bool) -> int:
+    if not reset:
+        run_id = existing_run(cfg)
+        if run_id:
+            return cmd_resume(cfg, stack_secrets(cfg), run_id)
     if cfg.app.runtime == "generic":      # any-language app in its own image (immune/generic.py)
         from . import generic
         return generic.cmd_up(cfg, reset)
@@ -335,8 +508,8 @@ def cmd_up(cfg: icfg.Config, reset: bool) -> int:
     stop_host(cfg)
     remove_owned(cfg)
     sec_file = write_stack_env(cfg, sec)
-    if reset:
-        compose(cfg, compose_env(cfg, sec_file, "dev"), "down", "--remove-orphans", check=False)
+    compose(cfg, compose_env(cfg, sec_file, "dev"), "down", "--remove-orphans", check=False)
+    check_ports(cfg, ("gateway", "admin", "dashboard", "fleet"))
     run_id = seed(cfg)
     say("seeded t0 (run %s)" % run_id)
     cenv = compose_env(cfg, sec_file, run_id)
@@ -379,17 +552,54 @@ def cmd_down(cfg: icfg.Config) -> int:
 def cmd_status(cfg: icfg.Config) -> int:
     say(docker("ps", "--format", "table {{.Names}}\t{{.Status}}", "--filter",
                "label=immune.project=%s" % cfg.name, check=False).rstrip())
+    problems = []
     for name in ("fleet", "pipeline"):
-        try:
-            pid = int(open(_pidfile(cfg, name)).read().strip())
-            say("%-9s pid %d %s" % (name, pid, "running" if _alive(pid) else "DEAD"))
-        except (OSError, ValueError):
-            say("%-9s not running" % name)
+        sup, child = host_pids(cfg, name)
+        if sup and child:
+            say("%-9s running (pid %d, supervisor %d)" % (name, child, sup))
+        elif sup:
+            say("%-9s RESTARTING (supervisor %d; see %s)" % (name, sup, cfg.rt("logs", name + ".log")))
+            problems.append(name + " is restarting")
+        else:
+            say("%-9s NOT RUNNING" % name)
+            if not (name == "pipeline" and os.environ.get("NO_PIPELINE")):
+                problems.append(name + " is not running")
     try:
         tok = stack_secrets(cfg)["ADMIN_TOKEN"]
-        say(json.dumps(http("GET", "http://127.0.0.1:%d/state" % cfg.ports["fleet"], token=tok, timeout=3)))
+    except CliError as e:
+        say("secrets: %s" % e)
+        return 1
+    for label, port, path in (("gateway", cfg.ports["admin"], "/_admin/health"),
+                              ("dashboard", cfg.ports["dashboard"], "/health")):
+        try:
+            http("GET", "http://127.0.0.1:%d%s" % (port, path), token=tok, timeout=3)
+            say("%-9s ok" % label)
+        except Exception as e:  # noqa: BLE001
+            say("%-9s UNREACHABLE (%s)" % (label, e))
+            problems.append(label + " is unreachable")
+    try:
+        st = http("GET", "http://127.0.0.1:%d/state" % cfg.ports["fleet"], token=tok, timeout=3)
+        prod, clones = st.get("prod") or {}, st.get("clones") or []
+        say("prod      %s on release %s; clones %d/%s; gateway link %s" % (
+            prod.get("active") or "NONE", prod.get("release"), len(clones), st.get("pool_size"),
+            "ok" if st.get("gateway_ok") else "DOWN"))
+        if not prod.get("active"):
+            problems.append("no release in production")
+        if len(clones) < int(st.get("pool_size") or 0):
+            problems.append("clone pool below its size (%d/%s)" % (len(clones), st.get("pool_size")))
     except Exception as e:  # noqa: BLE001
-        say("fleet: unreachable (%s)" % e)
+        say("fleet     UNREACHABLE (%s)" % e)
+    try:
+        up = http("GET", "http://127.0.0.1:%d/_admin/upstream" % cfg.ports["admin"], token=tok, timeout=3)
+        rules = http("GET", "http://127.0.0.1:%d/_admin/rules" % cfg.ports["admin"], token=tok, timeout=3)
+        say("gateway   upstream %s (release %s), %d containment rule(s)" % (
+            up.get("addr"), up.get("release"), len(rules.get("rules") or [])))
+    except Exception:  # noqa: BLE001
+        pass
+    if problems:
+        say("NOT HEALTHY: %s. `immune up` brings back what is missing without going back to t0." % "; ".join(problems))
+        return 1
+    say("healthy")
     return 0
 
 

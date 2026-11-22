@@ -163,7 +163,8 @@ def test_publisher_enforces_contract_fields(tmp_path):
     with pytest.raises(ValueError):
         p.publish("gate.result", {"incident": "i", "gate": "policy", "ok": True})
     ev = p.publish("verify.result", {"incident": "i", "exploit_blocked_on_prod": True}, incident="i")
-    assert ev["src"] == "pipeline" and p.dropped == 1          # bus down: dropped, not raised
+    assert ev["src"] == "pipeline" and p.dropped == 0          # bus down: not raised, and kept for the next flush
+    assert p.flush() == 1 and list(p._pending) == [ev]
     assert json.loads(open(tmp_path / "ev.jsonl").read())["type"] == "verify.result"
 
 

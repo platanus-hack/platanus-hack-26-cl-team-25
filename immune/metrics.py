@@ -52,8 +52,11 @@ def incidents(events: list[dict]) -> list[dict]:
         if t == "incident.opened":
             origin = d.get("origin") or "live"
             t0 = found.get(inc, e["ts"]) if origin == "audit" else fired.get(d.get("evidence_rid"), e["ts"])
+            # opened again = a restart or a retry after a transient failure: the last run is the one timed,
+            # the time lost before it shows in the queue column (t0 never moves)
+            runs = rows[inc]["runs"] + 1 if inc in rows else 1
             rows[inc] = {"incident": inc, "class": d.get("vuln_class"), "route": d.get("route"), "opened": e["ts"],
-                         "t0": t0, "attempts": 0, "origin": origin, "parent": d.get("parent"),
+                         "t0": t0, "attempts": 0, "origin": origin, "parent": d.get("parent"), "runs": runs,
                          "method": d.get("method"), "param": (d.get("param") or {}).get("name")}
             cur = inc
         r = rows.get(inc) or (rows.get(cur) if t in ("upstream.switched", "deploy.done", "deploy.started") else None)
@@ -84,6 +87,7 @@ def incidents(events: list[dict]) -> list[dict]:
         out.append({"incident": r["incident"], "class": r["class"], "route": r["route"], "outcome": "patched",
                     "origin": r["origin"], "parent": r["parent"], "method": r["method"], "param": r["param"],
                     "attempts": r["attempts"], "source": r.get("source"), "blocked": r.get("blocked"),
+                    "runs": r["runs"],
                     "queue": r["opened"] - r["t0"],
                     "to_rule": r["rule"] - s, "to_diff": r["diff"] - s, "to_merged": r["merged"] - s,
                     "to_prod": r["in_prod"] - s, "to_verified": r.get("verified", r["in_prod"]) - s,
@@ -123,9 +127,13 @@ def detection(events: list[dict], recording: list[dict] | None = None) -> dict:
     det = [v for v in verdict.values() if v in DETONATED]
     by_v = {k: det.count(k) for k in DETONATED}
     after = sum(1 for r in recording or [] if r.get("aftercheck") == "oracle")
-    origin = {}
+    origin, seen = {}, set()
     for e in events:
         if e.get("type") == "incident.opened":
+            iid = e.get("incident") or (e.get("data") or {}).get("incident")
+            if iid in seen:          # opened again after a restart or a retry: one incident
+                continue
+            seen.add(iid)
             o = (e.get("data") or {}).get("origin") or "live"
             origin[o] = origin.get(o, 0) + 1
     audits = [e.get("data") or {} for e in events if e.get("type") == "audit.done"]

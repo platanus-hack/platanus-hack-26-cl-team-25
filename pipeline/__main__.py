@@ -56,6 +56,9 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     logging.basicConfig(level=os.environ.get("PIPELINE_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    if not os.environ.get("PIPELINE_LOG_HTTP"):
+        for noisy in ("httpx", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = Config.from_env()
     pipe = build(cfg)
     if a.status:
@@ -90,6 +93,8 @@ def main(argv=None) -> int:
             log.info("PAUSE file %s: %s", cfg.pause_file, "paused, no new incident will start" if paused else "resumed")
             was_paused = paused
         did = pipe.step()
+        if not did and not paused and not a.once:
+            pipe.maintain()
         pipe.state.flush()
         if did:
             idle_since = time.time()

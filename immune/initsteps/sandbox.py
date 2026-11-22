@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,7 +83,10 @@ def profile_job(cfg, op: str, arg=None, root: str | None = None, timeout: float 
     tmp = tempfile.mkdtemp(prefix="immune-probe-")
     env = base_env(app_env(cfg, os.path.join(tmp, "app.db"), root))
     job = {"op": op, "profile": cfg.shadow.profile, "arg": arg, "asgi": cfg.app.asgi}
-    return run_module("immune.initsteps.probe", job, roots_for(root, cfg.project_dir), env, timeout=timeout)
+    try:
+        return run_module("immune.initsteps.probe", job, roots_for(root, cfg.project_dir), env, timeout=timeout)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def profile_has(cfg, name: str) -> bool:
@@ -108,5 +112,8 @@ def harness(cfg, root: str, job: dict, extra_env: dict | None = None, timeout: f
     job = dict(job)
     job.setdefault("profile", cfg.shadow.profile)
     job.setdefault("seed_db", cfg.shadow_seed)
-    return run_module("immune.initsteps.harness_runner", job, roots_for(root, cfg.project_dir), base_env(env),
-                      timeout=timeout)
+    try:
+        return run_module("immune.initsteps.harness_runner", job, roots_for(root, cfg.project_dir), base_env(env),
+                          timeout=timeout)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

@@ -31,6 +31,7 @@ services:
       OPENAPI_PATH: /config/openapi.yaml
       MANIFEST_PATH: /runtime/data/manifest.json
       RECORD_PATH: /runtime/recordings/requests.jsonl
+      GW_STATE_PATH: /runtime/stack/gateway-state.json
       GW_MODE: "${IMMUNE_MODE}"
       GW_AFTERCHECK: "${IMMUNE_AFTERCHECK:-0}"
       IMMUNE_AUTH: "${IMMUNE_AUTH}"

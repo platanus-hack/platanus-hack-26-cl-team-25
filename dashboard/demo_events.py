@@ -67,6 +67,7 @@ def attack_round(p: Poster, results: dict[str, list[tuple[bool, bool]]], idx: in
 
 
 def run(p: Poster):
+    p.emit(E.UPSTREAM_SWITCHED, "gateway", {"release": "r0", "addr": "prod-a:8000"})
     p.emit(E.POOL_STATE, "fleet", {"l1_free": 4, "l2_busy": 0, "size": 4})
     traffic(p, 6)
 
@@ -89,7 +90,8 @@ def run(p: Poster):
         "sql", {"statement": f"SELECT * FROM products WHERE name LIKE '%{XSS}' OR '1'='1' --%'", "tainted": True},
         [{"file": "app/routes/search.py", "line": 41, "func": "search"}, {"file": "app/db.py", "line": 18, "func": "query"}]) | {"uid": 7}, rid=rid1, wait=1.2)
     traffic(p, 3, 10)
-    p.emit(E.INCIDENT_OPENED, "pipeline", {"incident": "inc-sqli-1", "vuln_class": "sqli", "route": "/api/search", "param": {"in": "query", "name": "q"},
+    p.emit(E.INCIDENT_OPENED, "pipeline", {"incident": "inc-sqli-1", "vuln_class": "sqli", "method": "GET", "route": "/api/search", "param": {"in": "query", "name": "q"},
+                                          "evidence_rid": rid1,
                                           "sink": {"file": "app/routes/search.py", "line": 41}}, incident="inc-sqli-1", wait=1.0)
     p.emit(E.POC_READY, "pipeline", {"incident": "inc-sqli-1", "reproducible": True, "runs": 3, "poc": {"method": "GET", "path": "/api/search"}}, incident="inc-sqli-1", wait=1.0)
     p.emit(E.RULE_ACTIVE, "gateway", {"id": "rule-sqli-1", "incident": "inc-sqli-1", "method": "GET", "route": "/api/search",
@@ -137,7 +139,8 @@ def run(p: Poster):
         "file", {"path": "/etc/passwd", "op": "open"},
         [{"file": "app/routes/files.py", "line": 27, "func": "download"}]) | {"uid": 9}, rid=rid2, wait=1.2)
     inc = "inc-trav-1"
-    p.emit(E.INCIDENT_OPENED, "pipeline", {"incident": inc, "vuln_class": "path_traversal", "route": "/api/download", "param": {"in": "query", "name": "file"},
+    p.emit(E.INCIDENT_OPENED, "pipeline", {"incident": inc, "vuln_class": "path_traversal", "method": "GET", "route": "/api/download", "param": {"in": "query", "name": "file"},
+                                          "evidence_rid": rid2,
                                           "sink": {"file": "app/routes/files.py", "line": 27}}, incident=inc, wait=0.8)
     p.emit(E.POC_READY, "pipeline", {"incident": inc, "reproducible": True, "runs": 3, "poc": {}}, incident=inc, wait=0.8)
     p.emit(E.RULE_ACTIVE, "gateway", {"id": "rule-trav-1", "incident": inc, "method": "GET", "route": "/api/download",
@@ -177,6 +180,7 @@ def run(p: Poster):
     p.emit(E.PR_OPENED, "pipeline", {"incident": inc, "url": gh, "branch": "run/demo/fix-trav-1"}, incident=inc, wait=0.8)
     p.emit(E.PR_MERGED, "pipeline", {"incident": inc, "url": gh, "sha": "f6e5d4c3b2a1"}, incident=inc, wait=0.6)
     p.emit(E.DEPLOY_STARTED, "fleet", {"release": "f6e5d4c3b2a1"}, wait=1.5)
+    p.emit(E.UPSTREAM_SWITCHED, "gateway", {"release": "f6e5d4c3b2a1", "addr": "prod-a:8000"})
     p.emit(E.DEPLOY_DONE, "fleet", {"release": "f6e5d4c3b2a1", "ok": True, "rolled_back": False, "detail": "healthy after 1.9s"}, wait=0.8)
     p.emit(E.VERIFY_RESULT, "pipeline", {"incident": inc, "exploit_blocked_on_prod": True}, incident=inc, wait=0.4)
     p.emit(E.RULE_EXPIRED, "gateway", {"id": "rule-trav-1", "reason": "patched"}, incident=inc)

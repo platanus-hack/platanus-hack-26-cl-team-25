@@ -158,12 +158,20 @@ class Validator:
     def recorded_requests(self, limit: int = 200) -> list:
         """Clean GET requests the gateway forwarded to prod with status 200: the most recent per path+query."""
         path = self.cfg.record_path
-        try:
-            with open(path, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                f.seek(max(0, f.tell() - 8 * 1024 * 1024))
-                lines = f.read().decode("utf-8", "replace").splitlines()
-        except OSError:
+        want, lines = 8 * 1024 * 1024, []
+        for p_ in (path, path + ".1"):       # the gateway rotates the recording; the previous file is older
+            if want <= 0:
+                break
+            try:
+                with open(p_, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - want))
+                    lines = f.read().decode("utf-8", "replace").splitlines() + lines
+                    want -= size
+            except OSError:
+                continue
+        if not lines:
             return []
         recs = []
         for line in lines:

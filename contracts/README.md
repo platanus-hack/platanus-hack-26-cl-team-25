@@ -227,7 +227,11 @@ GET  /state   {"prod":{"active":"blue","release":"t0"},"clones":[...]}
 
 Fleet reconciles continuously: every `retired` clone is destroyed and replaced. Clone containers: network `clonenet` only, read-only root, `tmpfs /data`, `--cap-drop ALL`, `--pids-limit`, memory limit, env from §3. Names and labels are prefixed `immune-` and labelled `immune.run=<RUN_ID>`; fleet never touches containers without that label.
 
+Restart, adoption of a running stack, watchdogs and the rollback criterion as built: `contracts/product.md` §11.
+
 ## 9. Pipeline contract
+
+Retries after transient failures, rule renewal and deploys across a fleet restart: `contracts/product.md` §11.
 
 Trigger: `oracle.fired` events on the bus. Per incident (dedupe key: oracle kind + route + param + sink file:line):
 

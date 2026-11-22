@@ -55,7 +55,7 @@ class Config:
     extra_pythonpath: str = ""  # extra container path appended to PYTHONPATH
     smoke_path: str = "/openapi.json"
     deploy_watch_s: float = 20.0
-    watch_poll_s: float = 1.0
+    watch_poll_s: float = 0.25
     health_timeout_s: float = 40.0
     reconcile_s: float = 1.0
     user: str = field(default_factory=lambda: f"{os.getuid()}:{os.getgid()}")
@@ -113,7 +113,7 @@ class Config:
             extra_pythonpath=e.get("EXTRA_PYTHONPATH", ""),
             smoke_path=e.get("SMOKE_PATH", app.app.health),
             deploy_watch_s=float(e.get("DEPLOY_WATCH_S", 20)),
-            watch_poll_s=float(e.get("WATCH_POLL_S", 1)),
+            watch_poll_s=float(e.get("WATCH_POLL_S", 0.25)),
             health_timeout_s=float(e.get("HEALTH_TIMEOUT_S", 40)),
             reconcile_s=float(e.get("RECONCILE_S", 1)),
         )

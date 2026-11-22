@@ -3,52 +3,95 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
 <title>Sistema inmune - en vivo</title>
+<link rel="preload" href="/static/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class="top">
-  <h1>Sistema inmune <span class="sub" id="dashboard-subtitle">la app se cura sola</span></h1>
-  <div class="conn" id="conn" data-state="off"><span class="dot"></span><span id="conn-text">conectando...</span></div>
+<header class="bar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1.8 16.6 4.3v5.1c0 4.1-2.7 7.2-6.6 8.8-3.9-1.6-6.6-4.7-6.6-8.8V4.3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 10.1 2.2 2.2L13.2 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <h1>Sistema inmune</h1>
+    <span class="sub" id="dashboard-subtitle" hidden></span>
+  </div>
+  <div class="bar-right">
+    <div class="chip" id="upstream" hidden><span class="k">Producción</span><b id="up-addr"></b><span class="k" id="up-rel"></span></div>
+    <div class="conn" id="conn" data-state="off"><span class="dot"></span><span id="conn-text">Conectando</span><span class="k" id="conn-info"></span></div>
+  </div>
 </header>
 
-<section class="score" id="score" aria-label="Marcador">
-  <div class="big open"><div class="num" id="sc-open">0</div><div class="lbl">abiertas</div></div>
-  <div class="big contained"><div class="num" id="sc-contained">0</div><div class="lbl">contenidas por regla</div></div>
-  <div class="big cured"><div class="num" id="sc-cured">0</div><div class="lbl">curadas por parche</div></div>
-  <div class="small"><div class="num" id="sc-seen">0</div><div class="lbl">vulnerabilidades vistas</div></div>
-  <div class="small"><div class="num" id="sc-audit">0</div><div class="lbl">halladas por auditoria</div></div>
-  <div class="small"><div class="num" id="sc-prod">0</div><div class="lbl">requests a prod</div></div>
-  <div class="small"><div class="num" id="sc-det">0</div><div class="lbl">requests detonadas</div></div>
-  <div class="small"><div class="num" id="sc-cap">0</div><div class="lbl">sesiones cautivas</div></div>
-  <div class="small"><div class="num" id="sc-clones">-</div><div class="lbl">clones libres / ocupados</div></div>
+<div class="page">
+<section class="flow" id="flow" aria-label="Cómo funciona, con los números de esta corrida">
+  <div class="stage">
+    <div class="st-head"><span class="n">1</span>Detecta</div>
+    <div class="metric"><span class="num" id="fl-total">0</span><span class="unit">requests</span></div>
+    <p class="fact" id="fl-detect-fact"></p>
+    <p class="how">Lo sospechoso corre en una copia sombra, no en producción.</p>
+  </div>
+  <div class="stage">
+    <div class="st-head"><span class="n">2</span>Confirma</div>
+    <div class="metric"><span class="num" id="fl-confirmed">0</span><span class="unit">vulnerabilidades confirmadas</span></div>
+    <p class="fact" id="fl-confirm-fact"></p>
+    <p class="how">Decide la ejecución, no un puntaje.</p>
+  </div>
+  <div class="stage">
+    <div class="st-head"><span class="n">3</span>Contiene</div>
+    <div class="metric"><span class="num" id="fl-rule">-</span><span class="unit">hasta la regla (mediana)</span></div>
+    <p class="fact" id="fl-contain-fact"></p>
+    <p class="how">Una regla cierra solo el punto confirmado.</p>
+  </div>
+  <div class="stage">
+    <div class="st-head"><span class="n">4</span>Cura</div>
+    <div class="metric"><span class="num" id="fl-prod">-</span><span class="unit">hasta producción (mediana)</span></div>
+    <p class="fact" id="fl-cure-fact"></p>
+    <p class="how">Un LLM propone; cinco validaciones deciden.</p>
+  </div>
 </section>
 
 <main class="cols">
-  <section class="incidents">
-    <h2>Incidentes</h2>
-    <p class="audit-line" id="audit-line"></p>
-    <p class="empty" id="inc-empty">Sin incidentes todavía.</p>
+  <section class="panel incidents">
+    <div class="panel-head">
+      <h2>Incidentes <span class="count" id="inc-count"></span></h2>
+      <div class="cols-head" aria-hidden="true"><span class="t-rule">Regla</span><span id="production-column">En producción</span><span>Estado</span></div>
+    </div>
+    <div class="empty-box" id="inc-empty">
+      <p class="empty-title">Sin incidentes todavía</p>
+      <p class="empty">Cuando un oráculo confirme un ataque, aparece acá.</p>
+    </div>
     <div id="incidents"></div>
+    <p class="empty more-line" id="inc-more" hidden></p>
   </section>
-  <aside class="side">
-    <section class="panel" id="fuxa-summary" hidden>
+  <aside class="panel side">
+    <section class="block" id="panel-prod">
+      <h2>Producción</h2>
+      <div id="prod"><p class="empty">Esperando al gateway</p></div>
+    </section>
+    <section class="block" id="panel-audits" hidden>
+      <h2>Auto-auditoría</h2>
+      <div id="audits"></div>
+    </section>
+    <section class="block" id="fuxa-summary" hidden>
       <h2>Estado de FUXA</h2>
       <p id="fuxa-revision"></p>
       <p id="fuxa-monitor"></p>
       <ul id="fuxa-coverage"></ul>
       <p id="fuxa-pending" class="empty"></p>
     </section>
-    <section class="panel" id="attack-panel">
-      <h2>Bot atacante <span class="legend"><i class="c-leak"></i>datos reales <i class="c-exec"></i>ejecuto <i class="c-blocked"></i>bloqueado</span></h2>
-      <div id="attacks"><p class="empty">Sin intentos todavia.</p></div>
+    <section class="block" id="panel-attacks" hidden>
+      <h2>Bot atacante</h2>
+      <div class="legend-row"><span><i class="c-leak"></i>Datos reales</span><span><i class="c-exec"></i>Ejecutó</span><span><i class="c-blocked"></i>Bloqueado</span></div>
+      <div id="attacks"></div>
     </section>
-    <section class="panel">
-      <h2 id="traffic-title">Tráfico <span class="legend"><i class="r-prod"></i>prod <i class="r-shadow"></i>sombra <i class="r-deny"></i>deny</span></h2>
-      <div id="ticker" class="ticker"><p class="empty">Sin trafico todavia.</p></div>
+    <section class="block">
+      <h2 id="traffic-title">Tráfico</h2>
+      <div class="legend-row" id="traffic-legend"><span><i class="r-prod"></i>Producción</span><span><i class="r-shadow"></i>Clon sombra</span><span><i class="r-deny"></i>Rechazado</span></div>
+      <div id="ticker" class="ticker"><p class="empty">Sin tráfico todavía</p></div>
     </section>
   </aside>
 </main>
+</div>
 <script src="/static/state.js"></script>
 <script src="/static/app.js"></script>
 </body>

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,10 +25,67 @@ STATIC = Path(__file__).resolve().parent / "static"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 HEARTBEAT_S = 15.0
+POLL_S = 1.0   # how often an idle stream checks for shutdown and for a client that went away
 # pipeline audit.* events (pipeline/bus.py), accepted until immune_contracts/events.py lists them
 EXTRA_TYPES = ("audit.started", "audit.finding", "audit.done")
 TYPES = frozenset(ev_contract.TYPES) | frozenset(EXTRA_TYPES)
-FILES = {"app.js": "text/javascript", "state.js": "text/javascript", "style.css": "text/css"}
+FILES = {"app.js": "text/javascript; charset=utf-8", "state.js": "text/javascript; charset=utf-8",
+         "style.css": "text/css; charset=utf-8", "inter.woff2": "font/woff2", "mono.woff2": "font/woff2"}
+# sent on every response: the page is public and read-only
+SECURITY_HEADERS = {
+    "content-security-policy": CSP, "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY", "cross-origin-resource-policy": "same-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+}
+# Readers without the bus token (the public page) never get credentials that travel inside events:
+# evidence carries the attacker's request headers verbatim, PR urls of the local repo carry a host path.
+SENSITIVE_HEADER = re.compile(r"authorization|cookie|token|secret|api[-_]?key|passw|session|credential|signature", re.I)
+REDACTED = "[redacted]"
+MAX_STREAMS = 200
+
+
+def _mask(value) -> str:
+    scheme, _, rest = str(value).partition(" ")
+    return f"{scheme} {REDACTED}" if rest and scheme.isalpha() and len(scheme) <= 12 else REDACTED
+
+
+def _public_path(url: str) -> str:
+    """file:///home/user/repo/.git/prs/20.json#pr-20 -> file:///[redacted]/20.json#pr-20"""
+    tail = url.rsplit("/", 1)[-1]
+    return f"file:///{REDACTED}/{tail}"
+
+
+def redact(v, key: str = ""):
+    """Copy of an event (or any part of it) that is safe to show to anyone."""
+    if isinstance(v, dict):
+        if key == "headers":
+            return {k: (_mask(x) if SENSITIVE_HEADER.search(str(k)) else redact(x)) for k, x in v.items()}
+        return {k: redact(x, str(k)) for k, x in v.items()}
+    if isinstance(v, list):
+        return [redact(x) for x in v]
+    if isinstance(v, str) and v.startswith("file:///"):
+        return _public_path(v)
+    return v
+
+
+class SecurityHeaders:
+    """ASGI wrapper: adds SECURITY_HEADERS to every http response."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                have = {k.lower() for k, _ in message.get("headers", [])}
+                extra = [(k.encode(), v.encode()) for k, v in SECURITY_HEADERS.items() if k.encode() not in have]
+                message = {**message, "headers": list(message.get("headers", [])) + extra}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class Bus:
@@ -36,8 +95,29 @@ class Bus:
         self.events: list[dict] = []
         self.seq = 0
         self.epoch = 0
+        self.streams = 0
+        self.closing = False                # set on shutdown: open streams end so the process can exit
+        self.redact = os.environ.get("DASH_REDACT", "1") != "0"
+        self._public: dict[int, str] = {}   # seq -> redacted json, built on first use
         self.cond = asyncio.Condition()
         self._load()
+
+    @property
+    def gen(self) -> str:
+        """Identity of the stored history: survives a restart, changes when the store is cleared or replaced.
+        A page that reconnects and sees another gen drops its state and replays from the start."""
+        if not self.events:
+            return "empty"
+        first = self.events[0]
+        return hashlib.sha256(f"{first.get('seq')}:{first.get('ts')}:{first.get('type')}".encode()).hexdigest()[:16]
+
+    def dumps(self, e: dict, raw: bool) -> str:
+        if raw or not self.redact:
+            return json.dumps(e, separators=(",", ":"))
+        s = self._public.get(e["seq"])
+        if s is None:
+            s = self._public[e["seq"]] = json.dumps(redact(e), separators=(",", ":"))
+        return s
 
     def _load(self) -> None:
         if not self.store or not self.store.exists():
@@ -51,9 +131,10 @@ class Bus:
                     e = json.loads(line)
                 except ValueError:
                     continue  # torn last line after a crash
-                if isinstance(e, dict) and isinstance(e.get("seq"), int):
+                if isinstance(e, dict) and isinstance(e.get("seq"), int) and not isinstance(e["seq"], bool):
                     self.events.append(e)
                     self.seq = max(self.seq, e["seq"])
+        self.events.sort(key=lambda e: e["seq"])
 
     def _persist(self, batch: list[dict]) -> None:
         if not self.store:
@@ -84,6 +165,7 @@ class Bus:
     async def clear(self) -> None:
         async with self.cond:
             self.events = []
+            self._public = {}
             self.epoch += 1  # seq keeps counting so Last-Event-ID stays monotonic
             if self.store:
                 self.store.parent.mkdir(parents=True, exist_ok=True)
@@ -91,9 +173,17 @@ class Bus:
             self.cond.notify_all()
 
     def after(self, since: int, type_prefix: str | None = None, limit: int | None = None) -> list[dict]:
-        out = [e for e in self.events if e["seq"] > since
-               and (not type_prefix or str(e.get("type", "")).startswith(type_prefix))]
-        return out[:limit] if limit else out
+        lo, hi = 0, len(self.events)             # events are ordered by seq
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.events[mid]["seq"] > since:
+                hi = mid
+            else:
+                lo = mid + 1
+        out = self.events[lo:]
+        if type_prefix:
+            out = [e for e in out if str(e.get("type", "")).startswith(type_prefix)]
+        return out[:limit] if limit and limit > 0 else out
 
 
 def _validate(item) -> str | None:
@@ -130,6 +220,8 @@ def _int(v, default=0) -> int:
 def create_app(store: str | None = None, token: str | None = None, *, lifespan=None) -> Starlette:
     bus = Bus(store if store is not None else os.environ.get("BUS_STORE") or None,
               token if token is not None else os.environ.get("BUS_TOKEN", ""))
+    max_streams = _int(os.environ.get("DASH_MAX_STREAMS"), MAX_STREAMS) or MAX_STREAMS
+    no_store = {"Cache-Control": "no-store"}
 
     async def post_events(request: Request):
         if not bus.authorized(request):
@@ -151,41 +243,65 @@ def create_app(store: str | None = None, token: str | None = None, *, lifespan=N
         since = _int(q.get("since"))
         limit = _int(q.get("limit")) or None
         evs = bus.after(since, q.get("type") or None, limit)
-        return JSONResponse({"events": evs, "next": evs[-1]["seq"] if evs else bus.seq})
+        raw = bus.authorized(request)
+        body = '{"events":[%s],"next":%d}' % (",".join(bus.dumps(e, raw) for e in evs), evs[-1]["seq"] if evs else bus.seq)
+        return Response(body, media_type="application/json", headers=no_store)
 
     async def stream(request: Request):
         since = _int(request.headers.get("last-event-id") or request.query_params.get("since"))
-        if since > bus.seq:
+        if since > bus.seq or since < 0:
             since = 0  # client is ahead of a store that was reset: replay everything
+        if bus.streams >= max_streams:
+            return JSONResponse({"error": "too many streams"}, status_code=503, headers={"Retry-After": "5", **no_store})
+        raw = bus.authorized(request)
+
+        def hello() -> str:
+            return "event: hello\ndata: %s\n\n" % json.dumps({"gen": bus.gen, "seq": bus.seq}, separators=(",", ":"))
 
         async def gen():
-            last = since
-            epoch = bus.epoch
-            yield "retry: 2000\n\n"
-            while True:
-                if bus.epoch != epoch:
-                    epoch = bus.epoch
-                    last = 0
-                    yield "event: reset\ndata: {}\n\n"
-                batch = bus.after(last)
-                if batch:
-                    chunks = []
-                    for e in batch:
-                        chunks.append(f"id: {e['seq']}\ndata: {json.dumps(e, separators=(',', ':'))}\n\n")
-                    last = batch[-1]["seq"]
-                    yield "".join(chunks)
-                    continue
-                if await request.is_disconnected():
-                    return
-                try:
-                    async with bus.cond:
-                        await asyncio.wait_for(
-                            bus.cond.wait_for(lambda: bus.seq > last or bus.epoch != epoch), HEARTBEAT_S)
-                except asyncio.TimeoutError:
-                    yield ": hb\n\n"
+            bus.streams += 1
+            try:
+                last = since
+                epoch = bus.epoch
+                sent_gen = bus.gen
+                idle = 0.0
+                yield "retry: 2000\n\n" + hello()
+                while True:
+                    if bus.epoch != epoch:
+                        epoch = bus.epoch
+                        last = 0
+                        yield "event: reset\ndata: {}\n\n"
+                    batch = bus.after(last)
+                    if batch:
+                        chunks = []
+                        if bus.gen != sent_gen:
+                            sent_gen = bus.gen
+                            chunks.append(hello())
+                        for e in batch:
+                            chunks.append(f"id: {e['seq']}\ndata: {bus.dumps(e, raw)}\n\n")
+                        last = batch[-1]["seq"]
+                        yield "".join(chunks)
+                        continue
+                    if bus.gen != sent_gen:
+                        sent_gen = bus.gen
+                        yield hello()
+                    if bus.closing or await request.is_disconnected():
+                        return
+                    try:
+                        async with bus.cond:
+                            await asyncio.wait_for(
+                                bus.cond.wait_for(lambda: bus.seq > last or bus.epoch != epoch), min(POLL_S, HEARTBEAT_S))
+                        idle = 0.0
+                    except asyncio.TimeoutError:
+                        idle += min(POLL_S, HEARTBEAT_S)
+                        if idle >= HEARTBEAT_S:
+                            idle = 0.0
+                            yield ": hb\nevent: hb\ndata: {}\n\n"  # comment for plain readers, event for the page watchdog
+            finally:
+                bus.streams -= 1
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={
-            "Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Content-Security-Policy": CSP})
+            "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
     async def admin_clear(request: Request):
         if not bus.authorized(request):
@@ -194,12 +310,12 @@ def create_app(store: str | None = None, token: str | None = None, *, lifespan=N
         return JSONResponse({"ok": True})
 
     async def health(request: Request):
-        return JSONResponse({"ok": True, "events": len(bus.events), "seq": bus.seq})
+        return JSONResponse({"ok": True, "events": len(bus.events), "seq": bus.seq}, headers=no_store)
 
     def _static(name: str, media: str):
         async def h(request: Request):
-            return FileResponse(STATIC / name, media_type=media,
-                                headers={"Content-Security-Policy": CSP, "Cache-Control": "no-cache"})
+            cache = "public, max-age=604800" if media.startswith("font/") else "no-cache"
+            return FileResponse(STATIC / name, media_type=media, headers={"Cache-Control": cache})
         return h
 
     routes = [
@@ -215,4 +331,5 @@ def create_app(store: str | None = None, token: str | None = None, *, lifespan=N
 
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.bus = bus
+    app.add_middleware(SecurityHeaders)
     return app
