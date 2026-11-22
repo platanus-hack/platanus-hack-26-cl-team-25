@@ -1,0 +1,242 @@
+{
+ "date": "2026-11-22",
+ "code": "main after the merge (canary deploy)",
+ "attacker": {
+  "rounds": 53,
+  "attempts": 371,
+  "attempts_with_real_data": 0
+ },
+ "legit_generator_of_this_recording": {
+  "requests": 1945,
+  "by_status": {
+   "200": 1690,
+   "201": 86,
+   "404": 134,
+   "401": 1,
+   "403": 34
+  },
+  "violations": {
+   "unexpected_status": 40
+  },
+  "server_errors": 0
+ },
+ "note": "four legit generators were running (three leaked from earlier recordings); counts above are this recording's generator only",
+ "metrics": {
+  "incidents": [
+   {
+    "incident": "inc-0001",
+    "class": "sqli",
+    "route": "/api/products",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "q",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 0.5123348236083984,
+    "to_rule": 4.516860723495483,
+    "to_diff": 13.64208436012268,
+    "to_merged": 32.07150888442993,
+    "to_prod": 42.886284589767456,
+    "to_verified": 79.43469905853271,
+    "identified_to_prod_wall": 43.398619413375854
+   },
+   {
+    "incident": "inc-0002",
+    "class": "sqli",
+    "route": "/api/login",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "POST",
+    "param": "email",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 89.48682403564453,
+    "to_rule": 2.483369827270508,
+    "to_diff": 10.874500751495361,
+    "to_merged": 42.89604735374451,
+    "to_prod": 60.26389217376709,
+    "to_verified": 90.26859712600708,
+    "identified_to_prod_wall": 149.75071620941162
+   },
+   {
+    "incident": "inc-0003",
+    "class": "traversal",
+    "route": "/api/files/download",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "name",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 192.155415058136,
+    "to_rule": 4.898730993270874,
+    "to_diff": 14.306175708770752,
+    "to_merged": 52.18424201011658,
+    "to_prod": 65.95524287223816,
+    "to_verified": 95.22805881500244,
+    "identified_to_prod_wall": 258.11065793037415
+   },
+   {
+    "incident": "inc-0004",
+    "class": "traversal",
+    "route": "/api/products/{product_id}/image",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "file",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 300.12206864356995,
+    "to_rule": 4.167555093765259,
+    "to_diff": 13.322857856750488,
+    "to_merged": 40.31155276298523,
+    "to_prod": 54.35174775123596,
+    "to_verified": 83.76081967353821,
+    "identified_to_prod_wall": 354.4738163948059
+   },
+   {
+    "incident": "inc-0005",
+    "class": "idor",
+    "route": "/api/orders/{order_id}",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "order_id",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 390.77404952049255,
+    "to_rule": 4.499830007553101,
+    "to_diff": 13.922399997711182,
+    "to_merged": 31.68442130088806,
+    "to_prod": 43.019875288009644,
+    "to_verified": 64.44053244590759,
+    "identified_to_prod_wall": 433.7939248085022
+   },
+   {
+    "incident": "inc-0006",
+    "class": "idor",
+    "route": "/api/orders/{order_id}/invoice",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "order_id",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 456.50700330734253,
+    "to_rule": 4.748368501663208,
+    "to_diff": 14.742074489593506,
+    "to_merged": 36.527254819869995,
+    "to_prod": 53.15832281112671,
+    "to_verified": 81.97501540184021,
+    "identified_to_prod_wall": 509.66532611846924
+   },
+   {
+    "incident": "inc-0007",
+    "class": "idor",
+    "route": "/api/users/{user_id}/profile",
+    "outcome": "patched",
+    "origin": "live",
+    "parent": null,
+    "method": "GET",
+    "param": "user_id",
+    "attempts": 1,
+    "source": "llm",
+    "blocked": true,
+    "runs": 1,
+    "queue": 544.8476040363312,
+    "to_rule": 5.0797412395477295,
+    "to_diff": 17.0804123878479,
+    "to_merged": 35.897709131240845,
+    "to_prod": 46.2600622177124,
+    "to_verified": 76.22238945960999,
+    "identified_to_prod_wall": 591.1076662540436
+   }
+  ],
+  "summary": {
+   "patched": 7,
+   "not_patched": 0,
+   "queue": {
+    "n": 7,
+    "median": 300.12206864356995,
+    "min": 0.5123348236083984,
+    "max": 544.8476040363312,
+    "mean": 282.05789991787503
+   },
+   "to_rule": {
+    "n": 7,
+    "median": 4.516860723495483,
+    "min": 2.483369827270508,
+    "max": 5.0797412395477295,
+    "mean": 4.34206519808088
+   },
+   "to_diff": {
+    "n": 7,
+    "median": 13.922399997711182,
+    "min": 10.874500751495361,
+    "max": 17.0804123878479,
+    "mean": 13.984357936041695
+   },
+   "to_merged": {
+    "n": 7,
+    "median": 36.527254819869995,
+    "min": 31.68442130088806,
+    "max": 52.18424201011658,
+    "mean": 38.796105180467876
+   },
+   "to_prod": {
+    "n": 7,
+    "median": 53.15832281112671,
+    "min": 42.886284589767456,
+    "max": 65.95524287223816,
+    "mean": 52.27077538626535
+   },
+   "to_verified": {
+    "n": 7,
+    "median": 81.97501540184021,
+    "min": 64.44053244590759,
+    "max": 95.22805881500244,
+    "mean": 81.6185874257769
+   }
+  },
+  "detection": {
+   "requests": 8493,
+   "detonated": 1307,
+   "detonated_by_verdict": {
+    "clean": 517,
+    "oracle": 203,
+    "inconclusive": 587
+   },
+   "clean_share": 0.396,
+   "no_clone": 137,
+   "aftercheck_oracle": 0,
+   "incidents_by_origin": {
+    "live": 7
+   },
+   "audits": {
+    "n": 7,
+    "checked": 34,
+    "findings": 0,
+    "seconds": 61.4
+   }
+  }
+ }
+}

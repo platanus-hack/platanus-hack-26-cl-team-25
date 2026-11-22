@@ -205,7 +205,7 @@ la suite de la sección 2.
 | Nivel | Con datos: `docs/demo/corrida-2026-11-22.json` (salida de `immune.metrics` y conteos de la grabación del gateway) y `docs/demo/corrida-2026-11-22-atacante.log` |
 | Fecha | 2026-11-22, después de las correcciones de la auditoría |
 | Máquina | La del demo (ARM64, 4 núcleos, compartida) |
-| Método | `deploy/record_demo.sh`: `immune reset`, tráfico legítimo a 3 requests por segundo (`sim.legit`) y el atacante de demostración (`sim.attacker`) hasta que los siete exploits quedaron bloqueados dos rondas seguidas |
+| Método | `deploy/record_demo.sh`: `immune reset`, tráfico legítimo (`sim.legit`) y el atacante de demostración (`sim.attacker`) hasta que los siete exploits quedaron bloqueados dos rondas seguidas. Corrieron tres generadores de tráfico legítimo de 3 requests por segundo cada uno, no uno: dos quedaron vivos de grabaciones anteriores por un error del script, corregido después |
 | Muestra | n = 7 incidentes, una sola corrida |
 
 Resultado: **7 de 7 incidentes parchados y verificados**, los 7 con `source: llm` y en el primer intento. El
@@ -235,6 +235,12 @@ Cómo leerlo:
 - Los tiempos son más altos que los de la sección 1 porque la máquina atendía también al atacante, al tráfico
   legítimo y a la grabación del video. No son comparables uno a uno.
 - Una sola corrida: no hay dispersión entre corridas.
+
+Repetición sobre `main` después del merge del 2026-11-22 (con el canario de despliegue de `fleet/manager.py`), mismo
+método, cuatro generadores de tráfico legítimo por el mismo error: 7 de 7 parchados y verificados; medianas de
+4.5 s hasta la regla, 53.2 s hasta producción y 82.0 s hasta la verificación; el atacante hizo 53 rondas (371
+intentos) y ninguno obtuvo datos de producción; el generador de esa grabación contó 40 respuestas 404 inesperadas
+sobre 1945 requests, por la misma causa. Datos: `docs/demo/corrida-2026-11-22-main.json`.
 
 ## 7. Lo que no se midió
 
