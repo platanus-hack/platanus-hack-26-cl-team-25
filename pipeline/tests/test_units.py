@@ -144,7 +144,11 @@ def test_rules_validate_and_fallback(events, spec):
                               "param": {"in": "query", "name": "q"}, "grammar": "[a-z]{0,10}", "ttl_s": 60}, inc, spec, 600)
     assert not note and r["incident"] == "inc-9"
     r, note = rules.finalize({"route": "/other"}, inc, spec, 600)
-    assert note and r["route"] == "/api/products" and r["scope"] == "param"
+    assert note and r["route"] == "/api/products" and r["scope"] == "param_present"
+    assert r["param"] == {"in": "query", "name": "q"} and r["ttl_s"] == 600
+    poc.validate(r, "rule.schema.json")
+    r, _ = rules.finalize(None, inc, spec, None)     # no ttl configured: the rule lives until the patch
+    assert r["ttl_s"] is None
     poc.validate(r, "rule.schema.json")
     i = incident.build(events["idor"], spec)
     i["incident"] = "inc-10"

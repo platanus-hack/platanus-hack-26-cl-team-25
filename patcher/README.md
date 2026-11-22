@@ -93,13 +93,13 @@ blocks the captured value still fires ≥5. The root-cause fallback fires 0 (`te
 
 ## derive_rule
 
-- sqli or traversal with a parameter → `scope: "param"`. Traversal uses `[A-Za-z0-9 _.,@:+\-]{0,N}`
-  (the `SAFE_DEFAULT` set). sqli uses the same set plus one apostrophe between two letters
-  (`O'Brien`, `o'neil@…`) and never `--`. N is the OpenAPI `maxLength` (≤128). The captured value
-  is checked not to match.
-- idor/other, no parameter, an `x-sensitive` parameter, or a captured value that would match
-  `SAFE_DEFAULT` → `scope: "all"`, `grammar: null`.
-- `id: rule-<incident>`, `ttl_s: 3600`.
+- sqli or traversal with a parameter → `scope: "param_present"`: every request carrying the parameter is
+  detonated, whatever its value. The grammar only decides an inconclusive clone (outside it → deny).
+  Traversal uses `[A-Za-z0-9 _.,@:+\-]{0,N}` (the `SAFE_DEFAULT` set). sqli uses the same set plus one
+  apostrophe between two letters (`O'Brien`, `o'neil@…`) and never `--`. N is the OpenAPI `maxLength` (≤128).
+- idor/other, no parameter, an `x-sensitive` parameter, or a location the gateway cannot address
+  (cookie, raw body) → `scope: "all"`, `grammar: null`.
+- `id: rule-<incident>`, `ttl_s: null` (no expiry: the rule lives until the patch is verified).
 
 ## Env
 

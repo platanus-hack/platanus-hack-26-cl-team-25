@@ -140,7 +140,7 @@
     if (inc.rule) {
       var sr = section('3. Regla activa', inc.rule.ts, prev);
       var r = inc.rule.rule || {};
-      sr.appendChild(el('div', 'kv', (r.method || '') + ' ' + (r.route || '') + '  alcance: ' + (r.scope || '?') + '  ttl: ' + (r.ttl_s || '?') + ' s'));
+      sr.appendChild(el('div', 'kv', (r.method || '') + ' ' + (r.route || '') + '  alcance: ' + (r.scope || '?') + '  vigencia: ' + (r.ttl_s ? r.ttl_s + ' s' : 'hasta el parche')));
       if (r.grammar) sr.appendChild(el('div', 'kv', 'gramatica: ' + clip(r.grammar, 200)));
       if (inc.ruleExpired) sr.appendChild(el('div', 'kv', 'expirada ' + hms(inc.ruleExpired.ts) + ' (' + (inc.ruleExpired.reason || '') + ')'));
       card.appendChild(sr);

@@ -73,6 +73,7 @@ class Config:
     openapi_path: str = ""
     manifest_path: str = ""
     record_path: str = ""
+    rules_path: str = ""             # active rules, rewritten on every change and reloaded at start
     captive_ttl_s: float = 900.0
     mode: str = "enforce"            # enforce | observe | passthrough (initial; POST /_admin/mode changes it)
     aftercheck: bool = False         # replay clean requests in a clone after prod has answered (enforce mode only)
@@ -86,6 +87,9 @@ class Config:
         except ValueError:
             auth = {"kind": "immune-token"}
         mode = g("GW_MODE", "enforce")
+        record = g("RECORD_PATH", "")
+        # next to the recordings by default: same writable volume, wiped by `immune reset` like the rest of the run
+        rules_path = g("RULES_PATH", "") or (os.path.join(os.path.dirname(record), "rules.json") if record else "")
         return cls(mode=mode if mode in MODES else "enforce", auth=auth,
                    aftercheck=g("GW_AFTERCHECK", "").strip().lower() in ("1", "true", "yes", "on"),
                    prod_secret=prod_secret_for(auth, env), shadow_secret=g("SHADOW_APP_SECRET", ""),
@@ -94,7 +98,7 @@ class Config:
                    prod_addr=g("PROD_ADDR", "127.0.0.1:8000"), prod_release=g("PROD_RELEASE", ""),
                    admin_token=g("ADMIN_TOKEN", ""), bus_url=g("BUS_URL", ""), bus_token=g("BUS_TOKEN", ""),
                    run_id=g("RUN_ID", ""), openapi_path=g("OPENAPI_PATH", ""), manifest_path=g("MANIFEST_PATH", ""),
-                   record_path=g("RECORD_PATH", ""), captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
+                   record_path=record, rules_path=rules_path, captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
 
 
 @dataclass
@@ -157,6 +161,7 @@ class Gateway:
         self.bus = Bus(cfg.bus_url, cfg.bus_token, cfg.run_id)
         self.pool = Pool(idle_ttl_s=cfg.captive_ttl_s, on_release=self._on_release)
         self.rules: dict[str, Rule] = {}
+        self.load_rules()
         self.enum = EnumTracker()
         self.mode = cfg.mode if cfg.mode in MODES else "enforce"
         self.auth = Authenticator(cfg.auth, cfg.prod_secret, cfg.shadow_secret)
@@ -242,10 +247,58 @@ class Gateway:
 
     def expire_rules(self):
         now = time.time()
-        for rid, r in list(self.rules.items()):
-            if r.expires <= now:
-                del self.rules[rid]
-                self.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "ttl"})
+        gone = [rid for rid, r in self.rules.items() if r.expires <= now]
+        for rid in gone:
+            del self.rules[rid]
+            self.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "ttl"})
+        if gone:
+            self.save_rules()
+
+    def load_rules(self):
+        """Rules survive a gateway restart: a confirmed-vulnerable point stays covered until its patch is live."""
+        path = self.cfg.rules_path
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                items = json.load(f).get("rules") or []
+        except Exception as e:
+            log.warning("rules file %s unreadable (%s): starting with no rules", path, e)
+            return
+        now = time.time()
+        for item in items:
+            try:
+                rule = Rule(item["rule"], now=now, expires=item.get("expires"))
+            except Exception as e:
+                log.warning("stored rule skipped: %s", e)
+                continue
+            if rule.expires > now:
+                self.rules[rule.id] = rule
+        log.info("loaded %d rule(s) from %s", len(self.rules), path)
+
+    def save_rules(self):
+        path = self.cfg.rules_path
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = "%s.%d.tmp" % (path, os.getpid())
+            with open(tmp, "w") as f:
+                json.dump({"rules": [r.to_store() for r in self.rules.values()]}, f)
+            os.replace(tmp, path)
+        except Exception as e:   # the rule is active in memory; only persistence failed
+            log.warning("rules file %s not written: %s", path, e)
+
+    def _rule_count(self, ctx: "Ctx", key: str):
+        for rid in ctx.res.rule_hit:
+            rule = self.rules.get(rid)
+            if rule is not None:
+                rule.stats[key] += 1
+
+    def _rule_deny(self, ctx: "Ctx") -> "Upstream":
+        """A deny with no oracle fired: counted per rule so a rule that hurts legitimate traffic shows up."""
+        self._rule_count(ctx, "denied")
+        return self.deny(ctx)
 
     # ---------------------------------------------------------- identity
     def identify(self, hmap: dict) -> Who:
@@ -432,7 +485,7 @@ class Gateway:
                     elif up.verdict == wire.VERDICT_CLEAN:
                         ctx.would = "prod"
                     else:
-                        ctx.would = "deny" if ctx.res.rule_hit else "prod"
+                        ctx.would = "deny" if ctx.res.rule_strict else "prod"
                     if ctx.res.cls == EVIDENCE:
                         ctx.would = "shadow_l2"
                 except Exception as e:
@@ -509,11 +562,12 @@ class Gateway:
     async def detonate(self, ctx: Ctx) -> Upstream:
         builtin = is_builtin_rule(ctx.res.reasons)
         fail_closed = bool(ctx.res.rule_hit) or builtin or _high_signal(ctx.res.reasons)
+        self._rule_count(ctx, "hits")
         clone = await self.pool.acquire(CLONE_WAIT_S)
         if clone is None:
             await self._evict_oldest(ctx)
             ctx.verdict = "no_clone"
-            return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
+            return self._rule_deny(ctx) if fail_closed else await self.to_prod(ctx)
         try:
             async with clone.lock:
                 up = await self.to_clone(ctx, clone, "L1")
@@ -521,11 +575,12 @@ class Gateway:
             log.warning("clone %s failed: %s", clone.id, e)
             await self.pool.retire(clone)
             ctx.verdict = "no_clone"
-            return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
+            return self._rule_deny(ctx) if fail_closed else await self.to_prod(ctx)
         ctx.verdict = up.verdict
         # L1: the wrapper already reset the clone, whatever the verdict
         await self.pool.release(clone)
         if up.verdict == wire.VERDICT_ORACLE:
+            self._rule_count(ctx, "oracle")
             if ctx.who.trusted:
                 return self.deny(ctx)
             self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
@@ -535,7 +590,10 @@ class Gateway:
             return self.deny(ctx)
         if up.verdict == wire.VERDICT_CLEAN:
             return await self.to_prod(ctx)
-        return self.deny(ctx) if ctx.res.rule_hit else await self.to_prod(ctx)   # inconclusive / unknown
+        # inconclusive / unknown (401, 404, >= 500 with no oracle). A rule denies it unless it is a
+        # `param_present` rule and the value is inside its grammar: a clone holds synthetic credentials, so a
+        # real user's login is always a 401 there, and denying that would take the endpoint down.
+        return self._rule_deny(ctx) if ctx.res.rule_strict else await self.to_prod(ctx)
 
     # -- step 8, evidence without detonation: mark captive, bind now, replay in L2
     async def evidence(self, ctx: Ctx) -> Upstream:
@@ -730,6 +788,7 @@ class Gateway:
         for rid in list(self.rules):
             self.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "reset"})
         self.rules.clear()
+        self.save_rules()
         self.enum.clear()
         self.prodlog.clear()
         self.rid_ctx.clear()
@@ -790,6 +849,7 @@ class Gateway:
             for rule in created:
                 gw.rules[rule.id] = rule
                 gw.bus.publish(events.RULE_ACTIVE, rule.to_dict(), incident=rule.raw.get("incident"))
+            gw.save_rules()
             out = [r.to_dict() for r in created]
             return JSONResponse(out[0] if not isinstance(d, list) else out, status_code=201)
 
@@ -798,6 +858,7 @@ class Gateway:
             rid = request.path_params["rid"]
             if gw.rules.pop(rid, None) is None:
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
+            gw.save_rules()
             gw.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "deleted"})
             return JSONResponse({"ok": True, "id": rid})
 

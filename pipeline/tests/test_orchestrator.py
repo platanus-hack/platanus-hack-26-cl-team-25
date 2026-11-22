@@ -200,7 +200,7 @@ def test_failure_closes_rule_only_and_loop_continues(env, events):
     env["fleet"].srv.stop()                          # fleet down too
     p.step()
     assert p.state.incident(a)["outcome"] == "rule_only"
-    assert p.state.incident(a)["rule"]["scope"] == "param"   # built-in rule after derive_rule failed
+    assert p.state.incident(a)["rule"]["scope"] == "param_present"   # built-in rule after derive_rule failed
     p.step()
     assert p.state.incident(b)["status"] == "closed"
 

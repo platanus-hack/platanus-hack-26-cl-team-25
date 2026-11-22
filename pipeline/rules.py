@@ -17,13 +17,18 @@ def _param_schema(spec: dict, method: str, route: str, param: dict) -> dict:
     return {}
 
 
-def default_rule(inc: dict, spec: dict, ttl_s: int = 3600) -> dict:
-    """Containment for a confirmed-vulnerable point. IDOR (values are well-formed ids) -> scope all."""
+def default_rule(inc: dict, spec: dict, ttl_s: int | None = None) -> dict:
+    """Containment for a confirmed-vulnerable point: detonate every request that carries the parameter
+    (the grammar only decides an inconclusive clone). IDOR or no addressable parameter -> the whole route.
+    ttl_s None: the rule lives until the patch is verified."""
     param = inc.get("param")
     rule = {"id": "rule-%s" % inc["incident"], "incident": inc["incident"], "method": inc["method"],
-            "route": inc["route"], "ttl_s": int(ttl_s)}
+            "route": inc["route"], "ttl_s": int(ttl_s) if ttl_s else None}
     if inc.get("vuln_class") == "idor" or not param or param.get("in") not in RULE_PARAM_IN:
         rule.update(scope="all", param=None, grammar=None)
+        # missing-authentication (CWE-306): contain anonymous callers only, so authenticated traffic is untouched.
+        if inc.get("anon"):
+            rule["identity"] = "untrusted"
         return rule
     sch = _param_schema(spec, inc["method"], inc["route"], param)
     g = grammar.SAFE_DEFAULT
@@ -31,11 +36,11 @@ def default_rule(inc: dict, spec: dict, ttl_s: int = 3600) -> dict:
         g = grammar.PATH_SAFE
     elif sch.get("type") == "integer":
         g = r"[0-9]{1,9}"
-    rule.update(scope="param", param={"in": param["in"], "name": param["name"]}, grammar=g)
+    rule.update(scope="param_present", param={"in": param["in"], "name": param["name"]}, grammar=g)
     return rule
 
 
-def finalize(rule: dict, inc: dict, spec: dict, ttl_s: int) -> tuple:
+def finalize(rule: dict, inc: dict, spec: dict, ttl_s: int | None) -> tuple:
     """-> (rule, note). Forces id/incident, validates against rule.schema.json, falls back if invalid."""
     note = ""
     try:
@@ -44,10 +49,14 @@ def finalize(rule: dict, inc: dict, spec: dict, ttl_s: int) -> tuple:
         rule = dict(rule)
         rule.setdefault("id", "rule-%s" % inc["incident"])
         rule["incident"] = inc["incident"]
-        rule.setdefault("ttl_s", int(ttl_s))
+        rule.setdefault("ttl_s", int(ttl_s) if ttl_s else None)
         if rule.get("route") != inc["route"] or str(rule.get("method", "")).upper() != inc["method"]:
             raise ValueError("rule targets %s %s, incident is %s %s" % (rule.get("method"), rule.get("route"),
                                                                         inc["method"], inc["route"]))
+        # missing-authentication (CWE-306): a whole-route rule should contain anonymous callers only, so
+        # authenticated traffic to a legitimately public-but-must-authenticate endpoint keeps flowing.
+        if inc.get("anon") and rule.get("scope") == "all" and not rule.get("identity"):
+            rule["identity"] = "untrusted"
         pocmod.validate(rule, "rule.schema.json")
         if rule.get("grammar"):
             import re
