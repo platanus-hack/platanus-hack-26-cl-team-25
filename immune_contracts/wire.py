@@ -39,8 +39,9 @@ ORACLE_SSTI = "ssti"          # a template expression of the request was evaluat
 ORACLE_DESER = "deser"        # a process/connection/file effect while the request carried a serialized object
 ORACLE_XXE = "xxe"            # an XML external entity of the request body was fetched (file or connection)
 ORACLE_REDIRECT = "redirect"  # a 3xx to another host that the request itself named
+ORACLE_XSS = "xss"            # an input with markup is reflected unescaped in an HTML response (stored or same-request)
 ORACLES = (ORACLE_SQL, ORACLE_FILE, ORACLE_PROC, ORACLE_NET, ORACLE_OWNER,
-           ORACLE_SSRF, ORACLE_CMDI, ORACLE_SSTI, ORACLE_DESER, ORACLE_XXE, ORACLE_REDIRECT)
+           ORACLE_SSRF, ORACLE_CMDI, ORACLE_SSTI, ORACLE_DESER, ORACLE_XXE, ORACLE_REDIRECT, ORACLE_XSS)
 
 # Clone evidence push: POST http://<COLLECTOR_URL>/_clone/evidence  (JSON body, see contracts/schemas/evidence.schema.json)
 H_CLONE_ID = "x-imm-clone"
