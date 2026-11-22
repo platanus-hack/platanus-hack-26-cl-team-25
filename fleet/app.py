@@ -20,9 +20,13 @@ class DeployBody(BaseModel):
 
 
 def create_app(cfg: Config | None = None, fleet: Fleet | None = None) -> FastAPI:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    for noisy in ("httpx", "httpcore", "urllib3"):     # one line per reconcile pass would bury what matters
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = cfg or Config.from_env()
-    fleet = fleet or Fleet(cfg)
+    if fleet is None:
+        from .generic import make_fleet   # app.runtime generic -> GenericFleet (fleet/generic.py)
+        fleet = make_fleet(cfg)
     app = FastAPI(title="fleet")
     app.state.fleet = fleet
 

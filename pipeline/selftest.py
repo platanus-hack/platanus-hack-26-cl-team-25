@@ -29,7 +29,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qsl
 
-from . import fixes, incident as incmod, openapi, poc as pocmod, reqs
+from . import diffs, fixes, incident as incmod, openapi, poc as pocmod, reqs
 from .config import Config
 from .gates import GATES, Validator
 
@@ -39,12 +39,11 @@ CLASS_NAMES = {"sql injection": "sqli", "path traversal": "traversal", "idor": "
 
 
 def t0_release(cfg: Config) -> tuple:
+    app = cfg.project
     rel = os.environ.get("SELFTEST_RELEASE") or cfg.release_dir("t0")
-    if os.path.isdir(os.path.join(rel, "victim")):
+    if app.release_complete(rel):
         return rel, None
-    tmp = tempfile.mkdtemp(prefix="selftest-t0-")
-    shutil.copytree(os.path.join(cfg.repo_dir, "victim"), os.path.join(tmp, "victim"),
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    tmp = diffs.copy_release(app.project_dir, None, app.app.release_paths)
     return tmp, tmp
 
 
@@ -100,7 +99,7 @@ def main(argv=None) -> int:
 
     # 1. incidents from the documented exploits, detonated in the harness
     manifest = v.manifest(base_dir)
-    vulns = parse_vulns(os.path.join(base_dir, "victim", "VULNS.md"), manifest)
+    vulns = parse_vulns(os.path.join(base_dir, cfg.project.app.release_paths[0], "VULNS.md"), manifest)
     seqs = [{"name": "vuln%d" % x["n"], "requests": [x["request"]], "with_evidence": True} for x in vulns]
     res = v.run(base_dir, {"kind": "harness", "sequences": seqs})
     incidents = {}

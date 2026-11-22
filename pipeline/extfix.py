@@ -33,8 +33,8 @@ import httpx
 import yaml
 
 from patcher import claude_cli
-from sidecar.core import find_markers, oracle_events
-from sidecar.syscalls import Policy, SyncTracer, tracer_cmd
+from sidecar.marker.core import find_markers, oracle_events
+from sidecar.marker.syscalls import Policy, SyncTracer, tracer_cmd
 
 from . import poc as pocmod
 from .config import REPO_ROOT

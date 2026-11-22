@@ -4,8 +4,8 @@ import httpx
 
 from immune_contracts import events as E
 from immune_contracts import wire
-from sidecar.prodwatch import PROGRAM, Watch, candidates, tracer_cmd
-from sidecar.syscalls import Policy
+from sidecar.marker.prodwatch import PROGRAM, Watch, candidates, tracer_cmd
+from sidecar.marker.syscalls import Policy
 
 POLICY = Policy(["/etc/grafana/grafana.ini", "/etc/shadow"], [], ["*:53"])
 OPEN = 'openat(AT_FDCWD, "/etc/grafana/grafana.ini", X <unfinished ...>'
@@ -40,7 +40,7 @@ def make(tmp_path, verdicts):
 
 
 def test_alert_replays_candidates_and_publishes(tmp_path, monkeypatch):
-    monkeypatch.setattr("sidecar.prodwatch.time.sleep", lambda s: None)
+    monkeypatch.setattr("sidecar.marker.prodwatch.time.sleep", lambda s: None)
     w, path, sent, bus = make(tmp_path, {"/evil": "oracle"})
     path.write_text("\n".join(json.dumps(r) for r in [rec("/api/health", 5000.05), rec("/evil", 5000.1)]) + "\n")
     a = w.observe("prod-blue", started=1000.0, line=OPEN, now=5000.0)
@@ -53,7 +53,7 @@ def test_alert_replays_candidates_and_publishes(tmp_path, monkeypatch):
 
 
 def test_startup_is_learnt_cooldown_and_bypass(tmp_path, monkeypatch):
-    monkeypatch.setattr("sidecar.prodwatch.time.sleep", lambda s: None)
+    monkeypatch.setattr("sidecar.marker.prodwatch.time.sleep", lambda s: None)
     w, path, sent, bus = make(tmp_path, {})
     assert w.observe("prod-green", started=1000.0, line=OPEN, now=1005.0) is None      # start-up: reads its config
     assert w.observe("prod-green", started=1000.0, line=OPEN, now=2000.0) is None      # learnt as normal

@@ -21,6 +21,8 @@ from starlette.routing import Route
 
 from immune_contracts import events as E
 
+from .bus import TYPES as BUS_TYPES
+
 
 def free_port() -> int:
     s = socket.socket()
@@ -69,7 +71,7 @@ class FakeBus:
         body = json.loads(await request.body())
         items = body if isinstance(body, list) else [body]
         for it in items:
-            if it.get("type") not in E.TYPES:
+            if it.get("type") not in BUS_TYPES:
                 return JSONResponse({"error": "unknown type"}, 400)
         return JSONResponse({"ok": True, "seqs": [self.add(it) for it in items]})
 
@@ -194,7 +196,8 @@ class FakeFleet:
             return JSONResponse({"detail": "forbidden"}, 403)
         rel = json.loads(await request.body())["release"]
         self.deploys.append(rel)
-        if not os.path.isdir(os.path.join(self.runtime, "releases", rel, "victim")):
+        from immune import config as icfg
+        if not icfg.current().release_complete(os.path.join(self.runtime, "releases", rel)):
             return JSONResponse({"detail": "unknown release"}, 404)
         self.bus.add(E.make(E.DEPLOY_STARTED, "fleet", {"release": rel}))
         if self.outcome == "rollback":

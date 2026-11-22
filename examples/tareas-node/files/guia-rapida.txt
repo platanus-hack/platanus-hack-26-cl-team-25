@@ -1,0 +1,7 @@
+Guía rápida de Tareas
+=====================
+
+1. Crea una cuenta con tu email.
+2. Agrega tareas con fecha de vencimiento.
+3. Usa la búsqueda para encontrar tareas por título o notas.
+4. Exporta una tarea a Markdown para compartirla.

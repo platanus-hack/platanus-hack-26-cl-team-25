@@ -1,0 +1,51 @@
+<svg width="1040" height="625" viewBox="0 0 1040 625" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="plant-title">
+  <title id="plant-title">Estación Delta, tratamiento de agua simulado</title>
+  <rect width="1040" height="625" fill="#eef2f2"/>
+  <g font-family="Barlow, Segoe UI, sans-serif" fill="#132c35">
+    <rect width="1040" height="110" fill="#18343e"/>
+    <text x="34" y="51" font-size="31" font-weight="650" fill="#ffffff">Estación Delta</text>
+    <text x="35" y="80" font-size="15" fill="#cee0e3">Tratamiento de agua · Línea de trasiego A</text>
+    <text x="1005" y="51" text-anchor="end" font-size="15" font-weight="600" fill="#cee0e3">Simulación de proceso</text>
+    <rect x="34" y="139" width="662" height="362" rx="4" fill="#ffffff" stroke="#b8c8cc"/>
+    <rect x="717" y="139" width="289" height="362" rx="4" fill="#ffffff" stroke="#b8c8cc"/>
+    <text x="56" y="174" font-size="19" font-weight="650">Diagrama del proceso</text>
+    <text x="739" y="174" font-size="19" font-weight="650">Mediciones en vivo</text>
+    <g fill="none" stroke="#48757e" stroke-width="7" stroke-linejoin="round">
+      <path d="M74 293h96v-41h49"/>
+      <path d="M340 365h87"/>
+      <path d="M493 365h114v-50h61"/>
+    </g>
+    <g fill="#48757e">
+      <path d="m214 243 13 9-13 9z"/>
+      <path d="m663 306 13 9-13 9z"/>
+    </g>
+    <path d="M221 244c0-15 121-15 121 0v136c0 17-121 17-121 0z" fill="#ffffff" stroke="#244955" stroke-width="2"/>
+    <path d="M222 323c29 7 90 7 119 0v55c0 17-119 17-119 0z" fill="#aed6d5"/>
+    <ellipse cx="281.5" cy="244" rx="60.5" ry="12" fill="none" stroke="#244955" stroke-width="2"/>
+    <circle cx="460" cy="365" r="33" fill="#edf5f4" stroke="#244955" stroke-width="2"/>
+    <path d="m451 352 24 13-24 13z" fill="#356a70"/>
+    <g font-size="13" font-weight="600">
+      <text x="74" y="268">Entrada</text>
+      <text x="225" y="421">TK-101 · Tanque</text>
+      <text x="422" y="421">P-101 · Bomba</text>
+      <text x="666" y="291" text-anchor="end">Descarga</text>
+    </g>
+    <g fill="#395963" font-size="14">
+      <text x="739" y="216">Nivel del tanque</text>
+      <text x="739" y="284">Temperatura</text>
+      <text x="739" y="352">Caudal de salida</text>
+      <text x="739" y="420">Estado de bomba</text>
+    </g>
+    <g stroke="#d9e3e4">
+      <path d="M739 260h245M739 328h245M739 396h245"/>
+    </g>
+    {{level}}
+    {{temperature}}
+    {{flow}}
+    {{pump}}
+    <rect x="34" y="521" width="972" height="70" rx="4" fill="#ffffff" stroke="#b8c8cc"/>
+    <text x="56" y="552" font-size="16" font-weight="650">Alarma de nivel alto</text>
+    <text x="56" y="575" font-size="13" fill="#395963">TK-101 · Umbral 85 %</text>
+    {{alarm}}
+  </g>
+</svg>

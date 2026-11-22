@@ -1,0 +1,494 @@
+<title>Sistema Inmunológico Autónomo</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: una columna de "láminas" apiladas; el diagrama de flujo es la pieza central y el resto queda quieto alrededor. */
+:root{
+  --bg:#F2F6F7; --surface:#FFFFFF; --sunk:#E6EDEF; --fg:#0E2230; --muted:#516672; --line:#B9C8CE;
+  --accent:#0A7486; --accent-soft:#D5EDF1;
+  --danger:#B93A26; --danger-soft:#F8DED8;
+  --ok:#23734A; --ok-soft:#D8EFE2;
+  --warn:#96650F; --warn-soft:#F6E7C6;
+  --display:"Sora","Segoe UI",system-ui,sans-serif;
+  --body:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0A1920; --surface:#11252E; --sunk:#0E1F27; --fg:#E2EEF1; --muted:#93A9B3; --line:#35505B;
+    --accent:#56C5D4; --accent-soft:#143A44;
+    --danger:#F07A63; --danger-soft:#43201A;
+    --ok:#62CC90; --ok-soft:#173A29;
+    --warn:#E5B454; --warn-soft:#3D3013;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0A1920; --surface:#11252E; --sunk:#0E1F27; --fg:#E2EEF1; --muted:#93A9B3; --line:#35505B;
+  --accent:#56C5D4; --accent-soft:#143A44;
+  --danger:#F07A63; --danger-soft:#43201A;
+  --ok:#62CC90; --ok-soft:#173A29;
+  --warn:#E5B454; --warn-soft:#3D3013;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:17px;line-height:1.55}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(2rem,5vw,3.4rem);font-weight:700;letter-spacing:-.02em}
+h2{font-size:clamp(1.5rem,3.2vw,2.2rem);font-weight:600;letter-spacing:-.01em}
+h3{font-size:1.05rem;font-weight:600}
+p{margin:0;max-width:65ch}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:9;background:var(--bg);border-bottom:1px solid var(--line)}
+.top .in{display:flex;gap:8px 20px;align-items:center;flex-wrap:wrap;padding-block:10px}
+.brand{font-family:var(--display);font-weight:600;font-size:.95rem;margin-right:auto}
+.top nav{display:flex;gap:4px;flex-wrap:wrap}
+.top nav a{font-size:.85rem;text-decoration:none;color:var(--muted);padding:5px 10px;border-radius:999px}
+.top nav a[aria-current="true"]{background:var(--accent-soft);color:var(--fg)}
+.in{max-width:1140px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+
+section{padding-block:56px;border-bottom:1px solid var(--line);scroll-margin-top:56px}
+section>.in{display:flex;flex-direction:column;gap:28px}
+.eyebrow{font-family:var(--mono);font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.lead{font-size:1.2rem;color:var(--muted)}
+.head{display:flex;flex-direction:column;gap:12px}
+
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0;border-top:1px solid var(--line)}
+.fact{padding:20px 20px 20px 0;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fact .n{font-family:var(--display);font-size:2.4rem;font-weight:700;line-height:1;color:var(--danger)}
+.fact .s{font-size:.8rem;color:var(--muted)}
+
+.chain{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:var(--mono);font-size:.9rem}
+.chain span{padding:8px 12px;background:var(--surface);border:1px solid var(--line);border-radius:6px}
+.chain span.bad{background:var(--danger-soft);border-color:var(--danger)}
+.chain i{color:var(--muted);font-style:normal}
+
+/* diagrama */
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{font:inherit;cursor:pointer}
+.btn{padding:10px 16px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--fg);font-weight:500;display:flex;align-items:center;gap:8px}
+.btn .dot{width:11px;height:11px;border-radius:50%;flex:none}
+.btn[aria-pressed="true"]{border-color:var(--fg)}
+.d-ok{background:var(--ok)} .d-warn{background:var(--warn)} .d-bad{background:var(--danger)}
+.screen{display:flex;flex-direction:column;gap:10px;min-width:0}
+.cap{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap}
+.cap strong{font-family:var(--display);font-size:1.2rem}
+.cap .mono{color:var(--muted);font-size:.85rem}
+.segs{display:flex;gap:4px;margin-left:auto}
+.segs i{width:34px;height:5px;border-radius:3px;background:var(--line)}
+.segs i.done{background:var(--muted)}
+.segs i.now{background:var(--accent)}
+.sub{min-height:3.2em;font-size:1.08rem;max-width:none}
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:20px;align-items:start}
+@media (max-width:980px){.stage{grid-template-columns:minmax(0,1fr)}}
+.canvas{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow-x:auto;min-width:0}
+.canvas svg{display:block;width:100%;min-width:720px;height:auto}
+.side{display:flex;flex-direction:column;gap:14px;min-width:0}
+.panel{background:var(--sunk);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:8px}
+.panel h3{font-size:.8rem;font-family:var(--mono);font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+#log{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;font-size:.9rem}
+#log li{display:grid;grid-template-columns:22px 1fr;gap:6px}
+#log li b{font-family:var(--mono);font-weight:500;color:var(--muted)}
+#outcome{font-weight:600}
+#outcome.ok{color:var(--ok)} #outcome.bad{color:var(--danger)}
+#detail p{font-size:.92rem}
+
+svg text{font-family:var(--body);fill:var(--fg)}
+.edge{fill:none;stroke:var(--line);stroke-width:2}
+.edge.async{stroke-dasharray:7 5}
+.elabel{font-size:13px;fill:var(--muted);font-family:var(--mono)}
+.node rect,.node polygon{fill:var(--surface);stroke:var(--fg);stroke-width:1.6}
+.node{cursor:pointer}
+.node .t{font-size:14.5px;font-weight:600;text-anchor:middle}
+.node .u{font-size:11.5px;fill:var(--muted);text-anchor:middle}
+.node.q polygon{fill:var(--sunk)}
+.node.prod rect{fill:var(--ok-soft);stroke:var(--ok)}
+.node.hp rect{fill:var(--warn-soft);stroke:var(--warn)}
+.node.sel rect,.node.sel polygon{stroke-dasharray:5 3}
+#pk{stroke:var(--surface);stroke-width:2.5}
+#halo{opacity:.28;stroke:none}
+#trail circle{stroke:none}
+#ring{fill:none;stroke:var(--fg);stroke-width:2;opacity:0;transform-box:fill-box;transform-origin:center}
+#ring.go{animation:ring .7s ease-out}
+@keyframes ring{from{opacity:.9;transform:scale(.6)}to{opacity:0;transform:scale(2.8)}}
+@media (prefers-reduced-motion: reduce){#ring.go{animation:none}}
+.pk-ok{fill:var(--ok)} .pk-warn{fill:var(--warn)} .pk-bad{fill:var(--danger)} .pk-inc{fill:var(--accent)}
+#captive circle{fill:var(--danger);stroke:var(--surface);stroke-width:2}
+#captive text{font-size:11.5px;fill:var(--danger);font-family:var(--mono)}
+.arrow{fill:var(--muted)}
+
+/* caso */
+.vs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface)}
+.vs>div{padding:16px 20px;border-top:1px solid var(--line);min-width:0}
+.vs>.h{border-top:0;font-family:var(--display);font-weight:600}
+.vs>.h.a{background:var(--danger-soft)} .vs>.h.b{background:var(--ok-soft)}
+.vs>div:nth-child(even){border-left:1px solid var(--line)}
+.vs .k{font-family:var(--mono);font-size:.75rem;color:var(--muted);display:block;margin-bottom:2px}
+@media (max-width:700px){.vs{grid-template-columns:minmax(0,1fr)}.vs>div:nth-child(even){border-left:0}}
+.note{font-size:.9rem;color:var(--muted);border-left:3px solid var(--line);padding-left:14px}
+
+/* chile */
+.pick{display:flex;flex-direction:column;gap:10px}
+.pick .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.pick .lab{font-family:var(--mono);font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);width:110px}
+.chip{padding:7px 13px;border-radius:999px;border:1.5px solid var(--line);background:var(--surface);color:var(--fg);font-size:.92rem}
+.chip[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.scn{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:28px;align-items:start}
+@media (max-width:800px){.scn{grid-template-columns:minmax(0,1fr)}}
+.big{font-family:var(--display);font-weight:700;font-size:clamp(2.6rem,7vw,4.4rem);line-height:1;letter-spacing:-.02em}
+.scn .who{display:flex;flex-direction:column;gap:8px}
+.tl{display:flex;flex-direction:column;gap:14px}
+.bar{display:flex;flex-direction:column;gap:5px}
+.bar .cap{display:flex;justify-content:space-between;gap:12px;font-size:.9rem}
+.bar .track{height:14px;border-radius:7px;background:var(--sunk);overflow:hidden}
+.bar .fill{height:100%;border-radius:7px}
+.src{font-size:.8rem;color:var(--muted)}
+
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:28px}
+.cols ul{margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:8px}
+.cols li{max-width:60ch}
+footer{padding-block:32px}
+footer ol{margin:8px 0 0;padding-left:20px;font-size:.82rem;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+footer li{overflow-wrap:anywhere}
+</style>
+
+<header class="top"><div class="in">
+  <span class="brand">Sistema Inmunológico Autónomo</span>
+  <nav id="nav">
+    <a href="#problema">Problema</a>
+    <a href="#arquitectura">Arquitectura</a>
+    <a href="#caso">Caso real</a>
+    <a href="#chile">Chile</a>
+    <a href="#estado">Estado</a>
+  </nav>
+</div></header>
+
+<section id="problema"><div class="in">
+  <div class="head">
+    <span class="eyebrow">El problema</span>
+    <h1>Un bug en un portal web puede terminar en la planta de agua.</h1>
+    <p class="lead">Entre que alguien explota una vulnerabilidad y el parche llega a producción pasan días. Al atacante le alcanza con un request.</p>
+  </div>
+  <div class="chain" aria-label="Cadena típica de un ataque">
+    <span>portal de pago</span><i>→</i><span class="bad">SQL injection</span><i>→</i><span>credenciales internas</span><i>→</i><span class="bad">sistema de control</span><i>→</i><span class="bad">dosificación de químicos</span>
+  </div>
+  <div class="facts">
+    <div class="fact"><span class="n">11</span><span>víctimas de ransomware en infraestructura crítica chilena entre enero y septiembre de 2026. En todo 2025 fueron 7.</span><span class="s">Entel Digital, vía Diario Financiero [5]</span></div>
+    <div class="fact"><span class="n">103 MW</span><span>El parque solar Huatacondo (Tarapacá) lleva casi tres meses desconectado de la red tras un ciberataque el 27 de agosto de 2026.</span><span class="s">Coordinador Eléctrico Nacional, vía DF y pv magazine [6][7]</span></div>
+    <div class="fact"><span class="n">3 h</span><span>Plazo de la Ley 21.663 para que un servicio esencial dé la alerta temprana de un ataque. Avisar no es lo mismo que contener.</span><span class="s">ANCI, Instrucción General N.º 4 [5]</span></div>
+  </div>
+</div></section>
+
+<section id="arquitectura"><div class="in">
+  <div class="head">
+    <span class="eyebrow">Arquitectura</span>
+    <h2>Todo request pasa por un reverse proxy. Lo dudoso se ejecuta primero en un señuelo.</h2>
+    <p>Los cuatro casos se reproducen solos, uno tras otro. Tocá un botón para saltar a ese caso, o un nodo para ver qué hace.</p>
+  </div>
+  <div class="controls" role="group" aria-label="Tipo de request">
+    <button class="btn" id="b-legit" data-sc="legit" aria-pressed="false"><span class="dot d-ok"></span>Request legítimo</button>
+    <button class="btn" id="b-odd" data-sc="odd" aria-pressed="false"><span class="dot d-warn"></span>Raro pero inofensivo</button>
+    <button class="btn" id="b-atk" data-sc="atk" aria-pressed="false"><span class="dot d-bad"></span>Ataque</button>
+    <button class="btn" id="b-late" data-sc="late" aria-pressed="false"><span class="dot d-bad"></span>Ataque que pasa el filtro</button>
+    <button class="btn" id="b-auto" aria-pressed="true">Pausar</button>
+  </div>
+  <div class="stage">
+    <div class="screen">
+    <div class="cap"><span class="mono" id="cap-n">4 casos</span><strong id="cap-t">Un caso tras otro</strong><span class="segs" id="segs"><i></i><i></i><i></i><i></i></span></div>
+    <div class="canvas"><svg id="flow" viewBox="0 0 1060 640" role="img" aria-label="Flujo de un request: reverse proxy, decisión de sospecha, honeypot, decisión de ataque, fix proxy, replay, validador, parche y despliegue blue/green. Una línea punteada lleva una copia de cada request limpio desde producción al honeypot después de responder">
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow"/></marker></defs>
+      <g id="edges"></g><g id="nodes"></g>
+      <g id="captive" hidden><circle cx="368" cy="182" r="8"/><text x="356" y="186" text-anchor="end">atacante retenido</text></g>
+      <circle id="ring" r="12" cx="155" cy="80"/>
+      <g id="pkg" class="pk-ok" hidden><g id="trail"></g><circle id="halo" r="18" cx="155" cy="80"/><circle id="pk" r="9" cx="155" cy="80"/></g>
+    </svg></div>
+    <p class="sub" id="sub" aria-live="polite">La reproducción empieza cuando el diagrama está en pantalla.</p>
+    </div>
+    <div class="side">
+      <div class="panel"><h3>Recorrido</h3>
+        <ol id="log"><li><b>–</b><span>Elegí un tipo de request arriba.</span></li></ol>
+        <p id="outcome"></p>
+      </div>
+      <div class="panel" id="detail"><h3 id="d-t">Nodo</h3><p id="d-p">Tocá un nodo del diagrama para ver su detalle.</p></div>
+    </div>
+  </div>
+</div></section>
+
+<section id="caso"><div class="in">
+  <div class="head">
+    <span class="eyebrow">Caso real · Verizon Data Breach Digest, 2016</span>
+    <h2>Entraron por el portal de pago de cuentas y cambiaron los químicos del agua.</h2>
+    <p>Una empresa de agua de EE. UU. (Verizon la publicó con el nombre ficticio "Kemuri Water Company"). Los atacantes modificaron cuatro veces la dosificación de químicos y el caudal. El personal lo revirtió cada vez en menos de una hora y no hubo daño a la salud. [1][2][3]</p>
+  </div>
+  <div class="vs">
+    <div class="h a">Lo que pasó</div><div class="h b">Con el sistema delante del portal</div>
+    <div><span class="k">paso 1</span>Explotan una vulnerabilidad web sin parchar en el portal de pago (SQL injection, según The Register).</div>
+    <div><span class="k">paso 1</span>El request tiene forma de payload: se ejecuta primero en el honeypot. La consulta SQL cambia de estructura y el oráculo dispara. Producción nunca lo recibe.</div>
+    <div><span class="k">paso 2</span>En el servidor web encuentran un archivo .ini con el usuario administrador y la IP del sistema interno (AS400), sin cifrar.</div>
+    <div><span class="k">paso 2</span>El atacante sigue dentro del clon. Lo que encuentra ahí son datos sintéticos y credenciales señuelo; si las usa, lo identifican desde cualquier IP.</div>
+    <div><span class="k">paso 3</span>Con esas credenciales entran a la aplicación de válvulas y caudal, que vivía en el mismo AS400.</div>
+    <div><span class="k">paso 3</span>En segundos, una regla en el proxy cierra ese punto de entrada en el camino a producción. El ataque capturado se repite contra la versión actual y confirma que es vulnerable.</div>
+    <div><span class="k">paso 4</span>Alteran químicos y caudal cuatro veces. También se llevan datos personales y de pago de clientes.</div>
+    <div><span class="k">paso 4</span>Un parche de código pasa cinco validaciones mecánicas y se despliega en blue/green. El bug deja de existir, también para la próxima variante.</div>
+  </div>
+  <p class="note">Por qué no usamos Oldsmar (Florida, 2021), el caso más citado: fue acceso remoto por TeamViewer, no un bug web, y el propio relato del hackeo está hoy en duda. Este sistema protege la capa HTTP. No cubre contraseñas por defecto en un PLC ni escritorios remotos expuestos. [4]</p>
+</div></section>
+
+<section id="chile"><div class="in">
+  <div class="head">
+    <span class="eyebrow">Impacto en Chile</span>
+    <h2>¿Qué significa el mismo ataque en un portal de clientes chileno?</h2>
+    <p>Ejercicio hipotético. Ninguna de estas empresas es cliente nuestro ni tiene una vulnerabilidad que conozcamos. Sirven para dimensionar a cuánta gente llega un servicio.</p>
+  </div>
+  <div class="pick">
+    <div class="row"><span class="lab">Agua</span><span id="p-agua" class="row"></span></div>
+    <div class="row"><span class="lab">Electricidad</span><span id="p-luz" class="row"></span></div>
+  </div>
+  <div class="scn">
+    <div class="who">
+      <span class="big mono" id="s-n"></span>
+      <h3 id="s-name"></h3>
+      <p id="s-desc"></p>
+      <p class="src" id="s-src"></p>
+    </div>
+    <div class="tl">
+      <h3>Cuánto tiempo queda abierta la puerta</h3>
+      <div class="bar"><div class="cap"><span>Hoy: hasta que alguien lo note y parche a mano</span><span class="mono">días a semanas</span></div><div class="track"><div class="fill" style="width:100%;background:var(--danger)"></div></div></div>
+      <div class="bar"><div class="cap"><span>Plazo legal solo para avisar a la ANCI</span><span class="mono">3 h</span></div><div class="track"><div class="fill" style="width:34%;background:var(--warn)"></div></div></div>
+      <div class="bar"><div class="cap"><span>Con el sistema: regla en el proxy</span><span class="mono">~15 s</span></div><div class="track"><div class="fill" style="width:2.2%;background:var(--ok)"></div></div></div>
+      <div class="bar"><div class="cap"><span>Con el sistema: parche validado y desplegado</span><span class="mono">~60 s</span></div><div class="track"><div class="fill" style="width:4%;background:var(--ok)"></div></div></div>
+      <p class="src">Barras ilustrativas, sin escala. Los 15 s y 60 s se midieron una vez, en nuestra demo, para un SQL injection. "Días a semanas" es una descripción cualitativa, no una cifra medida.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="estado"><div class="in">
+  <div class="head">
+    <span class="eyebrow">Estado</span>
+    <h2>Qué está funcionando hoy y qué no.</h2>
+  </div>
+  <div class="cols">
+    <div><h3>Verificado</h3><ul>
+      <li>Ciclo completo en vivo para SQL injection: regla a los 15 s; parche, validación y despliegue en 60 s.</li>
+      <li>Detección y desvío al señuelo de tres clases: SQL injection, path traversal e IDOR.</li>
+      <li>Segunda red: un IDOR desde una cuenta confiable, que el filtro deja pasar, dispara el oráculo en el señuelo después de la respuesta. Probado con la app real hasta ese disparo.</li>
+      <li>Las validaciones rechazan 15 parches inadecuados y aceptan 7 correctos en el autotest.</li>
+      <li>Sobre Apache 2.4.49 real: el parche propuesto cumple 21 de 21 propiedades, igual que el oficial de la 2.4.50.</li>
+    </ul></div>
+    <div><h3>Límites</h3><ul>
+      <li>El sistema aprende solo de lo que sus oráculos ven. Fallas de lógica de negocio y ataques de segundo orden no disparan ninguno.</li>
+      <li>La detonación agrega latencia a los requests dudosos.</li>
+      <li>La segunda red no frena la primera respuesta: corta la campaña, no la primera fuga.</li>
+      <li>Los tiempos se midieron una sola vez, en una máquina sin otra carga.</li>
+      <li>El caso de Apache es un defecto público: demuestra el mecanismo, no un descubrimiento a ciegas.</li>
+    </ul></div>
+    <div><h3>Principios</h3><ul>
+      <li>El veredicto lo da la ejecución, no un puntaje. Un falso positivo cuesta milisegundos, no datos falsos.</li>
+      <li>El modelo solo propone un diff. Deciden validaciones mecánicas.</li>
+      <li>Nunca se bloquea por IP ni por huella.</li>
+      <li>Si algo nuestro falla, el tráfico sigue a producción.</li>
+    </ul></div>
+  </div>
+</div></section>
+
+<footer><div class="in">
+  <span class="eyebrow">Fuentes</span>
+  <ol>
+    <li><a href="https://www.theregister.com/2016/03/24/water_utility_hacked/">The Register: Water treatment plant hacked, chemical mix changed for tap supplies (2016)</a></li>
+    <li><a href="https://www.itjungle.com/2016/03/16/tfh031616-story01/">IT Jungle: Verizon Outlines Disturbing AS/400 Breach At Water District</a></li>
+    <li><a href="https://www.risidata.com/Database/Detail/kemuri-water-company-breach">RISI: Kemuri Water Company</a></li>
+    <li><a href="https://www.industrialdefender.com/blog/florida-water-treatment-plant-cyber-attack">Industrial Defender: Florida Water Treatment Plant (Oldsmar)</a></li>
+    <li><a href="https://www.df.cl/df-lab/tech-empresas/casi-un-tercio-de-las-victimas-de-ransomware-en-chile-y-america-latina">Diario Financiero: víctimas de ransomware en infraestructura crítica</a></li>
+    <li><a href="https://www.df.cl/senal-df/datos-de-sobremesa/coordinador-electrico-registro-ciberataque-en-planta-solar-huatacondo">Diario Financiero: ciberataque en planta solar Huatacondo</a></li>
+    <li><a href="https://www.pv-magazine.com/2026/11/17/chilean-pv-plant-hit-by-cyberattack-remains-disconnected/">pv magazine: Chilean PV plant hit by cyberattack remains disconnected</a></li>
+    <li><a href="https://www.esghoy.cl/wp-content/uploads/2025/07/Resumen_Reporte_Integrado_2024_Aguas_Andinas_06.pdf">Aguas Andinas: Reporte Integrado 2024</a></li>
+    <li><a href="https://www.andess.cl/nuestros-asociados">Andess: asociados</a></li>
+    <li><a href="https://www.df.cl/empresas/industria/procesos-tarifarios-del-agua-mas-de-la-mitad-de-los-clientes-del-pais">Diario Financiero: procesos tarifarios del agua (Esval)</a></li>
+    <li><a href="https://www.electricas.cl/asociados/">Empresas Eléctricas A.G.: asociados</a></li>
+  </ol>
+</div></footer>
+
+<script>
+(function(){
+var NS="http://www.w3.org/2000/svg";
+function el(n,a,t){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);if(t!=null)e.textContent=t;return e}
+function $(id){return document.getElementById(id)}
+
+/* ---------- diagrama ---------- */
+var N={
+ req:{x:90,y:80,w:130,h:56,t:"Request",u:"cliente o atacante",
+  d:"Cualquier request HTTP que llega desde internet. El sistema no sabe de antemano si viene de un cliente o de un atacante."},
+ proxy:{x:270,y:80,w:150,h:56,t:"Reverse proxy",u:"todo pasa por acá",
+  d:"El único punto de entrada. Ve el request en texto plano, lo graba y aplica las reglas vigentes. Si algún componente nuestro falla, reenvía a producción."},
+ sus:{x:460,y:80,q:1,t:"¿Sospechoso?",
+  d:"Mira la forma del request, no el historial de quien lo manda: payload con metacaracteres, ruta que la app no tiene, parámetro fuera de su gramática. Funciona desde el primer request. No decide quién es atacante, solo a quién se prueba en el señuelo."},
+ prod:{x:915,y:80,w:190,h:64,t:"App de producción",u:"datos reales",cls:"prod",
+  d:"La aplicación real con los datos reales. Solo recibe lo que salió limpio o lo que se probó en el señuelo sin disparar nada."},
+ hp:{x:460,y:225,w:180,h:60,t:"Honeypot",u:"misma app, datos sintéticos",cls:"hp",
+  d:"Un clon de la app real, con el mismo código y datos sintéticos, instrumentado con oráculos. El request dudoso se ejecuta acá primero. Los clones están precalentados: nada arranca en el camino crítico. También es la segunda red: lo que el filtro dejó pasar a producción se repite acá después de responder (línea punteada)."},
+ atk:{x:460,y:370,q:1,t:"¿Es un ataque?",
+  d:"Lo responden oráculos mecánicos con sí o no: la consulta SQL cambió de estructura, se abrió un archivo fuera de la raíz, apareció un proceso hijo, hubo una conexión saliente no declarada, o alguien leyó una fila canario que no es suya."},
+ fix:{x:460,y:515,w:160,h:56,t:"Fix proxy",u:"regla en segundos",
+  d:"Una regla en el proxy que cierra el punto confirmado: ruta, parámetro y gramática. Nunca por IP ni por huella. Antes de activarse se prueba contra tráfico legítimo grabado, y caduca cuando el parche está desplegado."},
+ rep:{x:655,y:515,w:130,h:56,t:"Replay",u:"estado + request",
+  d:"El ataque capturado (el estado previo del clon más el request) se vuelve a ejecutar contra una copia de la versión actual de producción. Así también se reproducen ataques de varios pasos."},
+ vul:{x:820,y:515,q:1,t:"¿Vulnerable?",
+  d:"El validador. Si el replay dispara el oráculo en la versión actual, el bug existe en producción y hay que curarlo en el código. Si no dispara, la regla alcanza y el caso se archiva."},
+ patch:{x:965,y:370,w:160,h:70,t:"Parche de código",u:"5 validaciones · blue/green",
+  d:"Un modelo sin red ni credenciales propone un diff. Se despliega solo si pasa cinco validaciones mecánicas: política sobre el diff, propiedades por clase de bug, el ataque y sus variantes fallan, pasa la suite de tests y el tráfico legítimo responde igual. Despliegue blue/green con rollback."},
+ closed:{x:820,y:608,w:170,h:40,t:"Caso archivado",u:"",
+  d:"La versión actual ya no es vulnerable. La regla queda hasta su vencimiento y el caso se guarda como test de regresión."}
+};
+var E={
+ e1:{p:[[155,80],[193,80]]},
+ e2:{p:[[345,80],[396,80]]},
+ e3:{p:[[524,80],[818,80]],l:"No",lx:545,ly:70},
+ e4:{p:[[460,122],[460,193]],l:"Sí",lx:470,ly:160},
+ e5:{p:[[460,255],[460,326]]},
+ e6:{p:[[524,370],[850,370],[850,114]],l:"No · se reenvía",lx:545,ly:360},
+ e7:{p:[[460,412],[460,485]],l:"Sí",lx:470,ly:452},
+ e8:{p:[[540,515],[588,515]]},
+ e9:{p:[[720,515],[754,515]]},
+ e10:{p:[[884,515],[965,515],[965,407]],l:"Sí",lx:896,ly:505},
+ e11:{p:[[965,335],[965,114]],l:"deploy",lx:975,ly:230},
+ e12:{p:[[820,557],[820,586]],l:"No",lx:830,ly:576},
+ e13:{p:[[832,112],[832,225],[552,225]],l:"copia, después de responder",lx:566,ly:215,a:1}
+};
+var gE=$("edges"),gN=$("nodes");
+Object.keys(E).forEach(function(k){var e=E[k];
+  e.el=el("polyline",{points:e.p.map(function(q){return q.join(",")}).join(" "),"class":"edge"+(e.a?" async":""),"marker-end":"url(#ah)"});
+  gE.appendChild(e.el);
+  if(e.l)gE.appendChild(el("text",{x:e.lx,y:e.ly,"class":"elabel"},e.l));
+});
+Object.keys(N).forEach(function(k){var n=N[k];
+  var g=el("g",{"class":"node"+(n.q?" q":"")+(n.cls?" "+n.cls:""),tabindex:"0",role:"button","aria-label":n.t});
+  if(n.q){g.appendChild(el("polygon",{points:[[n.x-64,n.y],[n.x,n.y-42],[n.x+64,n.y],[n.x,n.y+42]].map(function(q){return q.join(",")}).join(" ")}));
+    g.appendChild(el("text",{x:n.x,y:n.y+5,"class":"t",style:"font-size:13px"},n.t));
+  }else{
+    g.appendChild(el("rect",{x:n.x-n.w/2,y:n.y-n.h/2,width:n.w,height:n.h,rx:8}));
+    g.appendChild(el("text",{x:n.x,y:n.u?n.y-2:n.y+5,"class":"t"},n.t));
+    if(n.u)g.appendChild(el("text",{x:n.x,y:n.y+16,"class":"u"},n.u));
+  }
+  n.el=g;gN.appendChild(g);
+  function show(){Object.keys(N).forEach(function(j){N[j].el.classList.remove("sel")});g.classList.add("sel");$("d-t").textContent=n.t;$("d-p").textContent=n.d}
+  g.addEventListener("click",show);
+  g.addEventListener("keydown",function(ev){if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();show()}});
+});
+
+var SC={
+ legit:{cls:"pk-ok",req:"GET /cuenta/boleta?mes=10",steps:[
+  {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
+  {e:"e2",n:"sus",log:"Forma normal: ruta conocida, parámetro dentro de su gramática."},
+  {e:"e3",n:"prod",log:"Directo a producción. Sin latencia extra."}],
+  out:"El cliente no nota que el sistema existe.",ok:1},
+ odd:{cls:"pk-warn",req:"GET /buscar?q=O'Brien",steps:[
+  {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
+  {e:"e2",n:"sus",log:"Tiene una comilla en el parámetro: dudoso."},
+  {e:"e4",n:"hp",log:"Se ejecuta primero en el honeypot."},
+  {e:"e5",n:"atk",log:"Ningún oráculo dispara: era un apellido."},
+  {e:"e6",n:"prod",log:"Se reenvía a producción. El cliente recibe la respuesta real."}],
+  out:"Falso positivo: cuesta unas decenas de milisegundos, no datos falsos.",ok:1},
+ atk:{cls:"pk-bad",req:"GET /buscar?q=' UNION SELECT …",steps:[
+  {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
+  {e:"e2",n:"sus",log:"Forma de payload: dudoso."},
+  {e:"e4",n:"hp",log:"Se ejecuta en el honeypot. El exploit \"funciona\" sobre datos sintéticos."},
+  {e:"e5",n:"atk",log:"Oráculo SQL: la consulta cambió de estructura. Ataque confirmado. El atacante queda en su clon.",captive:1,cls:"pk-inc"},
+  {e:"e7",n:"fix",log:"Regla en el proxy para esa ruta y parámetro. Medido: ~15 s."},
+  {e:"e8",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
+  {e:"e9",n:"vul",log:"El oráculo dispara de nuevo: producción es vulnerable."},
+  {e:"e10",n:"patch",log:"El modelo propone un diff. Pasa las cinco validaciones."},
+  {e:"e11",n:"prod",log:"Despliegue blue/green. Medido de punta a punta: ~60 s."}],
+  out:"Producción nunca recibió el ataque y ya no tiene el bug.",ok:1},
+ late:{cls:"pk-bad",req:"GET /api/orders/1 (cuenta real, pedido ajeno)",steps:[
+  {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
+  {e:"e2",n:"sus",log:"Cuenta confiable, ruta conocida, id válido: nada raro en la forma."},
+  {e:"e3",n:"prod",log:"Producción responde con datos reales. Esta primera respuesta no se frena.",cls:"pk-inc"},
+  {e:"e13",n:"hp",log:"Segunda red: después de responder, una copia del request se ejecuta en el honeypot."},
+  {e:"e5",n:"atk",log:"Oráculo de dueño: leyó un pedido que no es suyo. Ataque confirmado."},
+  {e:"e7",n:"fix",log:"Regla en el proxy para esa ruta y parámetro."},
+  {e:"e8",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
+  {e:"e9",n:"vul",log:"El oráculo dispara de nuevo: producción es vulnerable."},
+  {e:"e10",n:"patch",log:"El modelo propone un diff. Pasa las cinco validaciones."},
+  {e:"e11",n:"prod",log:"Despliegue blue/green."}],
+  out:"El primer request pasó; el segundo ya no. El bug se cura igual.",ok:1}
+};
+var pk=$("pk"),pkg=$("pkg"),halo=$("halo"),ring=$("ring"),log=$("log"),run=0,hist=[],tr=[],cur=[155,80];
+for(var ti=0;ti<6;ti++){var tc=el("circle",{r:8-ti,cx:155,cy:80,opacity:(0.42-ti*0.06).toFixed(2)});$("trail").appendChild(tc);tr.push(tc)}
+function pos(x,y){cur=[x,y];pk.setAttribute("cx",x);pk.setAttribute("cy",y);halo.setAttribute("cx",x);halo.setAttribute("cy",y);
+  hist.unshift(cur);if(hist.length>30)hist.length=30;
+  tr.forEach(function(c,i){var h=hist[(i+1)*4]||hist[hist.length-1];c.setAttribute("cx",h[0]);c.setAttribute("cy",h[1])})}
+function settle(){hist=[];pos(cur[0],cur[1])}
+function pulse(){ring.setAttribute("cx",cur[0]);ring.setAttribute("cy",cur[1]);ring.classList.remove("go");ring.getBoundingClientRect();ring.classList.add("go")}
+var still=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;
+function sleep(ms){return new Promise(function(r){setTimeout(r,still?0:ms)})}
+function move(pts){return new Promise(function(res){
+  var last=pts[pts.length-1];
+  if(still){pos(last[0],last[1]);settle();return res()}
+  var seg=[],tot=0;for(var i=1;i<pts.length;i++){var d=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);seg.push(d);tot+=d}
+  var dur=Math.max(650,tot/0.34),t0=null;hist=[];pos(pts[0][0],pts[0][1]);
+  function f(ts){if(t0==null)t0=ts;var k=Math.min(1,(ts-t0)/dur),ek=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2,d=ek*tot,i=0;
+    while(i<seg.length-1&&d>seg[i]){d-=seg[i];i++}
+    var r=seg[i]?d/seg[i]:1;
+    pos(pts[i][0]+(pts[i+1][0]-pts[i][0])*r,pts[i][1]+(pts[i+1][1]-pts[i][1])*r);
+    if(k<1)requestAnimationFrame(f);else{settle();res()}}
+  requestAnimationFrame(f)})}
+function addLog(i,txt){var li=document.createElement("li"),b=document.createElement("b"),s=document.createElement("span");b.textContent=i;s.textContent=txt;li.appendChild(b);li.appendChild(s);log.appendChild(li)}
+function reset(){Object.keys(E).forEach(function(k){E[k].el.classList.remove("on")});Object.keys(N).forEach(function(k){N[k].el.classList.remove("on")});
+  $("captive").setAttribute("hidden","");log.textContent="";$("outcome").textContent="";$("outcome").className=""}
+var ORDER=["legit","odd","atk","late"],NAMES={legit:"Request legítimo",odd:"Raro pero inofensivo",atk:"Ataque",late:"Ataque que pasa el filtro"},auto=!still,busy=false,idx=0;
+async function loop(i){while(true){idx=i;busy=true;var ok=await play(ORDER[i]);if(!ok)return;busy=false;if(!auto)return;
+  var r=run;await sleep(2200);if(r!==run||!auto||busy)return;i=(i+1)%ORDER.length}}
+async function play(key){var id=++run,s=SC[key],ci=ORDER.indexOf(key);reset();
+  $("cap-n").textContent="Caso "+(ci+1)+" de "+ORDER.length;$("cap-t").textContent=NAMES[key];$("sub").textContent=s.req;
+  [].forEach.call($("segs").children,function(sg,j){sg.className=j<ci?"done":j===ci?"now":""});
+  document.querySelectorAll(".btn[data-sc]").forEach(function(b){b.setAttribute("aria-pressed",b.dataset.sc===key?"true":"false")});
+  pkg.setAttribute("class",s.cls);hist=[];pos(155,80);pkg.removeAttribute("hidden");
+  pulse();addLog("0",s.req);await sleep(900);
+  for(var i=0;i<s.steps.length;i++){var st=s.steps[i];if(id!==run)return false;
+    await move(E[st.e].p);if(id!==run)return false;
+    pulse();addLog(i+1,st.log);$("sub").textContent=st.log;
+    if(st.captive)$("captive").removeAttribute("hidden");if(st.cls)pkg.setAttribute("class",st.cls);
+    await sleep(1300)}
+  if(id!==run)return false;$("outcome").textContent=s.out;$("outcome").className=s.ok?"ok":"bad";$("sub").textContent=s.out;return true}
+document.querySelectorAll(".btn[data-sc]").forEach(function(b){b.addEventListener("click",function(){loop(ORDER.indexOf(b.dataset.sc))})});
+function setAuto(v){auto=v;$("b-auto").textContent=v?"Pausar":"Reproducir";$("b-auto").setAttribute("aria-pressed",v?"true":"false")}
+setAuto(auto);
+$("b-auto").addEventListener("click",function(){setAuto(!auto);if(auto&&!busy)loop(run?(idx+1)%ORDER.length:0)});
+if(auto){if("IntersectionObserver" in window){var io=new IntersectionObserver(function(en){if(en[0].isIntersecting){io.disconnect();if(auto&&!run)loop(0)}},{threshold:.35});io.observe($("flow"))}else loop(0)}
+
+/* ---------- Chile ---------- */
+var P=[
+ {g:"agua",n:"Aguas Andinas",c:"2,35 M",d:"clientes de agua potable en 49 comunas de la Región Metropolitana: más de 8 millones de personas (dic. 2024).",s:"[8]"},
+ {g:"agua",n:"Essbio",c:"+935 mil",d:"clientes en las regiones de O'Higgins, Ñuble y Biobío.",s:"[9]"},
+ {g:"agua",n:"Esval",c:"703 mil",d:"clientes en la Región de Valparaíso (2023).",s:"[10]"},
+ {g:"luz",n:"CGE",c:"+3,2 M",d:"clientes de electricidad entre Arica y La Araucanía, más Magallanes con Edelmag.",s:"[11]"},
+ {g:"luz",n:"Enel Distribución",c:"+2,1 M",d:"clientes en 33 comunas de la Región Metropolitana.",s:"[11]"},
+ {g:"luz",n:"Grupo Saesa",c:"+1 M",d:"clientes entre Biobío y Aysén, con cuatro distribuidoras.",s:"[11]"},
+ {g:"luz",n:"Chilquinta",c:"831 mil",d:"clientes regulados, con base en la Región de Valparaíso.",s:"[11]"}
+];
+function pick(i){var p=P[i];$("s-n").textContent=p.c;$("s-name").textContent="Una empresa del tamaño de "+p.n;
+  $("s-desc").textContent=p.c+" "+p.d+" Su portal de pago y su oficina virtual son aplicaciones web como la del caso anterior.";
+  $("s-src").textContent="Fuente "+p.s;
+  document.querySelectorAll(".chip").forEach(function(c,j){c.setAttribute("aria-pressed",j===i?"true":"false")});
+  try{localStorage.setItem("pitch-prov",i)}catch(e){}}
+P.forEach(function(p,i){var b=document.createElement("button");b.className="chip";b.id="chip-"+i;b.textContent=p.n;b.addEventListener("click",function(){pick(i)});$(p.g==="agua"?"p-agua":"p-luz").appendChild(b)});
+var st=0;try{st=+localStorage.getItem("pitch-prov")||0}catch(e){}
+pick(P[st]?st:0);
+
+/* ---------- navegación ---------- */
+var ids=["problema","arquitectura","caso","chile","estado"],links=[].slice.call(document.querySelectorAll("#nav a"));
+function curSec(){var c=0;ids.forEach(function(id,i){if($(id).getBoundingClientRect().top<140)c=i});return c}
+function mark(){var c=curSec();links.forEach(function(a,i){a.setAttribute("aria-current",i===c?"true":"false")})}
+addEventListener("scroll",mark,{passive:true});mark();
+addEventListener("keydown",function(ev){
+  if(ev.target.closest&&ev.target.closest("button,.node,a,input"))return;
+  var c=curSec();
+  if(ev.key==="ArrowRight"||ev.key==="PageDown"){ev.preventDefault();$(ids[Math.min(ids.length-1,c+1)]).scrollIntoView({behavior:still?"auto":"smooth"})}
+  if(ev.key==="ArrowLeft"||ev.key==="PageUp"){ev.preventDefault();$(ids[Math.max(0,c-1)]).scrollIntoView({behavior:still?"auto":"smooth"})}
+});
+})();
+</script>

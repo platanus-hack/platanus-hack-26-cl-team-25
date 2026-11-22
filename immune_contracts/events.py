@@ -36,6 +36,12 @@ PR_OPENED = "pr.opened"                 # data: {incident, url, branch}
 PR_MERGED = "pr.merged"                 # data: {incident, url, sha}
 INCIDENT_CLOSED = "incident.closed"     # data: {incident, outcome: patched|rule_only|not_reproducible, seconds_to_rule, seconds_to_patch}
 VERIFY_RESULT = "verify.result"         # data: {incident, exploit_blocked_on_prod: bool}
+FUXA_STATUS = "fuxa.status"              # data: {active, enforced, coverage, pending, monitor}
+# pipeline: self-audit of the same class after an incident closes (contracts/product.md §8)
+AUDIT_STARTED = "audit.started"         # data: {incident, vuln_class, candidates}
+AUDIT_FINDING = "audit.finding"         # data: {incident, parent, route, param}
+AUDIT_DONE = "audit.done"               # data: {incident, checked, findings, seconds}
+# incident.opened also carries optional origin: live|audit and parent: <incident id>
 # sim
 PROD_ALERT = "prod.alert"               # data: {container, oracle: file|proc|net, detail, candidates, confirmed:[{method,path,query}], note}
 ATTACK_ATTEMPT = "attack.attempt"       # data: {vuln, ok: bool, saw_real_data: bool}

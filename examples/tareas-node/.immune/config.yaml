@@ -1,0 +1,43 @@
+version: 1
+name: tareas
+app:
+  runtime: generic
+  release_paths: [server.js, package.json, package-lock.json, node_modules, src, db, files, test, Dockerfile, .dockerignore]
+  source_dirs: [src]
+  build: {context: ., dockerfile: Dockerfile}   # built by `immune up` (t0) and by fleet on deploy: immune-tareas-app:<release>
+  command: [node, server.js]
+  port: 3000
+  health: /health
+  env:
+    PORT: "3000"
+    SESSION_HOURS: "72"
+  allowed_file_roots: [/app/files]
+  # generic-runtime extensions (see immune/generic.py)
+  workdir: /app              # where the image keeps the release (judge clones mount a patched copy here)
+  bind_env: HOST             # env var with the bind address: 0.0.0.0 in prod, 127.0.0.1 in clones
+  warmup_paths: [/api/files]
+database:
+  kind: postgres
+  url_env: DATABASE_URL
+data:
+  prod_url_env: TAREAS_DATABASE_URL   # export it to protect a real database (as reachable from the prod network)
+  demo_postgres:                      # otherwise: a Postgres container on the prod network, seeded with:
+    database: tareas
+    user: tareas
+    seed_command: [node, db/seed.js]  # run once in the app image against the demo database
+auth:
+  kind: introspect
+  path: /api/me
+  uid_field: id
+  role_field: role
+  cache_s: 30
+openapi: .immune/openapi.yaml
+shadow:
+  profile: tareas_identity            # .immune/tareas_identity.py, loaded by the observer
+  columns: .immune/shadow/columns.yaml
+tests:
+  command: node --test "test/**/*.test.js"
+autopatch: merge
+mode: enforce
+pool_size: 3
+ports: {gateway: 8180, admin: 8181, dashboard: 8190, fleet: 8170}

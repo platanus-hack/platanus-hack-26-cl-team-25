@@ -46,7 +46,11 @@ h.snapshot(); h.close()
   system or `linecache` are ignored.
 - `proc`: any spawn audit event during a request. `net`: `socket.connect/sendto/sendmsg/getaddrinfo/gethostby*`
   during a request (the evidence push happens outside the request window).
-- `owner`: markers in the (decompressed) body whose owner ≠ requester, requester not admin. On
+- `owner`: markers in the (decompressed) body whose owner ≠ requester, requester not admin. Group-shared access:
+  with `sharing.json` (next to the seed, or `SHADOW_SHARING_PATH`; written by `immune.shadowdata` from `shared_via`),
+  on a request whose path parameter addresses group G, markers of G's members are not foreign to a requester who is
+  a member of G (membership read from the clone's own database). Markers of anyone outside G still fire, and nothing
+  is exempt when another oracle fired or no relation is declared. On
   `public_paths()` it still fires when the body holds markers of ≥ 2 foreign owners (bulk dump) or another
   oracle fired in the same request (e.g. SQLi through public search); a single-owner echo (login/register) is clean.
 

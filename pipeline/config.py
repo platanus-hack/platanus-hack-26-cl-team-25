@@ -74,46 +74,75 @@ class Config:
     patcher_timeout_s: float = 600.0
     verify_wait_s: float = 8.0
     reopen_cooldown_s: float = 300.0
+    retry_cooldown_s: float = 60.0      # transient close: tried again after this, x4 per retry, capped at 1 h
+    max_retries: int = 5
     policy_max_lines: int = 120
     policy_max_files: int = 4
     rule_ttl_s: int = 3600
     extra: dict = field(default_factory=dict)
+    app: object = None                  # immune.config.Config of the project (None = immune.config.current())
+
+    @property
+    def project(self):
+        """The project's immune.config.Config (app facts)."""
+        if self.app is None:
+            from immune import config as icfg
+            self.app = icfg.current()
+        return self.app
+
+    def reload_project(self):
+        """Re-read .immune/config.yaml (autopatch / mode may change while the pipeline runs)."""
+        from immune import config as icfg
+        try:
+            self.app = icfg.load(self.project.project_dir)
+        except icfg.ConfigError as e:
+            import logging
+            logging.getLogger("pipeline").warning("config reload failed, keeping the previous one: %s", e)
+        return self.app
 
     @classmethod
     def from_env(cls, env=None) -> "Config":
+        from immune import config as icfg
         env = dict(os.environ if env is None else env)
+        app = icfg.current(env)
         repo = env.get("REPO_DIR") or REPO_ROOT
         demo = _demo_env(repo)
-        rt = env.get("RUNTIME_DIR") or os.path.join(repo, "runtime")
+        rt = env.get("RUNTIME_DIR") or app.runtime_dir
         run_id = env.get("RUN_ID") or ""
         if not run_id:
             try:
                 run_id = open(os.path.join(rt, "run_id")).read().strip()
             except OSError:
                 run_id = "dev"
+        from immune.auth import prod_secret_for
+        secrets = {"PROD_APP_SECRET": env.get("PROD_APP_SECRET") or demo.get("PROD_APP_SECRET", "")}
+        if app.auth.secret_env and env.get(app.auth.secret_env):
+            secrets[app.auth.secret_env] = env[app.auth.secret_env]
+        target = env.get("REPO_TARGET") or ("official" if app.repo.target == "github" else "local")
         c = cls(
             repo_dir=repo,
             runtime_dir=rt,
             state_dir=env.get("PIPELINE_STATE_DIR") or os.path.join(rt, "pipeline"),
             run_id=run_id or "dev",
-            bus_url=(env.get("PIPELINE_BUS_URL") or env.get("FLEET_BUS_URL") or "http://127.0.0.1:8090").rstrip("/"),
+            bus_url=(env.get("PIPELINE_BUS_URL") or env.get("FLEET_BUS_URL")
+                     or "http://127.0.0.1:%d" % app.ports["dashboard"]).rstrip("/"),
             bus_token=env.get("BUS_TOKEN") or demo.get("BUS_TOKEN", ""),
-            gateway_admin_url=(env.get("GATEWAY_ADMIN_URL") or "http://127.0.0.1:8081").rstrip("/"),
-            gateway_url=(env.get("GATEWAY_URL") or "http://127.0.0.1:8080").rstrip("/"),
-            fleet_url=(env.get("FLEET_URL") or "http://127.0.0.1:%s" % env.get("FLEET_PORT", "8070")).rstrip("/"),
+            gateway_admin_url=(env.get("GATEWAY_ADMIN_URL") or "http://127.0.0.1:%d" % app.ports["admin"]).rstrip("/"),
+            gateway_url=(env.get("GATEWAY_URL") or "http://127.0.0.1:%d" % app.ports["gateway"]).rstrip("/"),
+            fleet_url=(env.get("FLEET_URL") or "http://127.0.0.1:%s" % env.get("FLEET_PORT", app.ports["fleet"])).rstrip("/"),
             admin_token=env.get("ADMIN_TOKEN") or demo.get("ADMIN_TOKEN", ""),
-            prod_app_secret=env.get("PROD_APP_SECRET") or demo.get("PROD_APP_SECRET", ""),
-            openapi_path=env.get("OPENAPI_PATH_HOST") or os.path.join(repo, "contracts", "openapi.yaml"),
+            prod_app_secret=prod_secret_for(app.auth.to_dict(), secrets),
+            openapi_path=env.get("OPENAPI_PATH_HOST") or app.openapi,
             manifest_path=env.get("MANIFEST_PATH_HOST") or os.path.join(rt, "data", "manifest.json"),
             record_path=env.get("RECORD_PATH_HOST") or os.path.join(rt, "recordings", "requests.jsonl"),
             base_release=env.get("PIPELINE_BASE_RELEASE", "t0"),
             patcher_module=env.get("PATCHER_MODULE", "patcher"),
-            scenarios_module=env.get("SCENARIOS_MODULE", "sim.scenarios"),
-            repo_target=env.get("REPO_TARGET", "local"),
-            github_repo=env.get("GITHUB_REPO", ""),
+            scenarios_module=env.get("SCENARIOS_MODULE", app.scenarios),
+            repo_target=target,
+            github_repo=env.get("GITHUB_REPO", app.repo.github),
             runner_mode=env.get("RUNNER_MODE", "docker"),
             runner_image=env.get("RUNNER_IMAGE", "immune-base:1"),
-            runner_prefix=env.get("RUNNER_PREFIX", "immune-runner"),
+            runner_prefix=env.get("RUNNER_PREFIX", app.prefix + "-runner"),
             runner_timeout_s=_f(env, "RUNNER_TIMEOUT_S", 240),
             runner_memory=env.get("RUNNER_MEMORY", "1g"),
             runner_cpus=env.get("RUNNER_CPUS", "2"),
@@ -126,9 +155,12 @@ class Config:
             patcher_timeout_s=_f(env, "PIPELINE_PATCHER_TIMEOUT_S", 600),
             verify_wait_s=_f(env, "PIPELINE_VERIFY_WAIT_S", 8),
             reopen_cooldown_s=_f(env, "PIPELINE_REOPEN_COOLDOWN_S", 300),
+            retry_cooldown_s=_f(env, "PIPELINE_RETRY_COOLDOWN_S", 60),
+            max_retries=_i(env, "PIPELINE_MAX_RETRIES", 5),
             policy_max_lines=_i(env, "POLICY_MAX_LINES", 120),
             policy_max_files=_i(env, "POLICY_MAX_FILES", 4),
             rule_ttl_s=_i(env, "PIPELINE_RULE_TTL_S", 3600),
+            app=app,
         )
         return c
 

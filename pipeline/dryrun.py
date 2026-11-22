@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 
+from . import diffs
 from .bus import Follower, Publisher
 from .clients import Fleet, GatewayAdmin
 from .config import Config
@@ -37,13 +38,16 @@ def run(fixtures: list, workdir: str | None = None, env: dict | None = None, tim
     work = workdir or tempfile.mkdtemp(prefix="pipeline-dryrun-")
     rt = os.path.join(work, "runtime")
     cfg0 = Config.from_env()
+    app = cfg0.project
     src_t0 = cfg0.release_dir("t0")
-    if not os.path.isdir(os.path.join(src_t0, "victim")):
-        src_t0 = cfg0.repo_dir
-    os.makedirs(os.path.join(rt, "releases", "t0"), exist_ok=True)
-    if not os.path.isdir(os.path.join(rt, "releases", "t0", "victim")):
-        shutil.copytree(os.path.join(src_t0, "victim"), os.path.join(rt, "releases", "t0", "victim"),
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if not app.release_complete(src_t0):
+        src_t0 = app.project_dir
+    dst_t0 = os.path.join(rt, "releases", "t0")
+    os.makedirs(dst_t0, exist_ok=True)
+    if not app.release_complete(dst_t0):
+        tmp = diffs.copy_release(src_t0, None, app.app.release_paths)
+        shutil.rmtree(dst_t0)
+        shutil.move(tmp, dst_t0)
     os.makedirs(os.path.join(rt, "data"), exist_ok=True)
     man = cfg0.manifest_path if os.path.exists(cfg0.manifest_path) else None
     if man:
@@ -64,6 +68,8 @@ def run(fixtures: list, workdir: str | None = None, env: dict | None = None, tim
     repo = LocalRepo(os.path.join(rt, "repo"), cfg.run_id, cfg.release_dir("t0"))
     pipe = Pipeline(cfg, state, pub, GatewayAdmin(cfg.gateway_admin_url, cfg.admin_token),
                     Fleet(cfg.fleet_url, cfg.admin_token), repo)
+    if not (env or {}).get("DRYRUN_AUDIT"):
+        pipe.audit_settings = lambda: (False, 0, 0)   # one incident's flow; the class self-audit is tested apart
     follower = Follower(cfg.bus_url, lambda: state.data["last_seq"], pipe.on_event, pipe.on_reset)
     follower.start()
     t0 = time.time()
@@ -120,7 +126,7 @@ def main(argv=None) -> int:
         seq = [label(x) for x in res["events"] if x.get("incident") == iid or
                (x["type"].startswith("deploy.") and x["data"].get("release") == inc.get("release")) or
                (x["type"] == "rule.expired" and x["data"].get("id") == (inc.get("rule") or {}).get("id"))]
-        rel = os.path.join(res["runtime"], "releases", inc.get("release") or "-", "victim")
+        rel = os.path.join(res["runtime"], "releases", inc.get("release") or "-", Config.from_env().project.app.release_paths[0])
         good = inc.get("outcome") == "patched" and seq == EXPECTED and os.path.isdir(rel)
         ok &= good
         print("\n%s: outcome=%s reason=%s" % (iid, inc.get("outcome"), inc.get("reason")))

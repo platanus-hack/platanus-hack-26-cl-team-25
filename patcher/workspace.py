@@ -1,4 +1,4 @@
-"""Throw-away copies of `release_dir/victim` with a private git baseline.
+"""Throw-away copies of a release (its `app.release_paths`) with a private git baseline.
 
 The git directory lives NEXT TO the work tree (not inside it), so the model's
 file tools never see `.git` and cannot tamper with the baseline.
@@ -14,19 +14,32 @@ _SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git"}
 
 
 class Workspace:
-    """tmp/work/victim  (copy)   tmp/git  (baseline repo)."""
+    """tmp/work/<release paths>  (copy)   tmp/git  (baseline repo)."""
 
-    def __init__(self, release_dir: str, prefix: str = "patcher-"):
+    def __init__(self, release_dir: str, prefix: str = "patcher-", paths: list[str] | None = None):
         self.release_dir = os.path.realpath(release_dir)
-        src = os.path.join(self.release_dir, "victim")
-        if not os.path.isdir(src):
-            raise FileNotFoundError(f"{src} is not a directory")
+        if paths is None:
+            from immune import config as icfg
+            paths = icfg.current().app.release_paths
+        self.paths = list(paths)
+        missing = [p for p in self.paths if not os.path.lexists(os.path.join(self.release_dir, p))]
+        if missing or not self.paths:
+            raise FileNotFoundError(f"{self.release_dir} lacks {missing or 'release paths'}")
         self.tmp = tempfile.mkdtemp(prefix=prefix)
         self.work = os.path.join(self.tmp, "work")
         self.gitdir = os.path.join(self.tmp, "git")
         os.makedirs(self.work)
         self.skipped: list[str] = []
-        self._copy(src, os.path.join(self.work, "victim"))
+        for p in self.paths:
+            src, dst = os.path.join(self.release_dir, p), os.path.join(self.work, p)
+            if os.path.islink(src):
+                self.skipped.append(p)
+            elif os.path.isdir(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                self._copy(src, dst)
+            elif os.path.isfile(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst, follow_symlinks=False)
         self.git("init", "-q", "--template=")
         self.git("add", "-A")
         self.git("commit", "-q", "--no-verify", "-m", "baseline")

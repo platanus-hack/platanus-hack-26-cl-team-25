@@ -1,7 +1,7 @@
 """Gate 1 — mechanical policy on the diff (docs/plan-construccion.md §4.1).
 
 Compares the before/after ASTs of every changed file (never regexes over the diff):
-only files under victim/app/; no new imports (or dynamic import/exec/env access);
+only existing Python files under the project's `app.source_dirs`; no new imports (or dynamic import/exec/env access);
 no new reads of request attributes (new handler parameters, Request/Header/Cookie
 objects, .headers/.cookies/...); no comparisons against literals the app did not
 already compare against; no removed authentication checks; no high-entropy strings;
@@ -17,7 +17,18 @@ from collections import Counter
 
 from . import diffs
 
-ALLOWED_PREFIX = "victim/app/"
+
+
+def source_dirs(dirs=None) -> list:
+    """Allowed edit area: app.source_dirs of .immune/config.yaml (release-relative, no trailing slash)."""
+    if dirs is None:
+        from immune import config as icfg
+        dirs = icfg.current().app.source_dirs
+    return [d.strip("/") for d in dirs if d and d.strip("/")]
+
+
+def _allowed(path: str, dirs: list) -> bool:
+    return any(path.startswith(d + "/") for d in dirs)
 REQ_ATTRS = {"headers", "cookies", "query_params", "path_params", "client", "url", "base_url", "scope", "state",
              "form", "body", "stream", "receive", "json"}
 REQ_NAMES = {"Request", "Header", "Cookie", "Query", "Body", "Form", "File", "UploadFile", "Depends", "Security",
@@ -195,22 +206,28 @@ def _read(path):
         return None
 
 
-def package_trees(release_dir: str) -> dict:
+def package_trees(release_dir: str, dirs=None) -> dict:
     out = {}
-    root = os.path.join(release_dir, ALLOWED_PREFIX)
-    for d, _ds, fs in os.walk(root):
-        for f in fs:
-            if f.endswith(".py"):
-                p = os.path.join(d, f)
-                try:
-                    out[os.path.relpath(p, release_dir).replace(os.sep, "/")] = ast.parse(_read(p) or "", p)
-                except SyntaxError:
-                    pass
+    for sd in source_dirs(dirs):
+        root = os.path.join(release_dir, sd)
+        for d, _ds, fs in os.walk(root):
+            for f in fs:
+                if f.endswith(".py"):
+                    p = os.path.join(d, f)
+                    rel = os.path.relpath(p, release_dir).replace(os.sep, "/")
+                    if rel in out:
+                        continue
+                    try:
+                        out[rel] = ast.parse(_read(p) or "", p)
+                    except SyntaxError:
+                        pass
     return out
 
 
-def check(diff: str, base_dir: str, patched_dir: str, max_lines: int = 120, max_files: int = 4):
-    """-> (ok: bool, detail: str, violations: list[str])"""
+def check(diff: str, base_dir: str, patched_dir: str, max_lines: int = 120, max_files: int = 4, dirs=None):
+    """-> (ok: bool, detail: str, violations: list[str]). dirs: allowed edit area (default app.source_dirs)."""
+    dirs = source_dirs(dirs)
+    area = ", ".join(d + "/" for d in dirs) or "(no app.source_dirs configured)"
     v = []
     try:
         changes = diffs.parse(diff)
@@ -227,8 +244,8 @@ def check(diff: str, base_dir: str, patched_dir: str, max_lines: int = 120, max_
             v.append("%s -> %s: renames are not allowed" % (ch.old, ch.new))
         p = ch.new
         norm = os.path.normpath(p).replace(os.sep, "/")
-        if p.startswith("/") or ".." in p.split("/") or norm != p or not norm.startswith(ALLOWED_PREFIX):
-            v.append("%s: only files under %s may change" % (p, ALLOWED_PREFIX))
+        if p.startswith("/") or ".." in p.split("/") or norm != p or not _allowed(norm, dirs):
+            v.append("%s: only files under %s may change" % (p, area))
         elif not p.endswith(".py"):
             v.append("%s: only Python sources may change" % p)
         elif os.path.islink(os.path.join(base_dir, p)) or os.path.islink(os.path.join(patched_dir, p)):
@@ -241,7 +258,7 @@ def check(diff: str, base_dir: str, patched_dir: str, max_lines: int = 120, max_
     if len(changes) > max_files:
         v.append("too many files: %d (max %d)" % (len(changes), max_files))
 
-    base_trees = package_trees(base_dir)
+    base_trees = package_trees(base_dir, dirs)
     base_lits = {k for t in base_trees.values() for k, _ in compared_literals(t)} | IGNORED_LITERALS
     base_strs = {s for t in base_trees.values() for s in string_constants(t)}
     guards = guard_names(list(base_trees.values()))

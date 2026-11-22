@@ -25,6 +25,8 @@ class Manifest:
     seed_max_uid: int = 0
     canaries: dict = field(default_factory=dict)     # path-param name -> set of str values
     ownership: dict = field(default_factory=dict)    # "orders" -> {"12": 7}
+    groups: dict = field(default_factory=dict)       # group-shared access: "teams" -> {"1": [3, 5]}
+    group_routes: dict = field(default_factory=dict)  # path param -> group table ("team_id" -> "teams")
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "Manifest":
@@ -37,7 +39,11 @@ class Manifest:
             smu = int(d.get("seed_max_uid") or 0)
         except (TypeError, ValueError):
             smu = 0
-        return cls(seed_max_uid=smu, canaries=canaries, ownership=d.get("ownership") or {})
+        groups = {str(t): {str(g): {str(u) for u in (ms or [])} for g, ms in (gm or {}).items()}
+                  for t, gm in (d.get("groups") or {}).items() if isinstance(gm, dict)}
+        group_routes = {str(p): str(t) for p, t in (d.get("group_routes") or {}).items() if str(t) in groups}
+        return cls(seed_max_uid=smu, canaries=canaries, ownership=d.get("ownership") or {}, groups=groups,
+                   group_routes=group_routes)
 
     @classmethod
     def load(cls, path: str | None) -> "Manifest":
@@ -410,6 +416,8 @@ def _strip_indices(dotted: str) -> str:
 def _is_owner(manifest: Manifest, param: str, value: str, uid: int | None) -> bool:
     if uid is None:
         return False
+    if param in manifest.group_routes:      # a members-scoped route: every member of the group "owns" it
+        return str(uid) in manifest.groups.get(manifest.group_routes[param], {}).get(value, ())
     if param == "user_id":
         return str(uid) == value
     if param.endswith("_id"):

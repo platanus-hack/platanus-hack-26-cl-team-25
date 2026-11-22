@@ -1,0 +1,8 @@
+{
+  "name": "sidecar-demo-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Demo app used only to test the sidecar observer",
+  "main": "server.js",
+  "dependencies": { "pg": "8.13.1" }
+}

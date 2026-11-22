@@ -98,12 +98,18 @@ class Lifespan:
 
 class Engine:
     def __init__(self, profile: str, seed_db: str | None, state: bytes | None = None, collector: str | None = None,
-                 clone_id: str = "", clone_key: str = "", release: str = ""):
+                 clone_id: str = "", clone_key: str = "", release: str = "", db_env: str | None = None,
+                 release_root: str | None = None, release_paths: list[str] | None = None):
         instrument.install()  # before anything of the app is imported
-        if not os.environ.get("APP_DB"):
-            os.environ["APP_DB"] = os.path.join(tempfile.mkdtemp(prefix="shadow-"), "app.db")
+        # the env var through which the app receives its sqlite path (database.path_env)
+        self.db_env = db_env or os.environ.get("SHADOW_DB_ENV") or "APP_DB"
+        if not os.environ.get(self.db_env):
+            os.environ[self.db_env] = os.path.join(tempfile.mkdtemp(prefix="shadow-"), "app.db")
         os.environ.setdefault("APP_SECRET", "shadow-secret")
-        self.db_path = os.environ["APP_DB"]
+        self.db_path = os.environ[self.db_env]
+        self.release_root = release_root or os.environ.get("SHADOW_RELEASE_ROOT") or None
+        rp = release_paths if release_paths is not None else os.environ.get("SHADOW_RELEASE_PATHS", "").split(":")
+        self.release_paths = [p for p in rp if p]
         self.seed_db = seed_db
         self.base_state = state
         self.collector = collector.rstrip("/") if collector else None
@@ -126,6 +132,8 @@ class Engine:
             log.warning("load_markers failed (%r): owner oracle disabled", e)
             self.markers = {}
         self.public = [p for p in self.profile.public_paths()]
+        self.sharing = load_sharing(os.environ.get("SHADOW_SHARING_PATH")
+                                    or (os.path.join(os.path.dirname(seed_db), "sharing.json") if seed_db else ""))
         self.lifespan = Lifespan(self.app)
         self._constants = None
         self._const_mods = -1
@@ -133,7 +141,7 @@ class Engine:
 
     # ------------------------------------------------------------ setup
     def _activate(self):
-        instrument.configure(self.pkg_dir, self.allowed_roots)
+        instrument.configure(self.pkg_dir, self.allowed_roots, self.release_root, self.release_paths)
         STATE.allowlist = self.allowlist
 
     async def start(self):
@@ -318,6 +326,15 @@ class Engine:
             self.reset()
 
     def _client_identity(self, h, env):
+        hook = getattr(self.profile, "identify", None)   # optional profile hook: (env, headers) -> (uid, role) | None
+        if callable(hook):
+            try:
+                got = hook(env, h)
+            except Exception:
+                got = None
+            if not got:
+                return None
+            return authtoken.Identity(uid=int(got[0]), role=str(got[1] or "user"))
         tok = authtoken.bearer(h)
         if not tok:
             return None
@@ -348,10 +365,36 @@ class Engine:
         events = sqltaint.check(rec.statements, ins, self.constants())
         events += rec.events  # file / proc / net, collected live
         last_stack = rec.statements[-1][1] if rec.statements else []
-        events += self.owner_events(path, rheaders, rbody, uid, role, bool(events), last_stack)
+        events += self.owner_events(path, rheaders, rbody, uid, role, bool(events), last_stack, path_params)
         return events
 
-    def owner_events(self, path, rheaders, rbody, uid, role, other_fired, stack=()):
+    def co_members(self, path_params, uid) -> set:
+        """Group-shared access (shadow/sharing.json): the members of every group this request addresses
+        through a members-scoped path parameter, provided the requester is one of them. Read from the
+        clone's own database, so it follows L2 changes. Empty without a declared relation."""
+        if not self.sharing or uid is None or not path_params:
+            return set()
+        out = set()
+        for name, spec in self.sharing.items():
+            if name not in path_params:
+                continue
+            val = str(path_params[name])
+            try:
+                conn = db.ORIG_CONNECT(self.db_path, timeout=10)
+                try:
+                    rows = conn.execute('SELECT "%s" FROM "%s" WHERE "%s" = ?' % (
+                        spec["member"], spec["table"], spec["group"]), (int(val) if val.isdigit() else val,)).fetchall()
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001 - never exempt on error
+                log.warning("sharing lookup %s=%s failed: %r", name, val, e)
+                continue
+            members = {_as_int(r[0]) for r in rows}
+            if uid in members:
+                out |= members
+        return out
+
+    def owner_events(self, path, rheaders, rbody, uid, role, other_fired, stack=(), path_params=None):
         """Cross-owner data in the response.
 
         Fires for every distinct marker owner != requester (anonymous counts as
@@ -373,12 +416,38 @@ class Engine:
             o = self.markers.get(m.decode())
             if o is not None and o != uid:
                 owners.add(o)
+        if owners and not other_fired:
+            owners -= self.co_members(path_params, uid)
         if not owners:
             return []
         if self.is_public(path) and not (other_fired or len(owners) >= 2):
             return []
         return [{"oracle": "owner", "detail": {"marker_owner": o, "requester": uid}, "stack": list(stack)}
                 for o in sorted(owners)[:MAX_OWNER_EVENTS]]
+
+
+def _as_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def load_sharing(path: str) -> dict:
+    """{path param: {"table", "member", "group"}} from sharing.json (written by immune.shadowdata); {} if absent."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+        out = {}
+        for name, s in ((doc or {}).get("routes") or {}).items():
+            if all(isinstance(s.get(k), str) and s[k].replace("_", "").isalnum() for k in ("table", "member", "group")):
+                out[str(name)] = {k: s[k] for k in ("table", "member", "group")}
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.warning("sharing file %s unreadable (%r): no group-shared access", path, e)
+        return {}
 
 
 def _decoded_body(rheaders, body: bytes) -> bytes:

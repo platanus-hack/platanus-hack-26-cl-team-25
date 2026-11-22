@@ -1,0 +1,359 @@
+"""``python -m sidecar``: the out-of-process shadow wrapper.
+
+Per request (contracts/README.md §5, under one lock):
+ 1. strip ``x-imm-*``;  2. identity hook (``x-imm-uid`` -> app credentials, ``ensure_user`` on the clone db);
+ 3. (L2 pre-state: not available for Postgres, ``pre_state_b64`` is null);
+ 4. open the observation window, forward to the app on loopback, buffer the whole response, keep the
+    window open ``grace_ms`` longer, close it;  5. oracles;  6. verdict;  7. signed evidence push before
+    the response is released;  8. response with verdict headers;  9. L1: recreate the clone database.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import logging
+import os
+import sys
+import time
+
+from immune_contracts import wire
+
+from . import config as cfgmod
+from . import constants as constmod
+from . import http1, identity, observer, pgclient
+from .pgproxy import PgProxy
+from .tracer import Tracer
+
+log = logging.getLogger("sidecar")
+WARMUP_MISSING = "/__sidecar_warmup__/missing"
+
+
+class Sidecar:
+    def __init__(self, cfg: cfgmod.Config):
+        self.cfg = cfg
+        self.env = dict(os.environ)
+        self.obs = observer.Observer(cfg.allowed_file_roots)
+        self.ident = identity.Identity(identity.load_profile(cfg.profile), cfg.identity_command)
+        self.markers = self.ident.markers(self.env, cfg.markers_path)
+        self.public = self.ident.public_paths(cfg.public_paths)
+        self.tracer = Tracer(self.obs.on_obs, mode=cfg.mode, command=cfg.command, anchor=cfg.target_pid) \
+            if cfg.trace else None
+        self.proxy = None
+        self.admin = None
+        self.constants = None
+        self.lock = asyncio.Lock()
+        self._http = None
+        self.last_reset_ms = None
+        # judge mode (pipeline's ephemeral clones only, never fleet clones): every response also carries
+        # x-imm-trace = base64(JSON {events, sql:[{sql, params}], failed, opens, marker_owners})
+        self.judge = os.environ.get("SIDECAR_JUDGE") == "1"
+
+    # ------------------------------------------------------------------ lifecycle
+    async def start(self):
+        cfg = self.cfg
+        if cfg.postgres:
+            await self.reset_db()
+            pg = cfg.postgres
+            self.proxy = PgProxy(pg.listen_host, pg.listen_port, pg.up_host, pg.up_port, self.obs.on_statement,
+                                 self.obs.on_bound if self.judge else None)
+            await self.proxy.start()
+        self.obs.learning = True
+        if self.tracer:
+            await asyncio.to_thread(self.tracer.start)
+        await self._wait_health()
+        for _ in range(max(1, int(cfg.warmup_rounds))):
+            for p in [cfg.health, *cfg.warmup_paths, WARMUP_MISSING]:
+                try:
+                    await http1.request(cfg.app_host, cfg.app_port, "GET", p, [(b"host", b"localhost")], b"", 10)
+                except Exception as e:
+                    log.info("warm-up %s: %r", p, e)
+        await asyncio.sleep(max(cfg.grace_ms, 50) / 1000)
+        self.obs.learning = False
+        root = self.tracer.root_dir() if self.tracer else "/"
+        exes = [f"/proc/{p}/exe" for p in self.tracer.app_pids_now()] if self.tracer else []
+        self.constants = await asyncio.to_thread(constmod.scan, root, cfg.source_dirs, exes,
+                                                 int(cfg.scan_executable_max_mb) << 20)
+        if cfg.postgres:
+            await self.reset_db()
+        log.info("ready: tracer=%s pids=%s allowlist=%d files, %d net; %d markers; %d constants; reset %.1f ms",
+                 cfg.mode if self.tracer else "off", self.tracer.pids if self.tracer else [],
+                 len(self.obs.file_allow), len(self.obs.net_allow), len(self.markers),
+                 len(self.constants.strings), self.last_reset_ms or 0)
+
+    async def stop(self):
+        if self.proxy:
+            await self.proxy.stop()
+        if self.admin:
+            await self.admin.close()
+        if self.tracer:
+            self.tracer.stop()
+        if self._http:
+            await self._http.aclose()
+
+    async def _wait_health(self, timeout=60.0):
+        end = time.time() + timeout
+        last = None
+        while time.time() < end:
+            try:
+                st, _, _ = await http1.request(self.cfg.app_host, self.cfg.app_port, "GET", self.cfg.health,
+                                               [(b"host", b"localhost")], b"", 5)
+                if st < 500:
+                    return
+                last = st
+            except Exception as e:
+                last = e
+            await asyncio.sleep(0.2)
+        raise RuntimeError(f"app not healthy on {self.cfg.app_host}:{self.cfg.app_port}{self.cfg.health}: {last!r}")
+
+    async def reset_db(self):
+        pg = self.cfg.postgres
+        t = time.perf_counter()
+        if self.proxy:
+            self.proxy.ready.clear()  # new app connections wait until the database exists again
+        try:
+            if self.proxy:
+                await self.proxy.terminate_all()
+            for attempt in range(2):
+                try:
+                    if self.admin is None:
+                        self.admin = await pgclient.PgConn.from_url(pg.admin_url)
+                    q = pgclient.quote_ident
+                    # wait (bounded) for the sessions we just ended to leave; FORCE covers anything else,
+                    # e.g. a connection the app opened directly to Postgres
+                    end = time.perf_counter() + 0.5
+                    while time.perf_counter() < end:
+                        rows = await self.admin.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
+                                                        (pg.database,))
+                        if rows[0][0] == "0":
+                            break
+                        await asyncio.sleep(0.002)
+                    await self.admin.query(f"DROP DATABASE IF EXISTS {q(pg.database)} WITH (FORCE)")
+                    await self.admin.query(f"CREATE DATABASE {q(pg.database)} TEMPLATE {q(pg.template)}")
+                    break
+                except (ConnectionError, OSError):
+                    self.admin = None
+                    if attempt:
+                        raise
+        finally:
+            if self.proxy:
+                self.proxy.ready.set()
+        self.last_reset_ms = (time.perf_counter() - t) * 1000
+
+    async def ensure_user(self, uid, role):
+        p = self.ident.profile
+        if p is None or not hasattr(p, "ensure_user") or not self.cfg.postgres:
+            return
+        pg = self.cfg.postgres
+        conn = await pgclient.PgConn.from_url(pg.admin_url, database=pg.database)
+        try:
+            await asyncio.to_thread(p.ensure_user, identity.SyncPg(conn, asyncio.get_running_loop()), uid, role)
+        finally:
+            await conn.close()
+
+    # ------------------------------------------------------------------ one request
+    async def handle(self, method, path, raw_path, query_string: bytes, headers, body: bytes):
+        cfg = self.cfg
+        imm, client = {}, []
+        for k, v in headers:
+            kl = k.decode("latin-1").lower()
+            if kl.startswith(wire.INTERNAL_PREFIX):
+                imm[kl] = v.decode("latin-1")
+            else:
+                client.append((kl.encode("latin-1"), v))
+        rid = imm.get(wire.H_RID, "")
+        mode = "L2" if imm.get(wire.H_MODE, "L1").upper() == "L2" else "L1"
+        client_h = _hdict(client)
+        uid = role = None
+        app_headers = list(client)
+        if imm.get(wire.H_UID, "").strip():
+            try:
+                uid = int(imm[wire.H_UID])
+            except ValueError:
+                uid = None
+        if uid is not None:
+            role = imm.get(wire.H_ROLE) or "user"
+            await self.ensure_user(uid, role)
+            new = self.ident.headers_for(self.env, uid, role)
+            if new:
+                names = {k.encode() for k in new}
+                app_headers = [(k, v) for k, v in app_headers if k not in names] + \
+                              [(k.encode(), v.encode("latin-1")) for k, v in new.items()]
+        else:
+            uid, role = self.ident.identify(self.env, client_h)
+
+        target = raw_path + (b"?" + query_string if query_string else b"")
+        t0 = time.perf_counter()
+        if self.tracer and not self.tracer.alive():
+            # fail closed: without the tracer we cannot judge
+            status, rheaders, rbody, rec = 503, [(b"content-type", b"text/plain")], b"sidecar tracer is not running", None
+            self.obs.begin(); rec = self.obs.end()
+            tracer_dead = True
+        else:
+            tracer_dead = False
+            self.obs.begin()
+            try:
+                status, rheaders, rbody = await http1.request(cfg.app_host, cfg.app_port, method,
+                                                              target.decode("latin-1"), app_headers, body,
+                                                              cfg.request_timeout_s)
+            except (http1.AppError, asyncio.TimeoutError) as e:
+                log.warning("rid=%s app error %r", rid, e)
+                status, rheaders, rbody = 502, [(b"content-type", b"text/plain")], b"Bad Gateway"
+            t_app = time.perf_counter()
+            await asyncio.sleep(cfg.grace_ms / 1000)
+            rec = self.obs.end()
+        t1 = time.perf_counter()
+
+        query = query_string.decode("latin-1")
+        rh = _hdict(rheaders)
+        events = observer.sql_events(rec.statements, observer.extract_inputs(path, query, client_h, body),
+                                     self.constants)
+        events += self.obs.system_events(rec)
+        events += observer.owner_events(self.markers, self.public, path, rh, rbody, uid, role, bool(events))
+        if events:
+            verdict = wire.VERDICT_ORACLE
+        elif status in (401, 404) or status >= 500 or tracer_dead:
+            verdict = wire.VERDICT_INCONCLUSIVE
+        else:
+            verdict = wire.VERDICT_CLEAN
+        for sql, err in rec.failed:
+            log.info("rid=%s failed statement (no sql event): %s -> %s", rid, sql[:300], err)
+        evidence = None
+        if verdict == wire.VERDICT_ORACLE:
+            evidence = {"clone": cfg.clone_id, "rid": rid, "mode": mode, "release": cfg.release, "verdict": verdict,
+                        "uid": uid, "role": role,
+                        "request": {"method": method.upper(), "path": path, "query": query, "headers": client_h,
+                                    "body_b64": base64.b64encode(body).decode()},
+                        "status": status, "events": events, "pre_state_b64": None}
+            if cfg.collector_url:
+                await self._push(evidence)
+        out = [(k, v) for k, v in rheaders if not k.startswith(wire.INTERNAL_PREFIX.encode())]
+        out += [(b"content-length", str(len(rbody)).encode()),
+                (wire.H_VERDICT.encode(), verdict.encode()), (wire.H_EVENTS.encode(), str(len(events)).encode())]
+        if self.judge:
+            out.append((b"x-imm-trace", base64.b64encode(wire.dumps(self._trace(rec, events, rbody, uid)))))
+        t_resp = t0 if tracer_dead else t_app
+        # latest observation relative to the moment the app's response was complete (grace-period evidence)
+        late = max(((t - t_resp) * 1000 for t in rec.times), default=float("nan"))
+        log.info("rid=%s %s %s mode=%s uid=%s -> %s %s %s app_ms=%.1f window_ms=%.1f stmts=%d obs=%d late_ms=%.2f",
+                 rid, method, path, mode, uid, status, verdict, [e["oracle"] for e in events],
+                 (t_resp - t0) * 1000, (t1 - t0) * 1000, len(rec.statements), len(rec.obs), late)
+        return status, out, rbody, mode
+
+    def _trace(self, rec, events, rbody, uid) -> dict:
+        bq = {}
+        for s, prm in rec.bound:
+            bq.setdefault(s, []).append(prm)
+        sql = [{"sql": s, "params": bq[s].pop(0) if bq.get(s) else []} for s in rec.statements]
+        owners = sorted({self.markers[m.decode()] for m in observer.MARKER_RE.findall(rbody or b"")
+                         if m.decode() in self.markers})
+        opens = sorted({o.detail["realpath"] for o in rec.obs if o.kind == "file"})
+        return {"events": events, "sql": sql[:100], "failed": [list(f) for f in rec.failed[:20]], "opens": opens,
+                "marker_owners": owners, "uid": uid}
+
+    async def finish(self, mode):
+        if mode == "L1" and self.cfg.postgres:
+            try:
+                await self.reset_db()
+                log.info("L1 reset %.1f ms", self.last_reset_ms)
+            except Exception:
+                log.exception("L1 reset failed")
+
+    async def _push(self, evidence):
+        import httpx
+        body = wire.dumps(evidence)
+        hdrs = {"content-type": "application/json", wire.H_CLONE_ID: self.cfg.clone_id,
+                wire.H_SIGNATURE: wire.sign(self.cfg.clone_key, body)}
+        try:
+            if self._http is None:
+                self._http = httpx.AsyncClient(timeout=2.0)
+            r = await self._http.post(self.cfg.collector_url.rstrip("/") + "/_clone/evidence", content=body, headers=hdrs)
+            log.info("evidence rid=%s pushed: %s", evidence["rid"], r.status_code)
+        except Exception as e:
+            log.warning("evidence rid=%s push failed: %r", evidence["rid"], e)
+
+
+def _hdict(pairs) -> dict:
+    out = {}
+    for k, v in pairs:
+        k = k.decode("latin-1").lower() if isinstance(k, bytes) else k.lower()
+        v = v.decode("latin-1") if isinstance(v, bytes) else v
+        out[k] = f"{out[k]}, {v}" if k in out else v
+    return out
+
+
+class App:
+    """ASGI front end (served by uvicorn)."""
+
+    def __init__(self, sc: Sidecar):
+        self.sc = sc
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                msg = await receive()
+                if msg["type"] == "lifespan.startup":
+                    try:
+                        await self.sc.start()
+                    except Exception as e:
+                        log.exception("startup failed")
+                        await send({"type": "lifespan.startup.failed", "message": repr(e)})
+                        return
+                    await send({"type": "lifespan.startup.complete"})
+                elif msg["type"] == "lifespan.shutdown":
+                    await self.sc.stop()
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        if scope["type"] != "http":
+            return
+        body = bytearray()
+        while True:
+            msg = await receive()
+            if msg["type"] == "http.request":
+                body += msg.get("body", b"")
+                if not msg.get("more_body", False):
+                    break
+            elif msg["type"] == "http.disconnect":
+                return
+        raw_path = scope.get("raw_path") or scope["path"].encode("utf-8")
+        async with self.sc.lock:
+            status, headers, rbody, mode = await self.sc.handle(scope["method"], scope["path"], raw_path,
+                                                                scope.get("query_string", b""),
+                                                                list(scope.get("headers", [])), bytes(body))
+            try:
+                await send({"type": "http.response.start", "status": status, "headers": headers})
+                await send({"type": "http.response.body", "body": rbody, "more_body": False})
+            finally:
+                await self.sc.finish(mode)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="python -m sidecar")
+    ap.add_argument("--config", default=os.environ.get("SIDECAR_CONFIG"))
+    ap.add_argument("--host")
+    ap.add_argument("--port", type=int)
+    ap.add_argument("--app-port", type=int)
+    ap.add_argument("--mode", choices=["attach", "launch"])
+    ap.add_argument("--no-trace", action="store_true", help="do not attach strace (overhead measurement only)")
+    ap.add_argument("--log-level", default=os.environ.get("SIDECAR_LOG_LEVEL", "info"))
+    ap.add_argument("command", nargs="*", help="launch mode: the app command (after --)")
+    a = ap.parse_args(argv)
+    logging.basicConfig(stream=sys.stderr, level=a.log_level.upper(),
+                        format="%(asctime)s sidecar %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    cfg = cfgmod.load(a.config)
+    if a.host:
+        cfg.listen_host = a.host
+    if a.port:
+        cfg.listen_port = a.port
+    if a.app_port:
+        cfg.app_port = a.app_port
+    if a.mode:
+        cfg.mode = a.mode
+    if a.command:
+        cfg.command = a.command
+    if a.no_trace:
+        cfg.trace = False
+    import uvicorn
+    uvicorn.run(App(Sidecar(cfg)), host=cfg.listen_host, port=cfg.listen_port, log_level="warning",
+                lifespan="on", access_log=False)

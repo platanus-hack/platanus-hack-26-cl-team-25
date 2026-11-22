@@ -150,8 +150,9 @@ def env(dk, gw):
     cfg = Config(
         repo_dir=repo, runtime_dir=runtime, run_id=f"wp4-test-{sfx}", admin_token=TOKEN, gateway_url=gw.url,
         bus_url="http://127.0.0.1:1", name_prefix="wp4", prodnet=nets[0].name, clonenet=nets[1].name,
-        release_pkg="fixture_app", victim_app="fixture_app.main:app", shadow_profile="fixture_app.shadow_profile",
-        clone_cmd="python /srv/stubclone.py", prod_secret="ps", shadow_secret="ss",
+        release_paths=["fixture_app"], asgi="fixture_app.main:app", shadow_profile="fixture_app.shadow_profile",
+        app_env={"APP_DB": "{db}", "APP_STATIC": "{static}", "APP_SECRET": "{secret}"}, static="fixture_app/static",
+        smoke_path="/openapi.json", project="wp4", clone_cmd="python /opt/immune/stubclone.py", prod_secret="ps", shadow_secret="ss",
         deploy_watch_s=1.5, watch_poll_s=0.3, health_timeout_s=30, reconcile_s=0.3)
     fleet = Fleet(cfg, dk)
     yield type("Env", (), dict(cfg=cfg, fleet=fleet, gw=gw, dk=dk, runtime=runtime, prod=prod, nets=nets))

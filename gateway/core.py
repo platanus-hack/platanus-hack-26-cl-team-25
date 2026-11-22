@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from immune.auth import Authenticator, credential_key, prod_secret_for
 from immune_contracts import authtoken, events, wire
 
 from . import l0
@@ -38,7 +39,22 @@ RESP_DROP = HOP | {"content-encoding", "date", "server"}
 DENY_BODY = b'{"detail":"Not Found"}'
 SID_RE = re.compile(r"[A-Za-z0-9_\-]{16,64}")
 MAX_BODY = 10 * 1024 * 1024
+BODY_TIMEOUT_S = 30.0
+RETRY_SAFE = ("GET", "HEAD", "OPTIONS")
+
+
+class BadRequest(Exception):
+    """A request the gateway answers itself (4xx) because it cannot be read or forwarded as sent."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status, self.detail = status, detail
+MODES = ("enforce", "observe", "passthrough")
 CLONE_WAIT_S = 0.3
+# after-check (contracts/product.md §3b): clean requests already answered by prod are replayed in a clone
+AFTER_WAIT_S = 2.0        # how long a queued after-check waits for a free clone before it is given up
+AFTER_QUEUE = 256         # pending after-checks; beyond this new ones are dropped (counted)
+AFTER_SEEN = 4096         # identical requests (method, target, body, identity) are checked once per release
 
 
 class _NoJar(http.cookiejar.CookieJar):
@@ -67,18 +83,30 @@ class Config:
     openapi_path: str = ""
     manifest_path: str = ""
     record_path: str = ""
+    state_path: str = ""             # upstream, rules and mode survive a gateway restart (same run only)
     captive_ttl_s: float = 900.0
+    mode: str = "enforce"            # enforce | observe | passthrough (initial; POST /_admin/mode changes it)
+    aftercheck: bool = False         # replay clean requests in a clone after prod has answered (enforce mode only)
+    auth: dict = field(default_factory=lambda: {"kind": "immune-token"})   # the `auth` block of config.yaml
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
         g = env.get
-        return cls(host=g("GW_HOST", "0.0.0.0"), data_port=int(g("GW_DATA_PORT", "8080")),
+        try:
+            auth = json.loads(g("IMMUNE_AUTH") or "{}") or {"kind": "immune-token"}
+        except ValueError:
+            auth = {"kind": "immune-token"}
+        mode = g("GW_MODE", "enforce")
+        return cls(mode=mode if mode in MODES else "enforce", auth=auth,
+                   aftercheck=g("GW_AFTERCHECK", "").strip().lower() in ("1", "true", "yes", "on"),
+                   prod_secret=prod_secret_for(auth, env), shadow_secret=g("SHADOW_APP_SECRET", ""),
+                   host=g("GW_HOST", "0.0.0.0"), data_port=int(g("GW_DATA_PORT", "8080")),
                    admin_port=int(g("GW_ADMIN_PORT", "8081")), ingest_port=int(g("GW_INGEST_PORT", "9000")),
                    prod_addr=g("PROD_ADDR", "127.0.0.1:8000"), prod_release=g("PROD_RELEASE", ""),
-                   prod_secret=g("PROD_APP_SECRET", ""), shadow_secret=g("SHADOW_APP_SECRET", ""),
                    admin_token=g("ADMIN_TOKEN", ""), bus_url=g("BUS_URL", ""), bus_token=g("BUS_TOKEN", ""),
                    run_id=g("RUN_ID", ""), openapi_path=g("OPENAPI_PATH", ""), manifest_path=g("MANIFEST_PATH", ""),
-                   record_path=g("RECORD_PATH", ""), captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
+                   record_path=g("RECORD_PATH", ""), state_path=g("GW_STATE_PATH", ""),
+                   captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
 
 
 @dataclass
@@ -107,12 +135,23 @@ class Ctx:
     route: str = "prod"
     verdict: str | None = None
     status: int = 0
+    would: str | None = None          # observe mode: the route enforce would have taken
 
 
 class Recorder:
-    def __init__(self, path: str):
+    """Append-only request log. Bounded: past `max_bytes` the file becomes <path>.1 (one generation kept) and a
+    new one starts, so the recording never fills the disk. Readers use the tail (pipeline/gates.py)."""
+
+    def __init__(self, path: str, max_bytes: int | None = None):
         self.path = path
         self._fh = None
+        self._size = 0
+        if max_bytes is None:
+            try:
+                max_bytes = int(float(os.environ.get("RECORD_MAX_MB") or 256) * 1024 * 1024)
+            except ValueError:
+                max_bytes = 256 * 1024 * 1024
+        self.max_bytes = max_bytes
 
     def write(self, rec: dict):
         if not self.path:
@@ -123,7 +162,14 @@ class Recorder:
                 if d:
                     os.makedirs(d, exist_ok=True)
                 self._fh = open(self.path, "a", buffering=1)
-            self._fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                self._size = os.fstat(self._fh.fileno()).st_size
+            line = json.dumps(rec, separators=(",", ":")) + "\n"
+            self._fh.write(line)
+            self._size += len(line)
+            if self.max_bytes > 0 and self._size >= self.max_bytes:
+                self._fh.close()
+                self._fh = None
+                os.replace(self.path, self.path + ".1")
         except Exception as e:  # recording must never break traffic
             log.warning("recording failed: %s", e)
             self._fh = None
@@ -141,10 +187,14 @@ class Gateway:
         self.pool = Pool(idle_ttl_s=cfg.captive_ttl_s, on_release=self._on_release)
         self.rules: dict[str, Rule] = {}
         self.enum = EnumTracker()
-        self.mode = "enforce"
+        self.mode = cfg.mode if cfg.mode in MODES else "enforce"
+        self.auth = Authenticator(cfg.auth, cfg.prod_secret, cfg.shadow_secret)
+        self._introspect_cache: OrderedDict = OrderedDict()   # credential hash -> (expires, Who fields)
         self.recorder = Recorder(cfg.record_path)
         self.prodlog: OrderedDict = OrderedDict()
         self.rid_ctx: OrderedDict = OrderedDict()
+        self.after_q = None       # asyncio.Queue of Ctx, created in start() when cfg.aftercheck
+        self.after_seen: OrderedDict = OrderedDict()
         # upstream + drain
         self.upstream = {"addr": cfg.prod_addr, "release": cfg.prod_release}
         self.inflight = 0
@@ -155,6 +205,67 @@ class Gateway:
         self.prod_client = None
         self.clone_client = None
         self._tasks = []
+        self._saved = None
+        self.restore_state()
+
+    # ---------------------------------------------------------- persisted state
+    # A restarted gateway would otherwise point at the compose default upstream (a colour that may no longer
+    # exist) and forget every containment rule, reopening confirmed attack points until the fleet and the
+    # pipeline noticed. Kept in <runtime>/stack/gateway-state.json, valid for the run that wrote it.
+    def _state_doc(self) -> dict:
+        return {"run_id": self.cfg.run_id, "upstream": dict(self.upstream), "mode": self.mode,
+                "rules": [dict(r.raw, _expires=r.expires) for r in self.rules.values()]}
+
+    def save_state(self) -> None:
+        path = self.cfg.state_path
+        if not path:
+            return
+        doc = self._state_doc()
+        if doc == self._saved:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(doc, f)
+            os.replace(tmp, path)
+            self._saved = doc
+        except OSError as e:
+            log.warning("cannot persist gateway state at %s: %s", path, e)
+
+    def restore_state(self) -> bool:
+        path = self.cfg.state_path
+        if not path:
+            return False
+        try:
+            with open(path) as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(doc, dict) or doc.get("run_id") != self.cfg.run_id:
+            return False
+        up = doc.get("upstream")
+        if isinstance(up, dict) and isinstance(up.get("addr"), str) and up["addr"]:
+            self.upstream = {"addr": up["addr"], "release": str(up.get("release") or "")}
+        if doc.get("mode") in MODES:
+            self.mode = doc["mode"]
+        now = time.time()
+        for raw in doc.get("rules") or []:
+            try:
+                raw = dict(raw)
+                expires = float(raw.pop("_expires"))
+                if expires <= now:
+                    continue
+                rule = Rule(raw)
+                rule.expires = expires
+                self.rules[rule.id] = rule
+            except Exception as e:  # noqa: BLE001
+                log.warning("dropping an unreadable persisted rule: %s", e)
+        self.stats = self._new_stats()
+        self._saved = self._state_doc()
+        log.info("restored state of run %s: upstream %s (%s), mode %s, %d rule(s)", self.cfg.run_id,
+                 self.upstream["addr"], self.upstream["release"], self.mode, len(self.rules))
+        return True
 
     # ---------------------------------------------------------- lifecycle
     async def start(self):
@@ -168,6 +279,10 @@ class Gateway:
                                               trust_env=False, cookies=_NoJar(), follow_redirects=False)
         self.bus.start()
         self._tasks.append(asyncio.create_task(self._housekeeping()))
+        if self.cfg.aftercheck:
+            self.after_q = asyncio.Queue(maxsize=AFTER_QUEUE)
+            # one worker: the after-check never holds more than one clone, the rest stay free for detonation
+            self._tasks.append(asyncio.create_task(self._after_worker()))
 
     async def stop(self):
         for t in self._tasks:
@@ -183,6 +298,7 @@ class Gateway:
             await asyncio.sleep(0.5)
             try:
                 self.expire_rules()
+                self.save_state()
                 n += 1
                 if n % 10 == 0:
                     await self.pool.expire_idle()
@@ -193,6 +309,7 @@ class Gateway:
     def _new_stats(self) -> dict:
         return {"prod_requests": 0, "prod_5xx": 0, "prod_conn_errors": 0, "requests": 0,
                 "by_class": {}, "by_route": {}, "since": time.time(),
+                "aftercheck": {"queued": 0, "checked": 0, "oracle": 0, "duplicate": 0, "dropped": 0, "no_clone": 0},
                 "release": self.upstream["release"] if hasattr(self, "upstream") else "",
                 "addr": self.upstream["addr"] if hasattr(self, "upstream") else ""}
 
@@ -223,16 +340,53 @@ class Gateway:
 
     # ---------------------------------------------------------- identity
     def identify(self, hmap: dict) -> Who:
-        token = authtoken.bearer(hmap)
-        if not token:
-            return Who()
-        ident = authtoken.verify(self.cfg.prod_secret, token) if self.cfg.prod_secret else None
-        if ident is not None:
-            return Who(uid=ident.uid, role=ident.role, trusted=ident.uid <= self.manifest.seed_max_uid)
-        # shadow-secret token arriving from outside = honeytoken (expired ones too: now=0)
-        if self.cfg.shadow_secret and authtoken.verify(self.cfg.shadow_secret, token, now=0) is not None:
+        """Identity from the request's own credentials (no network). Introspection: see resolve()."""
+        ident = self.auth.from_token(authtoken.bearer(hmap))
+        if ident.honeytoken:
             return Who(honeytoken=True)
+        if ident.uid is not None:
+            return Who(uid=ident.uid, role=ident.role, trusted=ident.uid <= self.manifest.seed_max_uid)
         return Who()
+
+    async def resolve(self, hmap: dict) -> Who:
+        if self.auth.kind != "introspect":
+            return self.identify(hmap)
+        authz = hmap.get("authorization", "")
+        cookie = _strip_cookie(hmap.get("cookie", ""), "gwsid")
+        if not authz and not cookie:
+            return Who()
+        key = credential_key(authz, cookie)
+        now = time.monotonic()
+        hit = self._introspect_cache.get(key)
+        if hit is not None and hit[0] > now:
+            uid, role = hit[1]
+        else:
+            uid, role = await self._introspect(authz, cookie)
+            ttl = self.auth.cache_s if uid is not None else min(self.auth.cache_s, 5.0)
+            self._introspect_cache[key] = (now + ttl, (uid, role))
+            while len(self._introspect_cache) > 10000:
+                self._introspect_cache.popitem(last=False)
+        if uid is None:
+            return Who()
+        return Who(uid=uid, role=role, trusted=uid <= self.manifest.seed_max_uid)
+
+    async def _introspect(self, authz: str, cookie: str):
+        """GET <auth.path> on PROD with the client's credentials -> (uid, role) or (None, None)."""
+        headers = [("accept", "application/json")]
+        if authz:
+            headers.append(("authorization", authz))
+        if cookie:
+            headers.append(("cookie", cookie))
+        host, _, port = self.upstream["addr"].rpartition(":")
+        try:
+            url = httpx.URL(scheme="http", host=host or self.upstream["addr"], port=int(port or 80),
+                            raw_path=self.auth.path.encode("latin-1"))
+            r = await self.prod_client.get(url, headers=headers, timeout=3.0)
+            ident = self.auth.from_introspection(r.status_code, r.content)
+        except Exception as e:  # noqa: BLE001
+            log.warning("introspection failed: %s", e)
+            return None, None
+        return ident.uid, ident.role
 
     # ---------------------------------------------------------- data plane
     async def data_app(self, scope, receive, send):
@@ -248,8 +402,10 @@ class Gateway:
             return
         try:
             ctx = await self._read(scope, receive)
-        except ValueError:
-            await self._send(send, Upstream(413, [("content-type", "application/json")], b'{"detail":"Request Entity Too Large"}'), None)
+        except BadRequest as e:
+            # refused before it reaches production or a clone: not a production error (never counted as one)
+            await self._send(send, Upstream(e.status, [("content-type", "application/json"), ("connection", "close")],
+                                            json.dumps({"detail": e.detail}).encode()), None)
             return
         try:
             resp = await self.handle(ctx)
@@ -259,23 +415,37 @@ class Gateway:
         ctx.status = resp.status
         await self._send(send, resp, ctx.new_sid)
         self._finish(ctx)
+        self._after_enqueue(ctx)
 
     async def _read(self, scope, receive) -> Ctx:
+        raw_path = scope.get("raw_path")
+        raw_path = raw_path.decode("latin-1") if raw_path else quote(scope.get("path", "/"))
+        if not raw_path.startswith("/"):                 # absolute-form or authority-form target: we are not a forward proxy
+            raise BadRequest(400, "Bad Request")
+        for k, v in scope.get("headers", []):
+            if k.lower() == b"content-length":
+                try:
+                    if int(v) > MAX_BODY:
+                        raise BadRequest(413, "Request Entity Too Large")
+                except ValueError:
+                    raise BadRequest(400, "Bad Request") from None
         chunks, size = [], 0
+        deadline = time.monotonic() + BODY_TIMEOUT_S     # a client that never finishes its body does not hold a slot
         while True:
-            msg = await receive()
+            try:
+                msg = await asyncio.wait_for(receive(), timeout=max(0.1, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                raise BadRequest(408, "Request Timeout") from None
             if msg["type"] == "http.disconnect":
                 break
             b = msg.get("body", b"")
             size += len(b)
             if size > MAX_BODY:
-                raise ValueError("body too large")
+                raise BadRequest(413, "Request Entity Too Large")
             chunks.append(b)
             if not msg.get("more_body"):
                 break
         body = b"".join(chunks)
-        raw_path = scope.get("raw_path")
-        raw_path = raw_path.decode("latin-1") if raw_path else quote(scope.get("path", "/"))
         query = (scope.get("query_string") or b"").decode("latin-1")
         headers = []
         for k, v in scope.get("headers", []):
@@ -290,7 +460,7 @@ class Gateway:
         new_sid = None
         if not sid or not SID_RE.fullmatch(sid):
             sid = new_sid = secrets.token_urlsafe(18)
-        who = self.identify(hmap)
+        who = await self.resolve(hmap)
         cookie_session = f"gwsid:{sid}"
         session = f"uid:{who.uid}" if who.uid is not None else cookie_session
         return Ctx(rid=uuid.uuid4().hex, t0=time.monotonic(), method=scope["method"].upper(), raw_path=raw_path,
@@ -306,6 +476,8 @@ class Gateway:
         if self.mode == "passthrough":
             ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, None)
             return await self.to_prod(ctx)
+        if self.mode == "observe":
+            return await self.observe(ctx, view)
 
         # 3. captive session -> its (lazily bound) L2 clone; never for a trusted identity
         if not ctx.who.trusted:
@@ -334,6 +506,110 @@ class Gateway:
         if ctx.res.cls == EVIDENCE:
             return await self.evidence(ctx)
         return await self.detonate(ctx)
+
+    # -- observe mode (contracts/product.md §3): classify and detonate as in enforce, answer from prod
+    async def observe(self, ctx: Ctx, view: View) -> Upstream:
+        """Nothing is denied, diverted or captured; ctx.would records what enforce would have done."""
+        if l0.is_scanner_path(ctx.raw_path) and self.spec.match(ctx.method, ctx.raw_path)[0] is None:
+            ctx.res = Result(cls=SUSPECT, reasons=["scanner"])
+            self._publish_classified(ctx)
+            ctx.would = "l0"
+            return await self.to_prod(ctx)
+        ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, self.enum)
+        self._publish_classified(ctx)
+        if ctx.res.cls == CLEAN:
+            ctx.would = "prod"
+        elif ctx.res.cls == EVIDENCE and ctx.who.trusted:
+            ctx.would = "deny"
+        else:   # suspect, or evidence (enforce would capture and replay in L2): detonate in L1
+            fail_closed = bool(ctx.res.rule_hit) or _high_signal(ctx.res.reasons) or ctx.res.cls == EVIDENCE
+            clone = await self.pool.acquire(CLONE_WAIT_S)
+            if clone is None:
+                ctx.verdict = "no_clone"
+                ctx.would = "deny" if fail_closed else "prod"
+            else:
+                try:
+                    async with clone.lock:
+                        up = await self.to_clone(ctx, clone, "L1")
+                    ctx.verdict = up.verdict
+                    await self.pool.release(clone)
+                    if up.verdict == wire.VERDICT_ORACLE:
+                        ctx.would = "deny" if ctx.who.trusted else "shadow_l1"
+                    elif up.verdict == wire.VERDICT_CLEAN:
+                        ctx.would = "prod"
+                    else:
+                        ctx.would = "deny" if ctx.res.rule_hit else "prod"
+                    if ctx.res.cls == EVIDENCE:
+                        ctx.would = "shadow_l2"
+                except Exception as e:
+                    log.warning("clone %s failed: %s", clone.id, e)
+                    await self.pool.retire(clone)
+                    ctx.verdict = "no_clone"
+                    ctx.would = "deny" if fail_closed else "prod"
+        return await self.to_prod(ctx)
+
+    # -- after-check: the second net for what the classifier called clean
+    def _after_enqueue(self, ctx: Ctx):
+        """Queue a clean request that prod has already answered for a replay in an L1 clone. Never blocks."""
+        if self.after_q is None or self.mode != "enforce" or ctx.route != "prod" or ctx.res.cls != CLEAN \
+                or ctx.status in (502, 504):
+            return
+        st = self.stats["aftercheck"]
+        key = hash((ctx.method, ctx.raw_path, ctx.query, ctx.body, ctx.who.uid))
+        if key in self.after_seen:
+            self.after_seen.move_to_end(key)
+            st["duplicate"] += 1
+            return
+        try:
+            self.after_q.put_nowait(ctx)
+        except asyncio.QueueFull:
+            st["dropped"] += 1
+            return
+        self.after_seen[key] = True
+        while len(self.after_seen) > AFTER_SEEN:
+            self.after_seen.popitem(last=False)
+        st["queued"] += 1
+
+    async def _after_worker(self):
+        while True:
+            ctx = await self.after_q.get()
+            try:
+                await self._aftercheck(ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("after-check rid=%s: %s", ctx.rid, e)
+
+    async def _aftercheck(self, ctx: Ctx):
+        """Replay in an L1 clone. If an oracle fires there, the clone pushes the evidence as for any detonation
+        (so the incident opens as usual) and the session is captive from its next request on."""
+        st = self.stats["aftercheck"]
+        clone = await self.pool.acquire(AFTER_WAIT_S)
+        if clone is None:
+            st["no_clone"] += 1
+            return
+        try:
+            async with clone.lock:
+                up = await self.to_clone(ctx, clone, "L1")
+        except Exception as e:
+            log.warning("after-check clone %s failed: %s", clone.id, e)
+            await self.pool.retire(clone)
+            st["no_clone"] += 1
+            return
+        await self.pool.release(clone)
+        st["checked"] += 1
+        if up.verdict != wire.VERDICT_ORACLE:
+            return
+        st["oracle"] += 1
+        log.info("after-check rid=%s %s %s: oracle fired after prod answered %s", ctx.rid, ctx.method, ctx.raw_path,
+                 ctx.status)
+        self._prodlog(ctx.rid, {"forwarded": True, "status": ctx.status, "aftercheck": wire.VERDICT_ORACLE})
+        # keeps the request out of the legitimate-traffic corpus (pipeline gate `legit`)
+        self.recorder.write({"rid": ctx.rid, "ts": time.time(), "aftercheck": wire.VERDICT_ORACLE, "method": ctx.method,
+                             "path": ctx.raw_path, "query": redact_query(ctx.query, (ctx.res.sensitive or {}).get("query") or set()),
+                             "uid": ctx.who.uid, "session": ctx.session})
+        if not ctx.who.trusted:   # a trusted identity is never diverted (contract §6); the rule covers it
+            self._mark_captive(ctx, "aftercheck")
 
     # -- step 7
     async def detonate(self, ctx: Ctx) -> Upstream:
@@ -449,7 +725,24 @@ class Gateway:
                 req = self.prod_client.build_request(ctx.method, self._url(addr, ctx), headers=self._out_headers(ctx),
                                                      content=ctx.body if ctx.body else None,
                                                      extensions=self._target(ctx))
-                r = await self.prod_client.send(req)
+            except Exception as e:  # noqa: BLE001
+                # bytes that cannot be put on the wire as sent (header or target): the client's fault, not prod's.
+                # Counting it as a production error would let anyone roll a deploy back with a malformed cookie.
+                log.info("unforwardable request rid=%s: %s", ctx.rid, e)
+                self._prodlog(ctx.rid, {"forwarded": False, "status": 400})
+                return Upstream(400, [("content-type", "application/json")], b'{"detail":"Bad Request"}')
+            try:
+                try:
+                    r = await self.prod_client.send(req)
+                except httpx.ConnectError:
+                    # nothing was sent: once more, for any method (the upstream may be restarting)
+                    await asyncio.sleep(0.2)
+                    r = await self.prod_client.send(req)
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError):
+                    # a pooled connection the upstream had already closed; replaying is only safe when idempotent
+                    if ctx.method not in RETRY_SAFE:
+                        raise
+                    r = await self.prod_client.send(req)
                 up = Upstream(r.status_code, _clean_resp_headers(r.headers.multi_items()), r.content)
             except httpx.TimeoutException:
                 self.stats["prod_conn_errors"] += 1
@@ -496,10 +789,15 @@ class Gateway:
         await send({"type": "http.response.start", "status": up.status, "headers": headers})
         await send({"type": "http.response.body", "body": up.body})
 
+    def _obs(self, data: dict) -> dict:
+        if self.mode == "observe":
+            data["observe"] = True
+        return data
+
     def _publish_classified(self, ctx: Ctx):
-        self.bus.publish(events.REQ_CLASSIFIED, {"class": ctx.res.cls, "reasons": list(ctx.res.reasons),
-                                                 "method": ctx.method, "path": ctx.raw_path,
-                                                 "session": ctx.session, "uid": ctx.who.uid}, rid=ctx.rid)
+        self.bus.publish(events.REQ_CLASSIFIED, self._obs({"class": ctx.res.cls, "reasons": list(ctx.res.reasons),
+                                                           "method": ctx.method, "path": ctx.raw_path,
+                                                           "session": ctx.session, "uid": ctx.who.uid}), rid=ctx.rid)
 
     def _finish(self, ctx: Ctx):
         ms = round((time.monotonic() - ctx.t0) * 1000, 1)
@@ -509,8 +807,10 @@ class Gateway:
         st["requests"] += 1
         st["by_class"][ctx.res.cls] = st["by_class"].get(ctx.res.cls, 0) + 1
         st["by_route"][ctx.route] = st["by_route"].get(ctx.route, 0) + 1
-        self.bus.publish(events.REQ_ROUTED, {"route": ctx.route, "status": ctx.status, "verdict": ctx.verdict, "ms": ms},
-                         rid=ctx.rid)
+        data = {"route": ctx.route, "status": ctx.status, "verdict": ctx.verdict, "ms": ms}
+        if ctx.would is not None:
+            data["would_route"] = ctx.would
+        self.bus.publish(events.REQ_ROUTED, self._obs(data), rid=ctx.rid)
         self.recorder.write(self._record(ctx, ms))
 
     def _record(self, ctx: Ctx, ms: float) -> dict:
@@ -529,7 +829,8 @@ class Gateway:
                 "query": redact_query(ctx.query, sens.get("query") or set()), "headers": headers,
                 "body_b64": base64.b64encode(body).decode(), "class": ctx.res.cls, "reasons": list(ctx.res.reasons),
                 "route": ctx.route, "verdict": ctx.verdict, "status": ctx.status, "ms": ms,
-                "release": self.upstream["release"], "mode": self.mode}
+                "release": self.upstream["release"], "mode": self.mode,
+                **({"observe": True, "would_route": ctx.would} if ctx.would is not None else {})}
 
     # ---------------------------------------------------------- admin
     async def switch_upstream(self, addr: str, release: str):
@@ -542,6 +843,8 @@ class Gateway:
                     log.warning("drain timeout; switching with %d in flight", self.inflight)
                 self.upstream = {"addr": addr, "release": release}
                 self.stats = self._new_stats()
+                self.after_seen.clear()
+                self.save_state()
             finally:
                 self.gate.set()
         self.bus.publish(events.UPSTREAM_SWITCHED, {"release": release, "addr": addr})
@@ -554,8 +857,10 @@ class Gateway:
         self.enum.clear()
         self.prodlog.clear()
         self.rid_ctx.clear()
+        self.after_seen.clear()
         self.stats = self._new_stats()
         self.reload_manifest(force=True)
+        self.save_state()
 
     def admin_app(self) -> Starlette:
         gw = self
@@ -610,6 +915,7 @@ class Gateway:
             for rule in created:
                 gw.rules[rule.id] = rule
                 gw.bus.publish(events.RULE_ACTIVE, rule.to_dict(), incident=rule.raw.get("incident"))
+            gw.save_state()
             out = [r.to_dict() for r in created]
             return JSONResponse(out[0] if not isinstance(d, list) else out, status_code=201)
 
@@ -619,6 +925,7 @@ class Gateway:
             if gw.rules.pop(rid, None) is None:
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
             gw.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "deleted"})
+            gw.save_state()
             return JSONResponse({"ok": True, "id": rid})
 
         @authed
@@ -641,9 +948,10 @@ class Gateway:
         async def mode(request):
             d = await body_json(request)
             m = d.get("mode") if isinstance(d, dict) else None
-            if m not in ("enforce", "passthrough"):
-                return JSONResponse({"detail": "mode must be enforce|passthrough"}, status_code=422)
+            if m not in MODES:
+                return JSONResponse({"detail": "mode must be enforce|observe|passthrough"}, status_code=422)
             gw.mode = m
+            gw.save_state()
             return JSONResponse({"mode": gw.mode})
 
         @authed
@@ -702,7 +1010,7 @@ class Gateway:
             session, uid = gw.rid_ctx.get(str(ev.get("rid", "")), (None, None))
             data["session"] = session
             data["uid"] = uid if uid is not None else ev.get("uid")
-            gw.bus.publish(events.ORACLE_FIRED, data, rid=str(ev.get("rid") or "") or None)
+            gw.bus.publish(events.ORACLE_FIRED, gw._obs(data), rid=str(ev.get("rid") or "") or None)
             return JSONResponse({"ok": True})
 
         return Starlette(routes=[Route("/_clone/evidence", evidence, methods=["POST"])])
@@ -719,6 +1027,12 @@ def _cookie(header: str, name: str) -> str | None:
         if k == name:
             return v.strip().strip('"')
     return None
+
+
+def _strip_cookie(header: str, name: str) -> str:
+    """The Cookie header without `name` (the gateway's own session cookie never reaches the app)."""
+    parts = [p.strip() for p in (header or "").split(";") if p.strip()]
+    return "; ".join(p for p in parts if p.partition("=")[0].strip() != name)
 
 
 def _clean_resp_headers(items) -> list:

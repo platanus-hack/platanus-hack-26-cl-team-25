@@ -1,1 +1,1 @@
-"""Out-of-process oracle sidecar: shadow-clone protocol for apps we cannot instrument (any language)."""
+"""Language-agnostic shadow observer (P4). See sidecar/README.md and contracts/product.md §6."""

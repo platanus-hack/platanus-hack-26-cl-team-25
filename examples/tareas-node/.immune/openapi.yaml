@@ -1,0 +1,116 @@
+openapi: 3.0.3
+info: {title: Tareas, version: "1.4.2"}
+# x-owner-scoped: the resource belongs to one user; x-sensitive: never grammar-checked, redacted in recordings
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+  schemas:
+    Id: {type: integer, minimum: 1}
+    TaskInput:
+      type: object
+      properties:
+        title: {type: string, maxLength: 200}
+        notes: {type: string, maxLength: 4000}
+        status: {type: string, enum: [pendiente, en_curso, hecha]}
+        due_date: {type: string, maxLength: 10, nullable: true}
+paths:
+  /health:
+    get: {operationId: health, responses: {"200": {description: '{"ok": true}'}}}
+  /api/register:
+    post:
+      operationId: register
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, name, password]
+              properties:
+                email: {type: string, maxLength: 200}
+                name: {type: string, maxLength: 120}
+                password: {type: string, x-sensitive: true}
+      responses: {"201": {description: '{"id","email","name","role"}'}, "409": {description: email taken}}
+  /api/login:
+    post:
+      operationId: login
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, maxLength: 200}
+                password: {type: string, x-sensitive: true}
+      responses: {"200": {description: '{"token","expires_in"}'}, "401": {description: bad credentials}}
+  /api/logout:
+    post: {operationId: logout, security: [{bearer: []}], responses: {"200": {description: ok}}}
+  /api/me:
+    get:
+      operationId: me
+      security: [{bearer: []}]
+      responses: {"200": {description: '{"id","email","name","role"}'}, "401": {description: no session}}
+  /api/tasks:
+    get:
+      operationId: listTasks
+      security: [{bearer: []}]
+      responses: {"200": {description: "the caller's tasks"}}
+    post:
+      operationId: createTask
+      security: [{bearer: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TaskInput'}
+      responses: {"201": {description: task}}
+  /api/tasks/search:
+    get:
+      operationId: searchTasks
+      security: [{bearer: []}]
+      parameters:
+        - {name: q, in: query, schema: {type: string, maxLength: 100}}
+        - {name: status, in: query, schema: {type: string, enum: [pendiente, en_curso, hecha]}}
+      responses: {"200": {description: '{"tasks":[{"id","title","status","due_date"}]} of the caller'}}
+  /api/tasks/{task_id}:
+    get:
+      operationId: getTask
+      x-owner-scoped: true
+      security: [{bearer: []}]
+      parameters: [{name: task_id, in: path, required: true, schema: {$ref: '#/components/schemas/Id'}}]
+      responses: {"200": {description: task}, "404": {description: not found}}
+    put:
+      operationId: updateTask
+      x-owner-scoped: true
+      security: [{bearer: []}]
+      parameters: [{name: task_id, in: path, required: true, schema: {$ref: '#/components/schemas/Id'}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TaskInput'}
+      responses: {"200": {description: task}, "404": {description: not found}}
+    delete:
+      operationId: deleteTask
+      x-owner-scoped: true
+      security: [{bearer: []}]
+      parameters: [{name: task_id, in: path, required: true, schema: {$ref: '#/components/schemas/Id'}}]
+      responses: {"200": {description: ok}, "404": {description: not found}}
+  /api/tasks/{task_id}/export:
+    get:
+      operationId: exportTask
+      x-owner-scoped: true
+      security: [{bearer: []}]
+      parameters:
+        - {name: task_id, in: path, required: true, schema: {$ref: '#/components/schemas/Id'}}
+        - {name: format, in: query, schema: {type: string, enum: [md, json]}}
+      responses: {"200": {description: markdown or json export of the task}, "404": {description: not found}}
+  /api/files:
+    get:
+      operationId: listFiles
+      security: [{bearer: []}]
+      responses: {"200": {description: '{"files":[relative names]}'}}
+  /api/files/download:
+    get:
+      operationId: downloadFile
+      security: [{bearer: []}]
+      parameters: [{name: name, in: query, required: true, schema: {type: string, maxLength: 200}}]
+      responses: {"200": {description: file bytes from files/}, "404": {description: not found}}

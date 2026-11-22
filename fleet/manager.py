@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures as cf
+import json
 import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -28,6 +30,10 @@ class FleetError(Exception):
 
 class GatewayError(Exception):
     pass
+
+
+# prod comes back by itself after a crash or a host reboot; clones are replaced by the reconcile loop instead
+PROD_RESTART = {"Name": "unless-stopped"}
 
 
 @dataclass
@@ -99,6 +105,145 @@ class Fleet:
         self._last_pool_sig = None
         self._stop = threading.Event()
 
+    # -------------------------------------------------- persisted state
+    # What a restarted fleet process cannot read back from Docker: which colour is live, the pool size, the
+    # clone counter. Written after every change; adopt() uses it so a restart never needs a /reset (which
+    # would put t0, the unpatched release, back in production).
+    def _state_path(self) -> str:
+        return os.path.join(self.cfg.runtime_dir, "stack", "fleet-state.json")
+
+    def _save(self) -> None:
+        path = self._state_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"run_id": self.cfg.run_id, "active": self.active, "release": self.release,
+                           "pool_size": self.pool_size, "next_n": self._next_n, "ts": time.time()}, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning("cannot persist fleet state at %s: %s", path, e)
+
+    def _load(self) -> dict | None:
+        try:
+            with open(self._state_path()) as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(st, dict) or st.get("run_id") != self.cfg.run_id:
+            return None
+        if st.get("active") not in ("blue", "green") or not RELEASE_RE.match(str(st.get("release") or "")):
+            return None
+        return st
+
+    def _container(self, name):
+        try:
+            return self.dk.containers.get(name)
+        except NotFound:
+            return None
+
+    def _clone_key(self, c) -> str | None:
+        """CLONE_KEY of a running clone (generic runtime: it lives in the observer, see fleet/generic.py)."""
+        for kv in (c.attrs.get("Config") or {}).get("Env") or []:
+            if kv.startswith("CLONE_KEY="):
+                return kv.split("=", 1)[1] or None
+        return None
+
+    def adopt(self) -> bool:
+        """After a restart: take over the containers of this run instead of starting from nothing."""
+        with self.lock:
+            if self.active:
+                return True
+            st = self._load()
+            if st is None:
+                return False
+            active, release = st["active"], st["release"]
+            other = "green" if active == "blue" else "blue"
+            prod = self._container(f"{self.cfg.name_prefix}-prod-{active}")
+            alt = self._container(f"{self.cfg.name_prefix}-prod-{other}")
+            try:
+                up = self.gw.get_upstream().get("addr")
+            except GatewayError:
+                up = None
+            if alt is not None and alt.status == "running" and up == self._addr(other) \
+                    and self.healthy(alt, self.cfg.health_path):
+                # we died between the upstream switch and recording it: the gateway is the truth
+                active, other = other, active
+                release = (alt.labels or {}).get("immune.release") or release
+                prod, alt = alt, prod
+            try:
+                self._release_dir(release)
+            except FleetError as e:
+                log.error("cannot adopt run %s: %s", self.cfg.run_id, e)
+                return False
+            if prod is None or prod.status not in ("running", "restarting") or not self.wait_healthy(prod):
+                log.warning("adopt: prod-%s is not serving; starting release %s again", active, release)
+                try:
+                    prod = self.start_prod(active, release)
+                    if not self.wait_healthy(prod):
+                        log.error("adopt: prod-%s failed its health check", active)
+                except Exception as e:  # noqa: BLE001
+                    log.error("adopt: cannot start prod-%s: %s", active, e)
+            if alt is not None:
+                try:
+                    self.destroy(alt)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("adopt: leftover prod-%s: %s", other, e)
+            self.active, self.release = active, release
+            self.pool_size = int(st.get("pool_size") or 0)
+            top = 0
+            for c in self.owned():
+                if (c.labels or {}).get("immune.role") != "clone":
+                    continue
+                m = re.search(r"-clone-(\d+)$", c.name)
+                n = int(m.group(1)) if m else 0
+                top = max(top, n)
+                key = self._clone_key(c) if c.status == "running" else None
+                if m and key and (c.labels or {}).get("immune.release") == release \
+                        and len(self.clones) < self.pool_size:
+                    cl = Clone(n=n, key=key, release=release, prefix=self.cfg.name_prefix)
+                    self.clones[cl.name] = cl
+                else:
+                    try:
+                        self.destroy(c)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("adopt: leftover %s: %s", c.name, e)
+            self._next_n = max(int(st.get("next_n") or 1), top + 1)
+            self._last_pool_sig = None
+            self._save()
+            log.info("adopted run %s: prod-%s on %s, %d/%d clone(s)", self.cfg.run_id, active, release,
+                     len(self.clones), self.pool_size)
+            return True
+
+    def _ensure_prod(self) -> None:
+        """Reconcile: the live colour must exist. Docker restarts a crashed one; a removed one is recreated."""
+        name = f"{self.cfg.name_prefix}-prod-{self.active}"
+        c = self._container(name)
+        if c is not None and c.status in ("running", "restarting", "created"):
+            return
+        log.error("prod container %s is %s; starting release %s again", name, c.status if c else "gone",
+                  self.release)
+        try:
+            c = self.start_prod(self.active, self.release)
+            if not self.wait_healthy(c):
+                log.error("prod container %s failed its health check after the restart", name)
+        except Exception as e:  # noqa: BLE001
+            log.error("cannot restart %s: %s", name, e)
+
+    def _ensure_services(self) -> None:
+        """Reconcile: gateway and dashboard (compose services) must be running. Docker's restart policy covers
+        a crash; it does not cover a container that was stopped or killed by hand, and the gateway is the only
+        way in."""
+        for svc in ("gateway", "dashboard"):
+            c = self._container(f"{self.cfg.name_prefix}-{svc}")
+            if c is None or c.status not in ("exited", "dead", "created"):
+                continue
+            log.error("%s container is %s; starting it", svc, c.status)
+            try:
+                c.start()
+            except Exception as e:  # noqa: BLE001
+                log.error("cannot start %s: %s", c.name, e)
+
     # ---------------------------------------------------------------- bus
     def publish(self, type_, data):
         def send():
@@ -113,7 +258,10 @@ class Fleet:
 
     # ------------------------------------------------------------- docker
     def _labels(self, role, release):
-        return {"immune.run": self.cfg.run_id, "immune.role": role, "immune.release": release}
+        lab = {"immune.run": self.cfg.run_id, "immune.role": role, "immune.release": release}
+        if self.cfg.project:
+            lab["immune.project"] = self.cfg.project
+        return lab
 
     def _owned_label(self, c) -> bool:
         return (c.labels or {}).get("immune.run") == self.cfg.run_id
@@ -141,57 +289,80 @@ class Fleet:
     def _release_dir(self, release):
         if not RELEASE_RE.match(release or ""):
             raise FleetError(f"bad release id {release!r}", 400)
-        d = os.path.join(self.cfg.runtime_dir, "releases", release, self.cfg.release_pkg)
-        if not os.path.isdir(d):
-            raise FleetError(f"release {release!r} not found at {d}", 400)
+        d = os.path.join(self.cfg.runtime_dir, "releases", release)
+        missing = [p for p in self.cfg.release_paths if not os.path.exists(os.path.join(d, p))]
+        if not os.path.isdir(d) or missing:
+            raise FleetError(f"release {release!r} not found at {d} (missing {missing})", 400)
         return d
+
+    def _addr(self, color) -> str:
+        return f"prod-{color}:{self.cfg.app_port}"
 
     def _create(self, name, role, release, net, aliases, cmd, env, binds, tmpfs, pids, mem):
         self.destroy_name(name)  # raises if an unlabelled container owns the name
         api = self.dk.api
         env = dict(env, PYTHONDONTWRITEBYTECODE="1")
+        path = ["/app"] + (["/app/.immune"] if self.cfg.dot_immune else []) + ["/opt/immune"]
         if self.cfg.extra_pythonpath:
-            env["PYTHONPATH"] = "/srv:" + self.cfg.extra_pythonpath
+            path.append(self.cfg.extra_pythonpath)
+        env["PYTHONPATH"] = ":".join(path)
+        tmpfs = dict(tmpfs, **self._masks())
         hc = api.create_host_config(
             binds=binds, tmpfs=tmpfs, read_only=True, cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"], pids_limit=pids, mem_limit=mem, memswap_limit=mem,
-            network_mode=net)
+            network_mode=net, restart_policy=PROD_RESTART if role == "prod" else None)
         nc = api.create_networking_config({net: api.create_endpoint_config(aliases=aliases or None)})
         cid = api.create_container(
             self.cfg.image, cmd, name=name, environment=env, host_config=hc, networking_config=nc,
-            labels=self._labels(role, release), user=self.cfg.user, working_dir="/srv")["Id"]
+            labels=self._labels(role, release), user=self.cfg.user, working_dir="/app")["Id"]
         c = self.dk.containers.get(cid)
         c.start()
         return c
 
+    def _masks(self) -> dict:
+        """tmpfs over host state inside the read-only IMMUNE_HOME mount (runtime data, .git, .env)."""
+        home = os.path.realpath(self.cfg.repo_dir)
+        out = {}
+        rt = os.path.realpath(self.cfg.runtime_dir)
+        cands = [os.path.join(home, "runtime"), os.path.join(home, ".git"), rt]
+        if self.cfg.dot_immune:
+            cands.append(os.path.join(os.path.realpath(self.cfg.dot_immune), "runtime"))
+        for d in cands:
+            if os.path.isdir(d):
+                if d.startswith(home + os.sep):
+                    out["/opt/immune/" + os.path.relpath(d, home)] = "size=1m,mode=0555"
+                if self.cfg.dot_immune and d.startswith(os.path.realpath(self.cfg.dot_immune) + os.sep):
+                    out["/app/.immune/" + os.path.relpath(d, os.path.realpath(self.cfg.dot_immune))] = "size=1m,mode=0555"
+        return out
+
     def _mounts(self, release):
-        try:  # docker needs the mountpoint to exist inside the read-only repo mount
-            os.makedirs(os.path.join(self.cfg.repo_dir, self.cfg.release_pkg), exist_ok=True)
-        except OSError:
-            pass
-        return [f"{self.cfg.repo_dir}:/srv:ro",
-                f"{self._release_dir(release)}:/srv/{self.cfg.release_pkg}:ro"]
+        rel = self._release_dir(release)
+        binds = [f"{self.cfg.repo_dir}:/opt/immune:ro", f"{rel}:/app:ro"]
+        if self.cfg.dot_immune:
+            try:  # docker needs the mountpoint to exist inside the read-only release mount
+                os.makedirs(os.path.join(rel, ".immune"), exist_ok=True)
+                binds.append(f"{self.cfg.dot_immune}:/app/.immune:ro")
+            except OSError as e:
+                log.warning("cannot mount %s into the release: %s", self.cfg.dot_immune, e)
+        return binds
 
     def start_prod(self, color, release):
-        pkg = self.cfg.release_pkg
-        data = os.path.join(self.cfg.runtime_dir, "data", "prod")
+        data = self.cfg.prod_data_dir or os.path.join(self.cfg.runtime_dir, "data", "prod")
         os.makedirs(data, exist_ok=True)
         binds = self._mounts(release) + [f"{data}:/data:rw"]
-        env = {"APP_SECRET": self.cfg.prod_secret, "APP_DB": "/data/app.db",
-               "APP_STATIC": f"/srv/{pkg}/static", "RELEASE": release}
-        cmd = ["uvicorn", self.cfg.victim_app, "--host", "0.0.0.0", "--port", "8000"]
+        env = dict(self.cfg.env_for(f"/data/{self.cfg.prod_db_name}", self.cfg.prod_secret), RELEASE=release)
+        cmd = ["uvicorn", self.cfg.asgi, "--host", "0.0.0.0", "--port", str(self.cfg.app_port)]
         return self._create(f"{self.cfg.name_prefix}-prod-{color}", "prod", release, self.cfg.prodnet, [f"prod-{color}"],
                             cmd, env, binds, {"/tmp": "size=64m,mode=1777"}, 256, "512m")
 
     def start_clone(self, clone: Clone):
-        pkg = self.cfg.release_pkg
         shadow = os.path.join(self.cfg.runtime_dir, "data", "shadow")
         os.makedirs(shadow, exist_ok=True)
         binds = self._mounts(clone.release) + [f"{shadow}:/seed:ro"]
-        env = {"CLONE_ID": clone.id, "CLONE_KEY": clone.key, "COLLECTOR_URL": self.cfg.collector_url,
-               "SHADOW_SEED_DB": "/seed/seed.db", "APP_DB": "/data/app.db",
-               "APP_SECRET": self.cfg.shadow_secret, "RELEASE": clone.release,
-               "APP_STATIC": f"/srv/{pkg}/static"}
+        env = dict(self.cfg.env_for("/data/app.db", self.cfg.shadow_secret))
+        env.update({"CLONE_ID": clone.id, "CLONE_KEY": clone.key, "COLLECTOR_URL": self.cfg.collector_url,
+                    "SHADOW_SEED_DB": "/seed/seed.db", "RELEASE": clone.release, "SHADOW_DB_ENV": self.cfg.db_env,
+                    "SHADOW_RELEASE_ROOT": "/app", "SHADOW_RELEASE_PATHS": ":".join(self.cfg.release_paths)})
         markers = os.path.join(self.cfg.runtime_dir, "data", "markers.json")
         if os.path.isfile(markers):
             binds.append(f"{markers}:/markers/markers.json:ro")
@@ -201,15 +372,17 @@ class Fleet:
                             {"/tmp": "size=32m,mode=1777", "/data": "size=64m,mode=1777"}, 128, "256m")
 
     def healthy(self, c, path="/health", timeout=6.0) -> bool:
+        port = self.cfg.app_port if (c.labels or {}).get("immune.role") == "prod" else 8000
         script = ("import urllib.request;"
-                  f"urllib.request.urlopen('http://127.0.0.1:8000{path}',timeout=3)")
+                  f"urllib.request.urlopen('http://127.0.0.1:{port}{path}',timeout=3)")
         fut = _POOL.submit(c.exec_run, ["python", "-c", script])
         try:
             return fut.result(timeout=timeout).exit_code == 0
         except Exception:  # noqa: BLE001
             return False
 
-    def wait_healthy(self, c, path="/health") -> bool:
+    def wait_healthy(self, c, path=None) -> bool:
+        path = path or self.cfg.health_path
         deadline = time.time() + self.cfg.health_timeout_s
         while time.time() < deadline:
             try:
@@ -293,12 +466,13 @@ class Fleet:
             try:
                 self.gw.put_pool(list(self.clones.values()))
                 self._last_pool_sig = tuple(sorted(self.clones))
-                self.gw.set_upstream("prod-blue:8000", release)
+                self.gw.set_upstream(self._addr("blue"), release)
                 self.gw.reset()
                 self.gw_ok = True
             except GatewayError as e:
                 errors.append(str(e))
                 self.gw_ok = False
+            self._save()
             return {"ok": True, "prod": {"active": "blue", "release": release},
                     "clones": [c.id for c in self.clones.values()], "gateway_errors": errors}
 
@@ -334,11 +508,20 @@ class Fleet:
             return fail("new release failed health check", c)
         if not self.healthy(c, self.cfg.smoke_path):
             return fail(f"smoke request {self.cfg.smoke_path} failed", c)
+        # error rate of the release being replaced: the yardstick for the one coming in. Without it, anyone able
+        # to make the app answer 5xx (old release included) could undo every deploy by doing so during the watch.
+        before_rate = 0.0
         try:
-            self.gw.set_upstream(f"prod-{new}:8000", release)
+            st = self.gw.stats()
+            before_rate = int(st.get("prod_5xx", 0)) / max(1, int(st.get("prod_requests", 0)))
+        except (GatewayError, ValueError, TypeError):
+            pass
+        try:
+            self.gw.set_upstream(self._addr(new), release)
         except GatewayError as e:
             return fail(f"gateway upstream switch failed: {e}", c)
         self.active, self.release = new, release
+        self._save()
         baseline = 0
         try:
             baseline = int(self.gw.stats().get("prod_5xx", 0))
@@ -348,7 +531,10 @@ class Fleet:
         grew = False
         while True:
             try:
-                if int(self.gw.stats().get("prod_5xx", 0)) > baseline:
+                st = self.gw.stats()
+                errs, reqs = int(st.get("prod_5xx", 0)) - baseline, max(1, int(st.get("prod_requests", 0)))
+                # a regression: 5xx since the switch, at a clearly higher rate than the old release had
+                if errs > 0 and errs / reqs > max(2 * before_rate, before_rate + 0.02):
                     grew = True
                     break
             except GatewayError:
@@ -358,16 +544,18 @@ class Fleet:
             time.sleep(min(self.cfg.watch_poll_s, max(0.0, deadline - time.time())))
         if grew:
             try:
-                self.gw.set_upstream(f"prod-{old}:8000", old_rel)
+                self.gw.set_upstream(self._addr(old), old_rel)
             except GatewayError as e:
                 log.error("rollback switch failed: %s", e)
             self.active, self.release = old, old_rel
+            self._save()
             return fail("prod_5xx grew after switch; rolled back", c, rolled_back=True)
         try:
             self.destroy_name(f"{self.cfg.name_prefix}-prod-{old}")
         except Exception as e:  # noqa: BLE001
             log.warning("old colour cleanup: %s", e)
         replaced = self._refresh_clones(release)
+        self._prune_releases()
         return {"ok": True, "rolled_back": False, "release": release, "active": new,
                 "detail": "deployed", "clones_replaced": replaced}
 
@@ -402,6 +590,30 @@ class Fleet:
         self._trim()
         return done
 
+    KEEP_RELEASES = 5
+
+    def _prune_releases(self) -> int:
+        """Every fix leaves a release directory behind. Keep t0, what is in production, anything a container
+        still mounts (a captive clone stays on its release) and the newest KEEP_RELEASES; remove the rest."""
+        root = os.path.join(self.cfg.runtime_dir, "releases")
+        try:
+            names = [n for n in os.listdir(root) if RELEASE_RE.match(n) and os.path.isdir(os.path.join(root, n))]
+        except OSError:
+            return 0
+        keep = {"t0", self.release}
+        try:
+            keep |= {(c.labels or {}).get("immune.release") for c in self.owned()}
+        except Exception:  # noqa: BLE001
+            return 0            # cannot tell what is mounted: remove nothing
+        rest = sorted((n for n in names if n not in keep), key=lambda n: os.path.getmtime(os.path.join(root, n)))
+        removed = 0
+        for n in rest[:max(0, len(rest) - self.KEEP_RELEASES)]:
+            shutil.rmtree(os.path.join(root, n), ignore_errors=True)
+            removed += 1
+        if removed:
+            log.info("pruned %d old release dir(s)", removed)
+        return removed
+
     def _trim(self):
         """Drop surplus free clones above pool_size (newest-release preferred)."""
         extra = len(self.clones) - self.pool_size
@@ -431,6 +643,8 @@ class Fleet:
         try:
             if not self.active:
                 return
+            self._ensure_services()
+            self._ensure_prod()
             pool = self._refresh_gw_pool()
             dead = []
             for cl in list(self.clones.values()):
@@ -465,7 +679,7 @@ class Fleet:
             if pool is not None and self.active:
                 try:
                     up = self.gw.get_upstream()
-                    want = f"prod-{self.active}:8000"
+                    want = self._addr(self.active)
                     if up.get("addr") and up.get("addr") != want:
                         self.gw.set_upstream(want, self.release)
                 except GatewayError:
@@ -486,6 +700,11 @@ class Fleet:
             self.publish("pool.state", data)
 
     def loop(self):
+        try:
+            self.adopt()
+        except Exception:  # noqa: BLE001
+            log.exception("adopt failed")
+        self.adopted = True
         while not self._stop.is_set():
             self.reconcile_once()
             self._stop.wait(self.cfg.reconcile_s)
@@ -494,7 +713,7 @@ class Fleet:
         self._stop.set()
 
     def state(self):
-        return {"prod": {"active": self.active, "release": self.release},
+        return {"prod": {"active": self.active, "release": self.release}, "ready": getattr(self, "adopted", False),
                 "pool_size": self.pool_size, "gateway_ok": self.gw_ok, "run_id": self.cfg.run_id,
                 "clones": [{"id": c.id, "name": c.name, "addr": c.addr, "release": c.release,
                             "state": self.gw_states.get(c.id, "free")} for c in list(self.clones.values())]}

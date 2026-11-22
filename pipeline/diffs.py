@@ -91,11 +91,20 @@ def parse(diff: str) -> list:
     return files
 
 
-def copy_release(release_dir: str, dest_parent: str | None = None) -> str:
-    """Copy <release>/victim into a fresh temp dir; returns the new release dir."""
+def copy_release(release_dir: str, dest_parent: str | None = None, paths: list | None = None) -> str:
+    """Copy the app.release_paths of <release> into a fresh temp dir; returns the new release dir."""
+    if paths is None:
+        from immune import config as icfg
+        paths = icfg.current().app.release_paths
     work = tempfile.mkdtemp(prefix="pipeline-rel-", dir=dest_parent)
-    shutil.copytree(os.path.join(release_dir, "victim"), os.path.join(work, "victim"),
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"), symlinks=True)
+    for p in paths:
+        src, dst = os.path.join(release_dir, p), os.path.join(work, p)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
+                            symlinks=True)
+        elif os.path.lexists(src):
+            os.makedirs(os.path.dirname(dst) or work, exist_ok=True)
+            shutil.copy2(src, dst, follow_symlinks=False)
     return work
 
 

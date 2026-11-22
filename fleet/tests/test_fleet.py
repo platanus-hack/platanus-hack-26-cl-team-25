@@ -29,11 +29,13 @@ def test_reset_layout_and_hardening(env):
         assert hc["ReadonlyRootfs"] and hc["CapDrop"] == ["ALL"] and "no-new-privileges:true" in hc["SecurityOpt"]
         assert hc["PidsLimit"] > 0 and hc["Memory"] > 0 and "/tmp" in hc["Tmpfs"]
     mounts = {m["Destination"]: m for m in prod.attrs["Mounts"]}
-    assert mounts["/srv"]["RW"] is False and mounts["/srv/fixture_app"]["RW"] is False
-    assert mounts["/srv/fixture_app"]["Source"].endswith("releases/r1/fixture_app")
+    assert mounts["/opt/immune"]["RW"] is False and mounts["/app"]["RW"] is False
+    assert mounts["/app"]["Source"].endswith("releases/r1")
+    assert prod.attrs["Config"]["WorkingDir"] == "/app" and prod.labels["immune.project"] == "wp4"
     assert mounts["/data"]["RW"] is True and mounts["/data"]["Source"] == env.prod
     envs = dict(e.split("=", 1) for e in prod.attrs["Config"]["Env"])
-    assert envs["APP_SECRET"] == "ps" and envs["APP_DB"] == "/data/app.db" and envs["APP_STATIC"] == "/srv/fixture_app/static"
+    assert envs["APP_SECRET"] == "ps" and envs["APP_DB"] == "/data/app.db" and envs["APP_STATIC"] == "/app/fixture_app/static"
+    assert envs["PYTHONPATH"].split(":")[0] == "/app" and "/opt/immune" in envs["PYTHONPATH"].split(":")
     for n in (1, 2):
         c = ctr(env, f"clone-{n}")
         assert c.labels["immune.role"] == "clone" and c.labels["immune.run"] == run
@@ -153,3 +155,124 @@ def test_gateway_down(env):
     assert "clone-1" not in {c["id"] for c in st["clones"]}
     for c in st["clones"]:
         env.dk.containers.get(c["name"])
+
+
+# ---------------------------------------------------------------- restart of the fleet process
+def _restarted(env):
+    """A new Fleet over the same run: what a restarted fleet process starts from."""
+    from fleet.manager import Fleet
+    env.fleet.stop()
+    f = Fleet(env.cfg, env.dk)
+    env.fleet = f
+    return f
+
+
+def test_restart_adopts_the_run_without_touching_it(env):
+    env.fleet.reset("r1", 2)
+    assert env.fleet.deploy("r2")["ok"]
+    before = env.fleet.state()
+    ids = {c.name: c.id for c in env.dk.containers.list(filters={"label": f"immune.run={env.cfg.run_id}"})}
+    keys = {c.name: c.key for c in env.fleet.clones.values()}
+    f = _restarted(env)
+    assert f.state()["prod"] == {"active": None, "release": None}
+    assert f.adopt() is True
+    st = f.state()
+    assert st["prod"] == {"active": "green", "release": "r2"} and st["pool_size"] == 2
+    assert sorted(c["name"] for c in st["clones"]) == sorted(c["name"] for c in before["clones"])
+    assert {c.name: c.key for c in f.clones.values()} == keys           # same clone keys: no clone is replaced
+    assert {c.name: c.id for c in env.dk.containers.list(filters={"label": f"immune.run={env.cfg.run_id}"})} == ids
+    f.reconcile_once()
+    assert {c["id"] for c in env.gw.puts[-1]} == {c["id"] for c in st["clones"]}
+    res = f.deploy("r1")                                                # and it keeps working: next clone numbers are new
+    assert res["ok"] and res["active"] == "blue"
+    assert not {c["name"] for c in f.state()["clones"]} & set(keys)
+
+
+def test_restart_without_a_recorded_run_adopts_nothing(env):
+    f = _restarted(env)
+    assert f.adopt() is False and f.state()["prod"]["active"] is None
+    with pytest.raises(FleetError):
+        f.deploy("r1")
+
+
+def test_restart_brings_back_a_missing_prod_and_drops_stale_clones(env):
+    env.fleet.reset("r1", 2)
+    ctr(env, "prod-blue").remove(force=True)
+    ctr(env, "clone-1").kill()
+    f = _restarted(env)
+    assert f.adopt() is True
+    assert ctr(env, "prod-blue").status == "running" and f.state()["prod"] == {"active": "blue", "release": "r1"}
+    assert [c["name"] for c in f.state()["clones"]] == ["wp4-clone-2"]   # the dead one was not adopted
+    f.reconcile_once()
+    assert len(f.state()["clones"]) == 2
+
+
+def test_restart_between_switch_and_record_follows_the_gateway(env):
+    import json, os
+    env.fleet.reset("r1", 1)
+    assert env.fleet.deploy("r2")["ok"]                 # green/r2 live, the gateway points at it
+    path = env.fleet._state_path()
+    st = json.load(open(path))
+    st.update(active="blue", release="r1")              # as if the process died before recording the switch
+    json.dump(st, open(path, "w"))
+    env.fleet.start_prod("blue", "r1")                  # the old colour was still up at that moment
+    f = _restarted(env)
+    assert f.adopt() is True
+    assert f.state()["prod"] == {"active": "green", "release": "r2"}
+    names = [c.name for c in env.dk.containers.list(all=True, filters={"label": f"immune.run={env.cfg.run_id}"})]
+    assert "wp4-prod-blue" not in names
+
+
+def test_reconcile_recreates_a_removed_prod(env):
+    env.fleet.reset("r1", 1)
+    ctr(env, "prod-blue").remove(force=True)
+    env.fleet.reconcile_once()
+    c = ctr(env, "prod-blue")
+    assert c.status == "running" and env.fleet.healthy(c, env.cfg.health_path)
+    assert c.attrs["HostConfig"]["RestartPolicy"]["Name"] == "unless-stopped"
+
+
+def test_old_release_dirs_are_pruned_but_never_a_mounted_one(env):
+    import os, shutil, time
+    from .conftest import make_release
+    env.fleet.reset("r1", 1)
+    for i in range(8):
+        make_release(env.runtime, "old%d" % i)
+        os.utime(os.path.join(env.runtime, "releases", "old%d" % i), (time.time() - 1000 + i, time.time() - 1000 + i))
+    shutil.copytree(os.path.join(env.runtime, "releases", "r1"), os.path.join(env.runtime, "releases", "t0"))
+    env.fleet.KEEP_RELEASES = 3
+    assert env.fleet.deploy("r2")["ok"]
+    left = set(os.listdir(os.path.join(env.runtime, "releases")))
+    assert {"t0", "r2"} <= left                               # the origin and what is in production
+    assert len(left - {"t0", "r2"}) == 3                      # the three newest of the rest (r1, rbad, old7)
+    assert "old7" in left and not {"old0", "old1", "old2", "old3", "old4", "old5", "old6"} & left
+
+
+def test_errors_the_old_release_already_had_do_not_roll_back(env):
+    env.fleet.reset("r1", 1)
+
+    class Stats:
+        """Gateway whose counters we script: `before` for the old release, `after` since the switch."""
+        def __init__(self, inner):
+            self.inner, self.calls_since_switch = inner, None
+            self.before, self.after = {"prod_requests": 1000, "prod_5xx": 100}, {"prod_requests": 50, "prod_5xx": 5}
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def set_upstream(self, addr, release):
+            self.calls_since_switch = 0
+            return self.inner.set_upstream(addr, release)
+
+        def stats(self):
+            if self.calls_since_switch is None:
+                return self.before
+            self.calls_since_switch += 1
+            return {"prod_requests": 0, "prod_5xx": 0} if self.calls_since_switch == 1 else self.after
+
+    gw = env.fleet.gw = Stats(env.fleet.gw)
+    res = env.fleet.deploy("r2")                          # old release: 10% 5xx; new one: 10% too
+    assert res["ok"] and not res["rolled_back"], res
+    gw.calls_since_switch, gw.after = None, {"prod_requests": 50, "prod_5xx": 30}
+    res = env.fleet.deploy("r1")                          # 60% since the switch: clearly worse
+    assert not res["ok"] and res["rolled_back"] and env.fleet.state()["prod"]["release"] == "r2"
