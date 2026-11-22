@@ -52,7 +52,7 @@ through the `lifespan` argument of `create_app`, and with two extra public route
 | `DASH_MAX_EVENTS` | `50000` | Events kept in memory |
 | `DASH_STORE_MAX_MB` | `256` | Size at which the store rotates to `<store>.1`; `0` disables rotation |
 | `DASH_MAX_STREAMS` | `200` | Concurrent event streams; the next one gets 503 |
-| `DASHBOARD_SUBTITLE` | empty | Text shown next to the page title. Sent to the page in the stream's `hello` message. `deploy/compose.yaml` passes it through; `immune up` sets it only for the project named `openemr` (`compose_env` in `immune/__main__.py`) |
+| `DASHBOARD_SUBTITLE` | empty | Text shown next to the page title. Sent to the page in the stream's `hello` message. `deploy/compose.yaml` passes it through; `immune up` takes it from its own environment and, when unset, sets it only for the project named `openemr` (`compose_env` in `immune/__main__.py`) |
 
 ## Behaviour
 

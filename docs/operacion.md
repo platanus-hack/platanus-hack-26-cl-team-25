@@ -59,7 +59,8 @@ Propiedades:
 Probado en un Ubuntu 24.04 ARM64 limpio. No probado en x86_64 ni en otras distribuciones.
 
 Las imágenes de los laboratorios (`immune-strace:1`, `immune-bpftrace:1`, `immune-gobuild:1`, `immune-waf:1`) no
-las construye `install.sh`: las construye el `lab.sh` de cada laboratorio la primera vez.
+las construye `install.sh`: las construye el `lab.sh` de cada laboratorio la primera vez, y `immune up` con
+`IMMUNE_WAF=1` construye `immune-waf:1` si falta.
 
 Si `~/.local/bin` no está en el `PATH`, el comando también funciona como `bin/immune` desde el checkout.
 
@@ -344,7 +345,7 @@ procesos del host. Las variables internas de cada módulo están en su README.
 | `PATCHER_CLAUDE_CONFIG_DIR` | Directorio de configuración y login propio de la CLI del generador de parches (se le pasa como `CLAUDE_CONFIG_DIR`) | sin definir: el login de la máquina | `patcher/claude_cli.py` |
 | `PATCHER_ANTHROPIC_API_KEY` | Clave de API propia del generador de parches (se le pasa como `ANTHROPIC_API_KEY`) | sin definir | `patcher/claude_cli.py` |
 | `PIPELINE_MAX_ATTEMPTS` | Intentos de parche por incidente | 3 | `pipeline/config.py` |
-| `PIPELINE_RULE_TTL_S` | TTL, en segundos, de la regla incorporada del pipeline. No afecta a la regla que deriva `patcher.derive_rule`, que no vence | sin definir o 0: la regla no vence | `pipeline/config.py` |
+| `PIPELINE_RULE_TTL_S` | TTL, en segundos, de toda regla que el pipeline publica sin TTL propio: la incorporada y la que deriva `patcher.derive_rule` (`pipeline/rules.py`, `finalize`) | sin definir o 0: la regla no vence | `pipeline/config.py` |
 | `PIPELINE_REOPEN_COOLDOWN_S` | Espera, en segundos, antes de reabrir un incidente `escalated` ante evidencia nueva | 300 | `pipeline/config.py` |
 | `PIPELINE_RETRY_COOLDOWN_S` | Espera base, en segundos, antes de reintentar un cierre transitorio | 60 | `pipeline/config.py` |
 | `PIPELINE_MAX_RETRIES` | Reintentos de un cierre transitorio | 5 | `pipeline/config.py` |
@@ -355,7 +356,8 @@ procesos del host. Las variables internas de cada módulo están en su README.
 | `CANARY_WEIGHT` | Fracción del tráfico de prod que va al release nuevo durante el canario de despliegue, entre 0 y 1. 0 lo desactiva | 0.2 | `fleet/config.py` |
 | `CANARY_S` | Duración máxima del canario, en segundos. 0 lo desactiva | 8 | `fleet/config.py` |
 | `CANARY_MIN_REQUESTS` | Requests mínimos en el lado canario para que el canario decida | 20 | `fleet/config.py` |
-| `WAF_URL` | URL del WAF de detección. Vacía: no se consulta | vacía | `gateway/core.py` |
+| `WAF_URL` | URL del WAF de detección dentro del contenedor del gateway. Vacía: no se consulta. `immune up` la fija en `http://waf:8080` cuando `IMMUNE_WAF=1` | vacía | `gateway/core.py`, `deploy/compose.yaml` |
+| `IMMUNE_WAF` | `1` en el entorno de `immune up`/`reset`: arranca el servicio `waf` (perfil de Compose) y construye `immune-waf:1` si falta | sin definir | `immune/__main__.py` (`waf_enabled`, `ensure_waf_image`) |
 | `RECORD_MAX_MB` | Tamaño al que rota la grabación del gateway | 256 | `gateway/core.py` |
 | `GW_CAPTIVE_TTL_S` | Vencimiento por inactividad de una sesión cautiva, en segundos | 900 | `gateway/core.py` |
 | `DASHBOARD_SUBTITLE` | Subtítulo del panel | vacío | `dashboard/server.py` |
@@ -365,11 +367,11 @@ procesos del host. Las variables internas de cada módulo están en su README.
 | `DASH_MAX_EVENTS` | Eventos en memoria | 50000 | `dashboard/server.py` |
 | `DASH_STORE_MAX_MB` | Tamaño al que rota el JSONL del bus; 0 lo desactiva | 256 | `dashboard/server.py` |
 
-Las variables del gateway y del dashboard (`RECORD_MAX_MB`, `GW_CAPTIVE_TTL_S`, `WAF_URL`, `DASH_*`) se leen dentro
+Las variables del gateway y del dashboard (`RECORD_MAX_MB`, `GW_CAPTIVE_TTL_S`, `DASH_*`) se leen dentro
 de sus contenedores. `deploy/compose.yaml` no las propaga desde el entorno de `immune up`: para cambiarlas hay que
-agregarlas al bloque `environment` del servicio en ese archivo. `DASHBOARD_SUBTITLE` sí está en ese archivo, pero
-su valor lo fija `compose_env` en `immune/__main__.py` (vacío, salvo para el proyecto de nombre `openemr`) y no se
-toma del entorno de quien ejecuta `immune up`.
+agregarlas al bloque `environment` del servicio en ese archivo. `DASHBOARD_SUBTITLE` y `WAF_URL` sí están en ese archivo:
+`compose_env` en `immune/__main__.py` toma `DASHBOARD_SUBTITLE` del entorno de quien ejecuta `immune up` (si no
+está, vacío, salvo para el proyecto de nombre `openemr`) y fija `WAF_URL` según `IMMUNE_WAF`.
 
 Variables que solo usan los laboratorios, que arrancan los procesos a mano:
 

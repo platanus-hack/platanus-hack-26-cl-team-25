@@ -18,9 +18,9 @@ docker run -d --name immune-waf -p 127.0.0.1:8085:8080 immune-waf:1
 ```
 
 The gateway uses it only when its environment has `WAF_URL` (for the example above,
-`WAF_URL=http://127.0.0.1:8085`). The only place in the repository that starts the service and sets `WAF_URL`
-is `labs/scadabr-cve-2026-8602/lab.sh`. `immune up` and `deploy/compose.yaml` do not start it, so in a stack
-started by the CLI the WAF is off.
+`WAF_URL=http://127.0.0.1:8085`). `immune up` starts the service and sets `WAF_URL=http://waf:8080` only when `IMMUNE_WAF=1` is in its
+environment (Compose profile `waf` in `deploy/compose.yaml`; the image is built on first use); without it the
+WAF is off. `labs/scadabr-cve-2026-8602/lab.sh` also starts it.
 
 | Route | Request | Response |
 |---|---|---|

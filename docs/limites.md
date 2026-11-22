@@ -66,8 +66,6 @@ construido, parcial, no construido, fuera de alcance.
 - **Reglas sin vencimiento.** Por defecto una regla no tiene TTL. La de un incidente `escalated`, o la de un
   incidente cuyo parche no llega a desplegarse, queda activa hasta que alguien la borra
   (`DELETE /_admin/rules/<id>`) o hasta `immune reset`.
-- **`PIPELINE_RULE_TTL_S` no alcanza a todas las reglas.** Solo se aplica a la regla incorporada del pipeline. La
-  que deriva `patcher.derive_rule` lleva `ttl_s` nulo de forma explícita y no toma ese valor.
 - **Reglas por identidad.** `identity: untrusted` exime a toda identidad confiable. Una cuenta de la semilla
   comprometida no es alcanzada por esa regla.
 - **WAF de detección.** Opcional y fuera de `immune up`. Falla abierto: si no responde en 1.5 s el request queda
@@ -187,8 +185,10 @@ Qué no detecta cada validación está junto a su descripción en [validaciones.
   tamaño y una lista corta de construcciones. Necesita un `target.yaml` escrito a mano por aplicación. Solo existe
   el del laboratorio de Grafana. El ciclo completo no tiene test automático.
 - **Parche de ScadaBR.** Lo producen scripts del laboratorio, no el pipeline. El parche compilado se prueba en un
-  contenedor candidato aparte; el contenedor de prod del laboratorio no se reemplaza
-  (`labs/scadabr-cve-2026-8602/verify_patch.sh`).
+  contenedor candidato; si pasa las dos comprobaciones, `labs/scadabr-cve-2026-8602/verify_patch.sh` apunta el
+  upstream del gateway a ese contenedor y solo entonces publica `deploy.done` con `ok: true` y `verify.result`.
+  Es un cambio de upstream sin canario, sin ventana de observación y sin rollback, y el candidato no conserva el
+  estado del contenedor anterior. Ese cambio de upstream no se ejecutó de punta a punta.
 - **Parches de respaldo** solo para la tienda de demostración.
 - **Pull requests en GitHub:** implementados, verificados solo contra un `gh` simulado. El demo usa
   `repo.target: local`.

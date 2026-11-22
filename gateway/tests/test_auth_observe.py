@@ -67,7 +67,7 @@ def test_jwt_hs256_kind(world):
     expired = A.jwt_encode("jwt-prod-key", {"sub": "1", "exp": time.time() - 3600})
     for t in (good, untrusted, forged, expired):
         assert httpx.get(w.url + "/search", params={"q": "usb"}, headers=bearer(t)).json() == {"from": "prod"}
-    r = records(w)
+    r = records(w, 4)
     assert [(x["uid"], x["trusted"], x["session"].split(":")[0]) for x in r] == [
         (2, True, "uid"), (40, False, "uid"), (None, False, "gwsid"), (None, False, "gwsid")]
     # identified requests reach a clone with x-imm-uid/role derived from the claims

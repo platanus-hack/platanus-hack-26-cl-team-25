@@ -69,7 +69,7 @@ Environment variables read by `Config.from_env` and `Recorder` in `core.py`. `im
 | `MANIFEST_PATH` | empty | `manifest.json` of the shadow data (seed uid limit, ownership, canaries, groups) |
 | `RECORD_PATH` | empty | Request recording (JSONL). Empty disables recording |
 | `RECORD_MAX_MB` | `256` | Size at which the recording rotates to `<RECORD_PATH>.1` (one generation kept) |
-| `WAF_URL` | empty | Base URL of the detection service of [`waf/`](../waf/README.md). Empty disables the check. `deploy/compose.yaml` does not set it, so a stack started by `immune up` does not use it |
+| `WAF_URL` | empty | Base URL of the detection service of [`waf/`](../waf/README.md). Empty disables the check. `immune up` sets it to `http://waf:8080` only with `IMMUNE_WAF=1` in its environment |
 
 With `auth.kind: jwt-hs256` the production secret is read from the variable named by `auth.secret_env`
 (`immune/auth.py`, `prod_secret_for`).

@@ -127,10 +127,17 @@ def compose_env(cfg: icfg.Config, sec_file: str, run_id: str) -> dict:
         "IMMUNE_AUTH": json.dumps(cfg.auth.to_dict(), separators=(",", ":")),
         "IMMUNE_PORT_GATEWAY": str(cfg.ports["gateway"]), "IMMUNE_PORT_ADMIN": str(cfg.ports["admin"]),
         "IMMUNE_PORT_DASHBOARD": str(cfg.ports["dashboard"]),
-        "DASHBOARD_SUBTITLE": "Clínica Delta · OpenEMR 8.2.0" if cfg.name == "openemr" else "",
+        "DASHBOARD_SUBTITLE": os.environ.get("DASHBOARD_SUBTITLE")
+        or ("Clínica Delta · OpenEMR 8.2.0" if cfg.name == "openemr" else ""),
         "IMMUNE_UID": str(os.getuid()), "IMMUNE_GID": str(os.getgid()),
     })
+    if waf_enabled():      # optional OWASP CRS detection service next to the gateway (deploy/compose.yaml, `waf`)
+        env.update({"COMPOSE_PROFILES": "waf", "IMMUNE_WAF_URL": "http://waf:8080"})
     return env
+
+
+def waf_enabled() -> bool:
+    return os.environ.get("IMMUNE_WAF", "").lower() in ("1", "true", "yes")
 
 
 def host_env(cfg: icfg.Config, sec: dict, run_id: str) -> dict:
@@ -157,7 +164,17 @@ def docker(*args, check=True, env=None, timeout=300) -> str:
     return p.stdout
 
 
+def ensure_waf_image() -> None:
+    """Build immune-waf:1 from waf/ when IMMUNE_WAF=1 asks for it and it is missing (install.sh does not)."""
+    if subprocess.run(["docker", "image", "inspect", "immune-waf:1"], capture_output=True).returncode == 0:
+        return
+    say("building immune-waf:1 from waf/ (first use; needs network access to the Go module proxy)")
+    docker("build", "-q", "-t", "immune-waf:1", os.path.join(HOME, "waf"), timeout=900)
+
+
 def compose(cfg, env, *args, check=True, timeout=300) -> str:
+    if args and args[0] == "up" and env.get("COMPOSE_PROFILES") == "waf":
+        ensure_waf_image()
     return docker("compose", "-p", cfg.compose_project, "-f", COMPOSE, *args, check=check, env=env, timeout=timeout)
 
 

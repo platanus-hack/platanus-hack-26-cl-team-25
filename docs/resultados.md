@@ -74,8 +74,8 @@ Cómo leerlo:
 
 | Medición | Resultado |
 |---|---|
-| Tests que recolecta `pytest` en la raíz (los 12 `testpaths` de `pytest.ini`) | 917 |
-| `.venv/bin/pytest -q -m "not live"` | 910 pasan, 1 omitido (`skip`), 6 deseleccionados |
+| Tests que recolecta `pytest` en la raíz (los 12 `testpaths` de `pytest.ini`) | 921 |
+| `.venv/bin/pytest -q -m "not live"` | 914 pasan, 1 omitido (`skip`), 6 deseleccionados |
 | Los 6 tests `live` (llaman al modelo) | No se ejecutaron |
 | Suite propia de `examples/notas` | 33 tests |
 | `pyflakes` sobre el Python versionado | Sin avisos |
@@ -169,7 +169,7 @@ Fuente: `labs/scadabr-cve-2026-8602/README.md` y los scripts del laboratorio. Si
 | Detección | Una escritura anónima en `/ScadaBR/httpds` se detona en el clon y el oráculo de `sidecar/httpds` confirma que un punto de datos la consumió |
 | Regla | `scope: all` con `identity: untrusted` sobre `/ScadaBR/httpds` |
 | Parche | En una corrida contra el código fuente de ScadaBR, el modelo propuso en `HttpDataSourceServlet` una comprobación `Common.getUser(request) == null` que responde 404 |
-| Validación del parche (`labs/scadabr-cve-2026-8602/verify_patch.sh`) | El script compila el servlet parchado dentro de un contenedor candidato y comprueba dos cosas: el request anónimo recibe 404 y una sesión autenticada sigue escribiendo. No hay registro de su salida en el repositorio |
+| Validación del parche (`labs/scadabr-cve-2026-8602/verify_patch.sh`) | El script compila el servlet parchado dentro de un contenedor candidato y comprueba dos cosas: el request anónimo recibe 404 y una sesión autenticada sigue escribiendo. Si pasan, apunta el upstream del gateway al candidato. No hay registro de su salida en el repositorio, y el cambio de upstream no se ejecutó de punta a punta |
 
 Lo que el caso no muestra: la credencial de los dispositivos legítimos la modela el gateway, porque ScadaBR 1.2.0
 no tiene ninguna en ese endpoint; el contenedor de prod del laboratorio no se reemplaza por el parchado; no hay

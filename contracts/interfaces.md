@@ -74,8 +74,8 @@ Returns a rule that validates against `contracts/schemas/rule.schema.json`. `pat
 value against the grammar: with scope `param_present` every request that carries the parameter is detonated.
 
 The pipeline calls it with a 30 s limit and then (`pipeline/rules.py`, `finalize`): forces `incident`; fills in
-`id` and `ttl_s` when the rule lacks them (`ttl_s` from `PIPELINE_RULE_TTL_S`, which is unset by default, so
-`null`); checks that the rule targets the incident's method and route; adds `identity: untrusted` to a rule of
+`id` when the rule lacks it and gives `ttl_s` to a rule whose `ttl_s` is missing or `null` (from
+`PIPELINE_RULE_TTL_S`, which is unset by default, so `null`); checks that the rule targets the incident's method and route; adds `identity: untrusted` to a rule of
 scope `all` when the incident has the `anon` flag; validates the rule against the schema and compiles its
 grammar. If any of that fails it uses its own rule (`default_rule`): scope `all` for `idor`, without a
 parameter or for a location the gateway cannot address (with `identity: untrusted` for an `anon` incident);
