@@ -29,12 +29,14 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
+from immune_contracts import classes as classmod, payloads
+
 from . import incident as incmod, openapi, properties, reqs
 
 log = logging.getLogger("pipeline.audit")
 
-ORACLE_OF = {"sqli": "sql", "traversal": "file", "idor": "owner"}
-STRING_CLASSES = ("sqli", "traversal")
+ORACLE_OF = classmod.ORACLE_OF          # class -> the oracle that confirms it (immune_contracts/classes.py)
+STRING_CLASSES = classmod.STRING_CLASSES
 MAX_CORPUS_PER_PROBE = 40
 MAX_JSON_DEPTH = 3
 
@@ -167,7 +169,7 @@ def _base_request(spec: dict, method: str, tpl: str, op: dict) -> dict:
 
 def candidates(spec: dict, vuln_class: str, manifest: dict | None = None) -> list:
     """Every (operation, parameter) of the OpenAPI document that `vuln_class` could affect, in document order."""
-    if vuln_class not in ORACLE_OF:
+    if vuln_class not in classmod.AUDITABLE:
         return []
     out, seen = [], set()
     for method, tpl, op in openapi.operations(spec):
@@ -218,6 +220,8 @@ def battery(vuln_class: str, cand: Candidate, manifest: dict | None, corpus_valu
         vals = list(properties.TRAVERSAL)
     elif vuln_class == "idor":
         vals = [str(i) for i in properties._candidate_ids({"param": cand.param}, manifest or {}, None)]
+    elif vuln_class in payloads.BATTERY:
+        vals = list(payloads.BATTERY[vuln_class])
     else:
         vals = []
     extra = []

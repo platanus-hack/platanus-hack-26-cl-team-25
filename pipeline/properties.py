@@ -10,6 +10,10 @@ names a specific endpoint. Application code only runs inside the runner.
              legitimate name that worked before (dotted names included) returns identical bytes
   idor       identity x resource matrix in the shadow harness: the owner gets 2xx with their own
              data, another seed user and a new user get 403/404, anonymous status unchanged
+  ssrf, cmdi, ssti, deser, xxe, redirect
+             (input -> effect classes, shadow/effects.py) no payload of the class's battery
+             (immune_contracts/payloads.py) makes the patched app produce any oracle event of the class's
+             family, and the benign value keeps the status it had before
 """
 from __future__ import annotations
 
@@ -17,6 +21,8 @@ import os
 
 import sqlparse
 from sqlparse import tokens as T
+
+from immune_contracts import classes, payloads
 
 from . import reqs
 
@@ -411,7 +417,52 @@ def idor(v, inc, poc, base_dir, patched_dir):
                   % (where, len(owners), n_owner, n_deny, bl["anon_status"]))
 
 
-CHECKS = {"sqli": sqli, "traversal": traversal, "idor": idor}
+# ------------------------------------------------------------------ input -> effect classes
+def effect_class(vuln_class: str):
+    """The positive property of an input -> effect class. The attack battery goes through the shadow harness
+    (the same Engine the oracles run in) against the patched release: no payload may produce an event of the class's
+    family (its own oracle or the raw channel it is built on), and the benign value must answer the status it
+    answered on the unpatched release without firing anything."""
+    family, battery, benign = classes.FAMILY[vuln_class], payloads.BATTERY[vuln_class], payloads.BENIGN[vuln_class]
+
+    def check(v, inc, poc, base_dir, patched_dir):
+        param, tpl = inc.get("param"), inc.get("route")
+        if not param:
+            return False, "cannot check: the incident has no input parameter"
+        where = "%s %s param %s" % (inc["method"], inc["route"], param["name"])
+        base = template_request(inc, poc)
+
+        def seq(name, value):
+            return {"name": name, "requests": [reqs.set_value(base, param, value, tpl)]}
+
+        key = ("effect", vuln_class, base_dir, inc["method"], inc["route"], str(param))
+        if key not in v.cache:
+            before = v.run(base_dir, {"kind": "harness", "sequences": [seq("benign", benign)]})
+            v.cache[key] = before["sequences"][0]["runs"][0][-1]["status"]
+        status_before = v.cache[key]
+        res = v.run(patched_dir, {"kind": "harness",
+                                  "sequences": [seq("benign", benign)] + [seq("attack:" + p, p) for p in battery]})
+        fails = []
+        for s in res["sequences"]:
+            r = s["runs"][0][-1]
+            hit = sorted({e["oracle"] for e in r.get("events") or [] if e.get("oracle") in family})
+            if s["name"] == "benign":
+                if hit:
+                    fails.append("the benign value %r fires %s" % (benign, "/".join(hit)))
+                if r["status"] != status_before:
+                    fails.append("the benign value answers %d, it answered %d before" % (r["status"], status_before))
+            elif hit:
+                fails.append("input %r still fires %s" % (_short(s["name"][7:], 50), "/".join(hit)))
+        if fails:
+            return False, "%s: %s" % (where, "; ".join(fails[:4]))
+        return True, ("%s: %d %s payloads produce no %s event; the benign value keeps its status %d and fires nothing"
+                      % (where, len(battery), vuln_class, "/".join(family), status_before))
+    check.__name__ = vuln_class
+    return check
+
+
+CHECKS = {"sqli": sqli, "traversal": traversal, "idor": idor,
+          **{c: effect_class(c) for c in classes.EFFECT_CLASSES}}
 
 
 def check(v, inc, poc, base_dir, patched_dir):

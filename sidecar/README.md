@@ -142,6 +142,10 @@ profile hooks as `env`.
 | `proc` | `strace` on `execve`, `execveat`, non-thread `clone`, `clone3`, `fork`, `vfork` | Any process started during the request, except programs matching `exec_allow` |
 | `net` | `strace` on `connect`, `sendto`, `sendmsg` | An attempt to a non-loopback address not seen in warm-up, any destination on port 53, a unix socket not seen in warm-up; except destinations matching `net_allow` |
 | `owner` | Response body | A marker of another owner (same rule as `Engine.owner_events` in `shadow/core.py`) |
+| `ssrf`, `cmdi`, `ssti`, `deser`, `xxe`, `redirect` | the `net` / `proc` / `file` observations above and the response, through `shadow/effects.py` | the request's own input provably reached the effect (contracts/README.md has the exact rule of each). Otherwise the generic oracle stays. A loopback destination counts as `ssrf` only if the request named it and the app never used it; a DNS lookup is one event, with the question name (`qname`) read from the datagram |
+
+Evidence `stack` is `[]` unless a source of frames is configured (see *Where in the app's code* below); `detail` is `{statement,input,param,location,reason}`,
+`{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
 
 Evidence `stack` is `[]` unless a source of frames is configured (see *Where in the app's code* below); `detail` is `{statement,input,param,location,reason}`,
 `{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
@@ -264,6 +268,10 @@ A markers-file entry `{marker: {"path": file}}` declares a secret planted in tha
 (`observer.load_file_markers`). `observer.marker_events` adds a `file` event for each such marker found in the
 (decompressed) response body, with `observed: response`, or `response+syscall` when a successful open of the
 same file was seen in the window. This catches a leak of a file that was already open before the request.
+
+The Node demo (`examples/node`) also has the input → effect routes: `/lookup` (shell injection → `cmdi`),
+`/fetch` (SSRF → `ssrf`), `/redirect` (open redirect), `/render` (template injection), `/import` (XXE) and
+`/restore` (insecure deserialization, the node-serialize pattern), each with a `/safe-*` twin that stays clean.
 
 ### Postgres proxy and the `sql` oracle
 

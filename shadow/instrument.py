@@ -139,15 +139,46 @@ def _hook(event, args):
             _on_file(rec, event, args)
         elif rec is not None and not STATE.learning:
             if event in PROC_EVENTS:
-                rec.add(wire.ORACLE_PROC, {"event": event, "args": _short(args[:2] if event != "os.system" else args)},
-                        capture_stack(1))
+                detail = {"event": event, "args": _short(args[:2] if event != "os.system" else args)}
+                argv = _argv(event, args)
+                if argv:
+                    detail["argv"] = argv      # structured, for the input -> effect correlation (shadow/effects.py)
+                rec.add(wire.ORACLE_PROC, detail, capture_stack(1))
             else:
                 addr = args[1] if event in ("socket.connect", "socket.sendto", "socket.sendmsg") and len(args) > 1 else args[:2]
-                rec.add(wire.ORACLE_NET, {"event": event, "address": _short(addr)}, capture_stack(1))
+                detail = {"event": event, "address": _short(addr)}
+                detail.update(_hostport(addr))
+                rec.add(wire.ORACLE_NET, detail, capture_stack(1))
     except Exception:  # never break the app because of the oracle
         pass
     finally:
         _tls.busy = False
+
+
+def _argv(event, args) -> list:
+    """The command line of a proc event as strings: Popen/exec/spawn carry an argv list, os.system a command."""
+    try:
+        if event == "os.system":
+            return [os.fsdecode(args[0])]
+        for a in args[:3]:
+            if isinstance(a, (list, tuple)) and all(isinstance(x, (str, bytes, os.PathLike)) for x in a):
+                return [os.fsdecode(x) for x in a][:40]
+        return [os.fsdecode(args[0])] if args and isinstance(args[0], (str, bytes, os.PathLike)) else []
+    except Exception:
+        return []
+
+
+def _hostport(addr) -> dict:
+    """{"host": ..., "port": ...} of a socket address tuple ((host, port) / (host,)); {} for anything else."""
+    try:
+        if isinstance(addr, (tuple, list)) and addr and isinstance(addr[0], (str, bytes)):
+            out = {"host": os.fsdecode(addr[0])}
+            if len(addr) > 1 and isinstance(addr[1], int):
+                out["port"] = addr[1]
+            return out
+    except Exception:
+        pass
+    return {}
 
 
 def _short(obj, n=300):

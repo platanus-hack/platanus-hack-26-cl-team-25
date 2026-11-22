@@ -16,8 +16,13 @@ No ttl: the rule lives until the patch is deployed and verified, or it is delete
 """
 from __future__ import annotations
 
+from immune_contracts import classes as _classes
+
 TTL_S = None  # no expiry
 RULE_PARAM_IN = ("query", "path", "json", "form", "header")
+# classes whose rule can address the parameter (grammar + param_present); an effect class whose input is the raw body
+# or a cookie falls back to the whole route, like the others
+_RULE_CLASSES = ("sqli", "traversal") + _classes.EFFECT_CLASSES
 _SAFE_CHARS = r"A-Za-z0-9 _.,@:+\-"  # same set as grammar.SAFE_DEFAULT
 
 
@@ -63,7 +68,7 @@ def derive_rule(incident: dict, openapi: dict) -> dict:
     param = incident.get("param") or None
     rule = {"id": f"rule-{inc_id}", "incident": inc_id, "method": method, "route": route,
             "param": None, "grammar": None, "scope": "all", "ttl_s": TTL_S}
-    if vuln_class not in ("sqli", "traversal") or not param or not param.get("name") or not param.get("in"):
+    if vuln_class not in _RULE_CLASSES or not param or not param.get("name") or not param.get("in"):
         return rule
     schema = param_schema(openapi, method, route, param)
     if schema is not None and schema.get("x-sensitive"):

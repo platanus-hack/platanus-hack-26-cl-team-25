@@ -7,6 +7,8 @@ import re
 
 import jsonschema
 
+from immune_contracts import payloads
+
 from . import reqs
 from .config import REPO_ROOT
 
@@ -67,6 +69,8 @@ def mutate(inc: dict, poc: dict, manifest: dict | None = None) -> list:
         t = _target(val) or "etc/hostname"
         cands = ["/" + t, "../" * 12 + t, "..//" * 8 + t, "./" + val, val.replace("/", "//"),
                  "/etc/passwd", "../" * 12 + "etc/passwd", "....//" * 8 + t]
+    elif cls in payloads.BATTERY:                   # input -> effect classes: the same battery the gate replays
+        cands = list(payloads.BATTERY[cls])[:8]
     elif cls == "idor":
         cands = []
         for c in (manifest or {}).get("canaries", {}).get(param.get("name"), []):

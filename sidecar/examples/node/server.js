@@ -88,6 +88,47 @@ async function route(req, res) {
     });
     return send(res, 200, { out });
   }
+  // ---- input -> effect classes (shadow/effects.py): each deliberately vulnerable route has a safe twin
+  if (p === "/redirect") { // open redirect: any target
+    res.writeHead(302, { location: q.get("next") || "/" });
+    return res.end();
+  }
+  if (p === "/safe-redirect") { // only paths of this site
+    const next = q.get("next") || "/";
+    res.writeHead(302, { location: /^\/(?![\/\\])/.test(next) ? next : "/" });
+    return res.end();
+  }
+  if (p === "/render") { // template injection: the {{ expression }} of the request is evaluated
+    const out = (q.get("tpl") || "").replace(/\{\{(.+?)\}\}/g, (_m, expr) => { try { return String(eval(expr)); } catch (e) { return ""; } });
+    return send(res, 200, out, "text/html");
+  }
+  if (p === "/safe-render") { // the template is data: escaped, never evaluated
+    return send(res, 200, (q.get("tpl") || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])), "text/html");
+  }
+  if (p === "/import" && req.method === "POST") { // XXE: SYSTEM entities of the document are read from disk
+    const xml = await readBody(req);
+    let out = xml.replace(/<!DOCTYPE[\s\S]*?\]>/, "");
+    for (const m2 of xml.matchAll(/<!ENTITY\s+(\w+)\s+SYSTEM\s+"file:\/\/([^"]+)">/g)) {
+      let data = ""; try { data = fs.readFileSync(m2[2], "utf8"); } catch (e) {}
+      out = out.split("&" + m2[1] + ";").join(data);
+    }
+    return send(res, 200, { doc: out });
+  }
+  if (p === "/safe-import" && req.method === "POST") { // the DOCTYPE is dropped, entities are never resolved
+    return send(res, 200, { doc: (await readBody(req)).replace(/<!DOCTYPE[\s\S]*?\]>/, "") });
+  }
+  if (p === "/restore") { // insecure deserialization (the node-serialize pattern): "_$$ND_FUNC$$_" members are executed
+    let obj;
+    try { obj = JSON.parse(Buffer.from(q.get("obj") || "e30=", "base64").toString()); } catch (e) { return send(res, 400, { detail: "bad object" }); }
+    for (const k of Object.keys(obj)) {
+      if (typeof obj[k] === "string" && obj[k].startsWith("_$$ND_FUNC$$_")) obj[k] = eval("(" + obj[k].slice(13) + ")")();
+    }
+    return send(res, 200, obj);
+  }
+  if (p === "/safe-restore") { // data only
+    try { return send(res, 200, JSON.parse(Buffer.from(q.get("obj") || "e30=", "base64").toString())); }
+    catch (e) { return send(res, 400, { detail: "bad object" }); }
+  }
   if (p === "/deferred") { // answers first, reads the file afterwards (fire-and-forget, not awaited)
     const file = path.join(STATIC, q.get("name") || "");
     const delay = Math.min(parseInt(q.get("delay") || "5", 10), 1000);

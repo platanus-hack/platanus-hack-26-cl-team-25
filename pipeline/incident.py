@@ -5,10 +5,12 @@ import json
 import re
 from urllib.parse import parse_qsl, quote, unquote
 
+from immune_contracts import classes
+
 from . import openapi, reqs
 
-CLASS_OF = {"sql": "sqli", "file": "traversal", "owner": "idor", "proc": "rce"}
-PREFERENCE = ("sql", "file", "proc", "owner")   # when several oracles fired (proc = code execution)
+CLASS_OF = classes.CLASS_OF           # oracle kind -> vulnerability class (immune_contracts/classes.py)
+PREFERENCE = classes.PREFERENCE       # when several oracles fired
 ROUTE_MAX, NAME_MAX = 200, 100
 
 
@@ -68,6 +70,10 @@ def derive_param(kind: str, event: dict, req: dict, template: str | None, manife
     if kind == "sql" and detail.get("param"):
         loc = detail.get("location") or "query"
         return {"in": loc, "name": str(detail["param"])}
+    if kind in classes.EFFECT_CLASSES and detail.get("param"):
+        # input -> effect oracles (shadow/effects.py) name the input that reached the effect and where it came from
+        loc, name = str(detail.get("location") or "query"), str(detail["param"])
+        return None if (loc == "path" and name.startswith("path[")) else {"in": loc, "name": name}
     if kind == "file":
         target = str(detail.get("path") or "")
         best = None

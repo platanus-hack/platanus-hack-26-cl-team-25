@@ -14,6 +14,8 @@ import re
 import secrets
 from string import Template
 
+from immune_contracts import classes as _classes
+
 from . import claude_cli
 from .fallback import apply_fallback
 from .workspace import Workspace
@@ -49,7 +51,7 @@ def _class_rules(vuln_class: str, langs: list | None = None, db_kind: str = "") 
     sections, cur = {}, None
     for line in _read("classes.md").splitlines(keepends=True):
         m = re.fullmatch(r"## (\w+)\s*", line)
-        if m and m.group(1) in ("sqli", "traversal", "idor", "other"):
+        if m and m.group(1) in ("sqli", "traversal", "idor", "other") + _classes.EFFECT_CLASSES:
             cur = m.group(1)
             sections[cur] = ""
         elif cur:

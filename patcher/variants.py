@@ -15,7 +15,12 @@ import json
 import re
 from urllib.parse import parse_qsl, quote, unquote
 
+from immune_contracts import classes as _classes
+from immune_contracts import payloads as _payloads
+
 MAX_VARIANTS = 40
+
+_ORACLE_CLASS = _classes.CLASS_OF
 
 
 # ---------------------------------------------------------------- locating the parameter
@@ -99,6 +104,19 @@ def locate(poc: dict, evidence: dict) -> tuple[str, str, str]:
                 for k, v in _json_leaves(body):
                     if v and target.endswith(v):
                         return "json", k, v
+    # input -> effect classes (shadow/effects.py): the oracle names the input that reached the effect
+    for e in events:
+        d = e.get("detail") or {}
+        if e.get("oracle") in _classes.EFFECT_CLASSES and d.get("param"):
+            loc, name = d.get("location") or "query", d["param"]
+            if loc == "query":
+                vals = [v for k, v in pairs if k == name]
+                if vals:
+                    return "query", name, vals[-1]
+            if loc == "json" and body is not None:
+                v = _json_get(body, name)
+                if isinstance(v, str):
+                    return "json", name, v
     # owner / fallback: last numeric path segment
     segs = req.get("path", "").split("/")
     for i in range(len(segs) - 1, -1, -1):
@@ -278,6 +296,14 @@ def variants(poc: dict, evidence: dict) -> list[dict]:
             out += [_with_json_value(base, name, p) for p in payloads]
             out += [_with_json_value(base, name, value, ascii_escape=True),
                     _with_json_value(base, name, payloads[0], ascii_escape=True)]
+    elif oracle in _classes.EFFECT_CLASSES and name and loc in ("query", "json"):
+        battery = _payloads.BATTERY[oracle]
+        if loc == "query":
+            out += [_with_query_value(base, name, quote(p, safe="")) for p in battery]
+            out.append(_with_query_value(base, name, quote(value, safe=""), extra_before=_payloads.BENIGN[oracle]))
+        else:
+            out += [_with_json_value(base, name, p) for p in battery]
+            out.append(_with_json_value(base, name, battery[0], ascii_escape=True))
     elif oracle == "sql" and loc == "path" and name.isdigit():
         out += [_with_path_segment(base, int(name), quote(p, safe="")) for p in _sqli_payloads(value)]
     else:

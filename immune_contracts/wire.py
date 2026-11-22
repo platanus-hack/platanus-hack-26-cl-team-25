@@ -31,6 +31,16 @@ ORACLE_FILE = "file"
 ORACLE_PROC = "proc"
 ORACLE_NET = "net"
 ORACLE_OWNER = "owner"
+# Input -> effect oracles (shadow/effects.py): the same observations as proc / net / file / the response, but the
+# request's own input is what reached the effect, which is what makes it a class of its own (classes.py).
+ORACLE_SSRF = "ssrf"          # an undeclared connection to a destination the request named
+ORACLE_CMDI = "cmdi"          # a process was spawned with the request's input on its command line
+ORACLE_SSTI = "ssti"          # a template expression of the request was evaluated (response, or its effect)
+ORACLE_DESER = "deser"        # a process/connection/file effect while the request carried a serialized object
+ORACLE_XXE = "xxe"            # an XML external entity of the request body was fetched (file or connection)
+ORACLE_REDIRECT = "redirect"  # a 3xx to another host that the request itself named
+ORACLES = (ORACLE_SQL, ORACLE_FILE, ORACLE_PROC, ORACLE_NET, ORACLE_OWNER,
+           ORACLE_SSRF, ORACLE_CMDI, ORACLE_SSTI, ORACLE_DESER, ORACLE_XXE, ORACLE_REDIRECT)
 
 # Clone evidence push: POST http://<COLLECTOR_URL>/_clone/evidence  (JSON body, see contracts/schemas/evidence.schema.json)
 H_CLONE_ID = "x-imm-clone"
