@@ -393,6 +393,13 @@ def classify(view: View, spec: Spec, who: Who, manifest: Manifest, rules: list[R
         if enum is not None and op.owner_scoped and path_params:
             if enum.hit(session, op.template, tuple(sorted(path_params.items()))):
                 res.add("enumeration")
+        # file-based apps carry the entity in the query string (sl_eob_invoice.php?id=): query params
+        # declared x-owner-id on an owner-scoped route count for the same session-window heuristic
+        if enum is not None and op.owner_scoped:
+            qhits = tuple(sorted((k, str(v)) for k, v in pairs
+                                 if (op.params.get(("query", k)) or {}).get("x-owner-id")))
+            if qhits and enum.hit(session, op.template, qhits):
+                res.add("enumeration")
 
     # ---- active rules (route may be off-spec). `identity: untrusted` rules skip a trusted caller,
     #      so a missing-auth containment rule does not detonate legitimate authenticated traffic.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import inspect
 import logging
 import os
 import sys
@@ -372,6 +373,21 @@ class Sidecar:
                                           skip={e["detail"]["statement"] for e in events})
         events += observer.marker_events(self.file_markers, rh, rbody, self.obs.system_events(rec))
         events += observer.owner_events(self.markers, self.public, path, rh, rbody, uid, role, bool(events))
+        # profile oracles (optional, app-specific; e.g. openemr_identity replays the authorization the app
+        # skipped and flags stored active markup): same event shape, same verdict machinery, never fatal
+        hook = getattr(self.ident.profile, "extra_oracles", None)
+        if callable(hook):
+            try:
+                got = hook({"env": self.env, "conn": self.admin, "method": method, "path": path, "query": query,
+                            "headers": client_h, "body": body, "status": status, "resp_headers": rh,
+                            "resp_body": rbody, "uid": uid, "role": role,
+                            "database": (self.cfg.mysql.database if self.cfg.mysql else None),
+                            "statements": rec.statements, "failed": failed, "bound": rec.bound})
+                if inspect.isawaitable(got):
+                    got = await got
+                events += got or []
+            except Exception as e:  # noqa: BLE001
+                log.warning("rid=%s profile oracle failed: %r", rid, e)
         if events and self.calltrace:
             try:   # where in the app's code: never changes the verdict
                 await asyncio.to_thread(self.calltrace.attach, events)
