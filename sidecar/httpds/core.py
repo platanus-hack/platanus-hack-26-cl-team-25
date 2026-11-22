@@ -31,6 +31,9 @@ import httpx
 
 from immune_contracts import wire
 
+from sidecar import observer as sidecar_observer
+from sidecar.tracer import Tracer
+
 log = logging.getLogger("sidecar")
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
@@ -48,6 +51,21 @@ class Config:
     collector_url: str = ""
     release: str = "1.2"
     timeout_s: float = 15.0
+    # proc oracle (second vuln: authenticated RCE). When tracer_container is set, strace is attached to the
+    # shadow container (docker mode) and any process spawned during a request window fires a `proc` oracle.
+    tracer_container: str = ""
+    tracer_image: str = "immune-strace:1"
+    tracer_label: str = ""
+    exec_allow: tuple = ()        # program-path globs the JVM legitimately spawns; everything else fires
+    grace_ms: int = 150
+    # authenticated detonation: the RCE is an admin action, but a fresh shadow clone has no session. For the
+    # configured paths (e.g. the DWR process/script endpoints) the sidecar establishes an admin session on
+    # the shadow and forwards the attack with it, so the shadow faithfully runs the authenticated action.
+    # This MODELS the attacker's authenticated context on the shadow (the same app, the same admin account),
+    # the way the lab models the device credential for /httpds. Off unless reauth_paths is set.
+    reauth_paths: tuple = ()
+    reauth_user: str = "admin"
+    reauth_pw: str = ""
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -56,10 +74,17 @@ class Config:
         if path:
             with open(path) as f:
                 manifest = json.load(f)
+        exec_allow = tuple(x for x in (env.get("EXEC_ALLOW", "").split(",")) if x.strip())
         return cls(upstream=env.get("SHADOW_UPSTREAM", "127.0.0.1:8080"), manifest=manifest,
                    clone_id=env.get("CLONE_ID", "sidecar-0"), clone_key=env.get("CLONE_KEY", ""),
                    collector_url=env.get("COLLECTOR_URL", "").rstrip("/"), release=env.get("RELEASE", "1.2"),
-                   timeout_s=float(env.get("SIDECAR_TIMEOUT_S", "15")))
+                   timeout_s=float(env.get("SIDECAR_TIMEOUT_S", "15")),
+                   tracer_container=env.get("TRACER_CONTAINER", ""),
+                   tracer_image=env.get("TRACER_IMAGE", "immune-strace:1"),
+                   tracer_label=env.get("TRACER_LABEL", ""),
+                   exec_allow=exec_allow, grace_ms=int(env.get("GRACE_MS", "150")),
+                   reauth_paths=tuple(x.strip() for x in env.get("REAUTH_PATHS", "").split(",") if x.strip()),
+                   reauth_user=env.get("REAUTH_USER", "admin"), reauth_pw=env.get("REAUTH_PW", ""))
 
 
 def consumed_points(query: str, body: bytes, manifest: dict) -> list:
@@ -96,16 +121,38 @@ class Sidecar:
         self.lock = asyncio.Lock()
         self.client = httpx.AsyncClient(timeout=cfg.timeout_s, follow_redirects=False)
         self.push_client = httpx.AsyncClient(timeout=3.0)
+        self._shadow_cookie: str | None = None    # cached admin session on the shadow (authenticated detonation)
+        # proc oracle: observe process spawns in the shadow container during each request window.
+        self.obs = self.tracer = None
+        if cfg.tracer_container:
+            # allow every file and network op (we only care about exec here); exec_allow lists the JVM's
+            # own legitimate children, everything else spawned during a request is a `proc` oracle hit.
+            self.obs = sidecar_observer.Observer(["/"], dns_fires=False, exec_allow=cfg.exec_allow,
+                                                 net_allow=["*:*"])
+            self.tracer = Tracer(self.obs.on_obs, mode="docker", container=cfg.tracer_container,
+                                 image=cfg.tracer_image, label=cfg.tracer_label)
 
     async def aclose(self):
         await self.client.aclose()
         await self.push_client.aclose()
+        if self.tracer:
+            try:
+                self.tracer.stop()
+            except Exception as e:  # noqa: BLE001
+                log.warning("tracer stop failed: %s", e)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
             while True:
                 msg = await receive()
                 if msg["type"] == "lifespan.startup":
+                    if self.tracer:
+                        try:
+                            await asyncio.to_thread(self.tracer.start)
+                            log.info("proc oracle: strace attached to %s", self.cfg.tracer_container)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("proc oracle disabled: tracer could not attach: %s", e)
+                            self.obs = self.tracer = None
                     await send({"type": "lifespan.startup.complete"})
                 elif msg["type"] == "lifespan.shutdown":
                     await self.aclose()
@@ -138,10 +185,18 @@ class Sidecar:
         target = (raw_path + ("?" + query if query else "")).encode("latin-1")
         async with self.lock:
             host, _, port = self.cfg.upstream.rpartition(":")
+            # authenticated detonation: give the shadow an admin session for paths that need one (the RCE
+            # endpoints), replacing the attacker's prod cookie (invalid on this clone).
+            if self.cfg.reauth_paths and any(p in raw_path for p in self.cfg.reauth_paths):
+                cookie = await self._shadow_admin_cookie(host, int(port))
+                if cookie:
+                    client_h = [(k, v) for k, v in client_h if k.lower() != "cookie"] + [("cookie", cookie)]
             try:
                 req = self.client.build_request(scope["method"], httpx.URL(scheme="http", host=host, port=int(port),
                                                                            raw_path=target),
                                                 headers=client_h, content=body or None, extensions={"target": target})
+                if self.obs:
+                    self.obs.begin()        # open the proc observation window across the forwarded request
                 r = await self.client.send(req)
                 status, rbody = r.status_code, r.content
                 rheaders = [(k.lower(), v) for k, v in r.headers.multi_items()
@@ -151,6 +206,11 @@ class Sidecar:
                 return 502, [("content-type", "application/json"), (wire.H_VERDICT, wire.VERDICT_INCONCLUSIVE),
                              (wire.H_EVENTS, "0")], b'{"detail":"Bad Gateway"}'
             events = []
+            if self.obs:
+                # close the window a little after the response so a late fork/exec is still attributed
+                await asyncio.sleep(max(self.cfg.grace_ms, 50) / 1000)
+                rec = self.obs.end()
+                events += [e for e in self.obs.system_events(rec) if e.get("oracle") == wire.ORACLE_PROC]
             if raw_path.endswith(HTTPDS_SUFFIX):
                 # a POST receiver carries its parameters in the form body; merge for the consumed check
                 scan_query = query
@@ -174,6 +234,26 @@ class Sidecar:
                     "status": status, "events": events, "pre_state_b64": None})
         rheaders += [(wire.H_VERDICT, verdict), (wire.H_EVENTS, str(len(events)))]
         return status, rheaders, rbody
+
+    async def _shadow_admin_cookie(self, host: str, port: int) -> str | None:
+        """Establish (and cache) an authenticated admin session on the shadow ScadaBR: GET the login page for
+        a JSESSIONID, then POST the credentials to authenticate it. Returns the `JSESSIONID=...` cookie."""
+        if self._shadow_cookie:
+            return self._shadow_cookie
+        login = httpx.URL(scheme="http", host=host, port=port, path="/ScadaBR/login.htm")
+        try:
+            async with httpx.AsyncClient(timeout=self.cfg.timeout_s, follow_redirects=False) as c:
+                await c.get(login)      # ScadaBR issues the JSESSIONID here
+                await c.post(login, data={"username": self.cfg.reauth_user, "password": self.cfg.reauth_pw})
+                sid = c.cookies.get("JSESSIONID")
+                if sid:
+                    self._shadow_cookie = "JSESSIONID=%s" % sid
+                    log.info("authenticated detonation: admin session established on the shadow")
+                else:
+                    log.warning("authenticated detonation: no JSESSIONID from the shadow login")
+        except httpx.HTTPError as e:
+            log.warning("authenticated detonation: shadow login failed: %s", e)
+        return self._shadow_cookie
 
     async def _push(self, evidence: dict):
         if not self.cfg.collector_url:
