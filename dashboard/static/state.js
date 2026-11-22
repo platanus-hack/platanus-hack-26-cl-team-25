@@ -37,6 +37,16 @@
   }
 
   function isObj(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
+  // deploy.done data.canary -> the few numbers the page shows (a share of real traffic tried the release first)
+  function canaryOf(c) {
+    if (!c || typeof c !== 'object' || ['ok', 'worse', 'skipped'].indexOf(c.verdict) < 0) return null;
+    var can = c.canary && typeof c.canary === 'object' ? c.canary : {};
+    var stable = c.stable && typeof c.stable === 'object' ? c.stable : {};
+    return { verdict: c.verdict, weight: num(c.weight), seconds: num(c.seconds),
+      requests: num(can.requests) || 0, e5: num(can['5xx']) || 0, e4: num(can['4xx']) || 0,
+      stableRequests: num(stable.requests) || 0, stableE5: num(stable['5xx']) || 0, stableE4: num(stable['4xx']) || 0 };
+  }
+
   function num(x) { return typeof x === 'number' && isFinite(x) ? x : null; }
   function str(x) { return typeof x === 'string' ? x : (typeof x === 'number' && isFinite(x) ? String(x) : null); }
   /* a usable id (incident, rule, session, rid): short string or number, else null */
@@ -239,6 +249,12 @@
       case 'session.released':
         if (sid(d.session)) delete st.sessions[sid(d.session)];
         break;
+      case 'canary.started':
+        st.canary = { ts: ts, release: str(d.release), weight: num(d.weight) };
+        break;
+      case 'canary.done':
+        st.canary = null;
+        break;
       case 'pool.state':
         st.pool = { free: num(d.l1_free), busy: num(d.l2_busy), size: num(d.size) };
         break;
@@ -349,6 +365,7 @@
           else {
             target.deploy.doneTs = ts; target.deploy.ok = !!d.ok;
             target.deploy.rolled_back = !!d.rolled_back; target.deploy.detail = text(d.detail); target.t.deploy = ts;
+            target.deploy.canary = canaryOf(d.canary);
           }
           touch(target);
         }

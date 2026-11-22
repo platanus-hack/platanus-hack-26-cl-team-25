@@ -243,6 +243,8 @@
       var failed = d.doneTs && !d.ok;
       var sd = section(inc.fuxa ? (d.rolled_back ? 'Reversión' : 'Redespliegue') : 'Deploy blue/green', inc, (inc.prod && inc.prod.ts) || d.doneTs || d.startTs, failed ? 'bad' : inc.prod ? 'done' : 'run');
       rowOf(sd, 'Release', String(d.release || (inc.prod && inc.prod.release) || '?').slice(0, 12));
+      var cn = canaryText(d.canary);
+      if (cn) rowOf(sd, 'Canario', cn, 'plain');
       if (inc.prod) rowOf(sd, 'Tráfico', 'Cambiado a ' + (inc.prod.addr || '?') + ' sin cortes', 'plain');
       if (inc.fuxa && d.doneTs) {
         rowOf(sd, 'Resultado', (d.ok ? 'Verificado' : d.rolled_back ? 'Reversión verificada' : 'Falló') +
@@ -374,6 +376,21 @@
   }
 
   function n1(x) { return x == null ? '-' : dec(x) + ' s'; }
+  // What the canary saw, in one line. Nothing when it was off: an empty row would only be noise.
+  function canaryText(c) {
+    if (!c || (c.verdict === 'skipped' && !c.requests && !c.seconds)) return null;
+    var share = (typeof c.weight === 'number' ? Math.round(c.weight * 100) + '% del tráfico real' : 'Parte del tráfico real') +
+      (typeof c.seconds === 'number' ? ' durante ' + secs(c.seconds) : '');
+    var seen = count(c.requests, 'request', 'requests');
+    if (c.verdict === 'ok') return share + ': ' + seen + ', mismo comportamiento que la versión anterior';
+    if (c.verdict === 'worse') {
+      var what = c.e5 ? c.e5 + ' con error del servidor (la versión anterior: ' + c.stableE5 + ' de ' + c.stableRequests + ')'
+        : c.e4 + ' rechazados (la versión anterior: ' + c.stableE4 + ' de ' + c.stableRequests + ')';
+      return share + ': ' + seen + ', ' + what + '. Se descartó antes de recibir todo el tráfico';
+    }
+    return share + ': ' + seen + ', muy pocos para comparar. Se vigiló después del cambio';
+  }
+
   function count(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
   function fact(id, parts) {
     var host = $(id);
@@ -454,7 +471,8 @@
     add(now, el('div', 'addr', up.addr || '?'), el('div', 'k', 'Release ' + String(up.release || '?').slice(0, 12) + ' desde las ' + hms(up.ts)));
     host.appendChild(now);
     var dep = st.deploy;
-    if (dep && !dep.done) host.appendChild(el('div', 'kv deploying', 'deploy en curso: release ' + String(dep.release || '?').slice(0, 14)));
+    if (st.canary) host.appendChild(el('div', 'kv deploying', 'canario: ' + (typeof st.canary.weight === 'number' ? Math.round(st.canary.weight * 100) + '% del tráfico' : 'parte del tráfico') + ' en la release ' + String(st.canary.release || '?').slice(0, 14)));
+    else if (dep && !dep.done) host.appendChild(el('div', 'kv deploying', 'deploy en curso: release ' + String(dep.release || '?').slice(0, 14)));
     else if (dep && !dep.ok) host.appendChild(el('div', 'kv bad', 'último deploy falló' + (dep.rolled_back ? ' (rollback)' : '') + ': release ' + String(dep.release || '?').slice(0, 14)));
     var sw = st.switches;
     for (var i = sw.length - 1; i >= 1 && i >= sw.length - 4; i--) {
