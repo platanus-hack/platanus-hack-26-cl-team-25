@@ -49,6 +49,17 @@ assert.strictEqual(st.pendingOracles.length, 1);
   S.reduce(q, mk('pool.state', { size: 4 }, { ts: t + 2000 }));          // much later and still no incident: no longer shown
   assert.strictEqual(S.pendingAttacks(q).length, 0); assert.strictEqual(S.scoreboard(q).open, 0);
 }
+// --- a later patch to the same file moves the sink's line: a hit on the same route still belongs to the incident
+{
+  const m = S.newState();
+  S.reduce(m, oracle('m1', { events: [{ oracle: 'file', detail: {}, stack: [{ file: '/srv/app/routes/files.py', line: 28 }] }] }));
+  S.reduce(m, mk('incident.opened', { incident: 'm', vuln_class: 'path_traversal', route: '/api/download', param: { in: 'query', name: 'file' }, sink }, { incident: 'm' }));
+  assert.strictEqual(m.pendingOracles.length, 0); assert.strictEqual(S.pendingAttacks(m).length, 0);
+  assert.strictEqual(m.incidents.m.oracles.length, 1);
+  // another route in the same file is still not this incident
+  S.reduce(m, oracle('m2', { request: { method: 'GET', path: '/api/other' } }));
+  assert.strictEqual(m.incidents.m.oracles.length, 1);
+}
 S.reduce(st, mk('incident.opened', { incident: 'i1', vuln_class: 'path_traversal', route: '/api/download', param: { in: 'query', name: 'file' }, sink }, { incident: 'i1' }));
 assert.strictEqual(st.pendingOracles.length, 0);
 assert.strictEqual(S.pendingAttacks(st).length, 0); assert.deepStrictEqual(S.displayOrder(st), ['i1']);

@@ -123,8 +123,12 @@ Todas las cifras, con fecha, máquina, método y archivo de datos, están en [do
 - **Tiempo a parche (2026-11-21, ARM64 de 4 núcleos compartida, 7 defectos × 3 rondas):** 21 de 21 incidentes
   parchados por el modelo en el primer intento. Medianas desde que se abre el incidente: regla activa a los 1.9 s,
   release parchado en producción a los 24.9 s, verificado a través del gateway a los 51.3 s. Estas cifras son
-  anteriores a las correcciones de la auditoría del 2026-11-22 y no se volvieron a medir; en ese momento la lista
-  de defectos plantados estaba dentro del árbol que el generador de parches podía leer.
+  anteriores a las correcciones de la auditoría del 2026-11-22; en ese momento la lista de defectos plantados
+  estaba dentro del árbol que el generador de parches podía leer.
+- **Corrida con atacante, posterior a la auditoría (2026-11-22, misma máquina, 7 defectos × 1 ronda):** 7 de 7
+  parchados por el modelo en el primer intento; mediana de 45.2 s hasta producción. El atacante de demostración
+  hizo 392 intentos y ninguno obtuvo datos de producción. Costo: 82 de 4551 requests de clientes legítimos
+  recibieron un 404, casi todos por la regla de un IDOR mientras esperaba su parche.
 - **Tests (2026-11-22):** 754 pasan y 6 quedan deseleccionados (los que llaman al modelo, no ejecutados) de 760.
 - **Autotest de las validaciones (2026-11-22):** los 7 parches escritos a mano pasan las cinco validaciones y los
   15 parches inadecuados son rechazados por la validación esperada.

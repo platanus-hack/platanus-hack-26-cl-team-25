@@ -46,6 +46,7 @@ Flags are the ones declared with `argparse` in `immune/__main__.py`, `immune/ini
 | `immune report` | `--project DIR`, `--json` | 0 |
 | `immune mode observe\|enforce` | `--project DIR` | 0; 2 on an invalid config |
 | `immune autopatch off\|pr\|merge` | `--project DIR` | 0; 2 on an invalid config |
+| `immune rollback` | `--project DIR`, `--to RELEASE`, `--keep-autopatch` | 0 rolled back (or already on it); 1 the deploy did not complete or nothing to roll back to |
 | `immune init` | `--project DIR` (default `.`), `--yes`, `--no-llm`, `--prod-db PATH`, `--seed N` (default 1) | 0 after `READY:`; 1 after `NEEDS ATTENTION:` |
 | `immune doctor` | `--project DIR`, `--json`, `--only 1,2` | 0 all checks pass; 1 otherwise |
 | `immune doctor --prereqs` | `--json` | 0 when every required prerequisite is present; 1 otherwise |
@@ -140,6 +141,15 @@ Both rewrite one top-level key of `.immune/config.yaml` in place, keeping commen
   change applies on the next `immune up`.
 - `autopatch` is read by the pipeline at the start of each incident. The command prints the effective value when
   it differs: without `tests.command`, `merge` is capped at `pr` (`effective_autopatch`).
+
+### immune rollback
+
+The human override for an automatic deploy (`cmd_rollback`). It asks the fleet which release is in production,
+picks the release directory built just before it (`previous_release`, by mtime; `--to RELEASE` names one) and
+posts it to the fleet's `/deploy`: the same blue/green path as a patch, with health check, smoke request and
+watch window. When `autopatch` is `merge` it first rewrites it to `pr`, so the pipeline stops merging on its own
+(`--keep-autopatch` skips this). Active rules are not touched. The pipeline reads the production release from the
+fleet, so its next patch starts from the rolled-back release.
 
 ### immune init
 

@@ -93,13 +93,14 @@
     return a === b || a.endsWith('/' + b) || b.endsWith('/' + a);
   }
 
-  function oracleMatchesSink(data, sink) {
+  /* anyLine: the same file is enough (the caller already matched route and method) */
+  function oracleMatchesSink(data, sink, anyLine) {
     if (!sink || !data || !Array.isArray(data.events)) return false;
     for (var i = 0; i < data.events.length; i++) {
       var stack = (data.events[i] && data.events[i].stack) || [];
       if (!Array.isArray(stack)) continue;
       for (var j = 0; j < stack.length; j++) {
-        if (stack[j] && sameFile(stack[j].file, sink.file) && stack[j].line === sink.line) return true;
+        if (stack[j] && sameFile(stack[j].file, sink.file) && (anyLine || stack[j].line === sink.line)) return true;
       }
     }
     return false;
@@ -127,6 +128,9 @@
     if (inc.route && typeof rq.path === 'string') {
       if (!routeMatches(inc.route, rq.path)) return 0;
       if (inc.method && typeof rq.method === 'string' && inc.method !== rq.method) return 0;
+      /* same route and method: the sink's line moves when a patch for another incident edits the same file (a
+         captive clone runs that later release), so the file is enough. Exact lines left these hits pending. */
+      return oracleMatchesSink(o.data, inc.sink, true) ? 1 : 0;
     }
     return oracleMatchesSink(o.data, inc.sink) ? 1 : 0;
   }

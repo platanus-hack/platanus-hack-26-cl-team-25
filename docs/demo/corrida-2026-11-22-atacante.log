@@ -1,0 +1,414 @@
+Atacante de demo -> http://127.0.0.1:8080  (7 exploits por ronda, Ctrl-C para parar)
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:20:42 r1   SQLi búsqueda        200    166 ms  funcionó, datos sintéticos  40 productos
+07:20:43 r1   SQLi login           401    181 ms  bloqueado  sin token
+07:20:45 r1   Traversal descarga   200    168 ms  funcionó, datos sintéticos  leyó /etc/hostname=7abaf47a6341
+07:20:47 r1   Traversal imagen     200     33 ms  funcionó, datos sintéticos  leyó /etc/hostname=7abaf47a6341
+07:20:48 r1   IDOR pedido          200     39 ms  funcionó, datos sintéticos  datos de otro cliente
+07:20:50 r1   IDOR factura         200     16 ms  funcionó, datos sintéticos  datos de otro cliente
+07:20:51 r1   IDOR perfil          200     40 ms  funcionó, datos sintéticos  datos de otro cliente
+07:20:53 r2   SQLi búsqueda        200     24 ms  funcionó, datos sintéticos  40 productos
+07:20:55 r2   SQLi login           401     20 ms  bloqueado  sin token
+07:20:56 r2   Traversal descarga   200     38 ms  funcionó, datos sintéticos  leyó /etc/hostname=7abaf47a6341
+07:20:58 r2   Traversal imagen     200     26 ms  funcionó, datos sintéticos  leyó /etc/hostname=7abaf47a6341
+07:20:59 r2   IDOR pedido          200     64 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:01 r2   IDOR factura         200     23 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:03 r2   IDOR perfil          200     23 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:04 r3   SQLi búsqueda        200     33 ms  funcionó, datos sintéticos  40 productos
+07:21:06 r3   SQLi login           401     29 ms  bloqueado  sin token
+07:21:07 r3   Traversal descarga   200     22 ms  funcionó, datos sintéticos  leyó /etc/hostname=7abaf47a6341
+07:21:09 r3   Traversal imagen     200     36 ms  funcionó, datos sintéticos  leyó /etc/hostname=7abaf47a6341
+07:21:11 r3   IDOR pedido          200     19 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:12 r3   IDOR factura         200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:14 r3   IDOR perfil          200     23 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:21:16 r4   SQLi búsqueda        200     26 ms  funcionó, datos sintéticos  40 productos
+07:21:17 r4   SQLi login           401    164 ms  bloqueado  sin token
+07:21:19 r4   Traversal descarga   200     42 ms  funcionó, datos sintéticos  leyó /etc/hostname=1447cf2ee816
+07:21:20 r4   Traversal imagen     200     22 ms  funcionó, datos sintéticos  leyó /etc/hostname=1447cf2ee816
+07:21:22 r4   IDOR pedido          200     41 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:24 r4   IDOR factura         200     24 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:25 r4   IDOR perfil          200     16 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:27 r5   SQLi búsqueda        200     34 ms  funcionó, datos sintéticos  40 productos
+07:21:29 r5   SQLi login           401     74 ms  bloqueado  sin token
+07:21:30 r5   Traversal descarga   200     37 ms  funcionó, datos sintéticos  leyó /etc/hostname=1447cf2ee816
+07:21:32 r5   Traversal imagen     200     17 ms  funcionó, datos sintéticos  leyó /etc/hostname=1447cf2ee816
+07:21:34 r5   IDOR pedido          200    212 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:35 r5   IDOR factura         200     21 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:37 r5   IDOR perfil          200    184 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:39 r6   SQLi búsqueda        200     24 ms  funcionó, datos sintéticos  40 productos
+07:21:41 r6   SQLi login           401     99 ms  bloqueado  sin token
+07:21:42 r6   Traversal descarga   200     40 ms  funcionó, datos sintéticos  leyó /etc/hostname=1447cf2ee816
+07:21:44 r6   Traversal imagen     200     17 ms  funcionó, datos sintéticos  leyó /etc/hostname=1447cf2ee816
+07:21:45 r6   IDOR pedido          200     32 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:47 r6   IDOR factura         200     12 ms  funcionó, datos sintéticos  datos de otro cliente
+07:21:50 r6   IDOR perfil          200    765 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:21:52 r7   SQLi búsqueda        200     43 ms  bloqueado  sin filas
+07:21:54 r7   SQLi login           401    193 ms  bloqueado  sin token
+07:21:55 r7   Traversal descarga   200    186 ms  funcionó, datos sintéticos  leyó /etc/hostname=6aac3be808d3
+07:21:57 r7   Traversal imagen     200     26 ms  funcionó, datos sintéticos  leyó /etc/hostname=6aac3be808d3
+07:21:59 r7   IDOR pedido          200     14 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:00 r7   IDOR factura         200     60 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:02 r7   IDOR perfil          200     47 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:04 r8   SQLi búsqueda        200     40 ms  bloqueado  sin filas
+07:22:05 r8   SQLi login           401     24 ms  bloqueado  sin token
+07:22:07 r8   Traversal descarga   200     44 ms  funcionó, datos sintéticos  leyó /etc/hostname=6aac3be808d3
+07:22:09 r8   Traversal imagen     200     17 ms  funcionó, datos sintéticos  leyó /etc/hostname=6aac3be808d3
+07:22:10 r8   IDOR pedido          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:12 r8   IDOR factura         200     38 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:14 r8   IDOR perfil          200    126 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:15 r9   SQLi búsqueda        200     15 ms  bloqueado  sin filas
+07:22:17 r9   SQLi login           401     18 ms  bloqueado  sin token
+07:22:19 r9   Traversal descarga   200    680 ms  funcionó, datos sintéticos  leyó /etc/hostname=6aac3be808d3
+07:22:21 r9   Traversal imagen     200     76 ms  funcionó, datos sintéticos  leyó /etc/hostname=6aac3be808d3
+07:22:22 r9   IDOR pedido          200    215 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:24 r9   IDOR factura         200     73 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:26 r9   IDOR perfil          200     20 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:22:29 r10  SQLi búsqueda        200     91 ms  bloqueado  sin filas
+07:22:31 r10  SQLi login           401     25 ms  bloqueado  sin token
+07:22:33 r10  Traversal descarga   200     72 ms  funcionó, datos sintéticos  leyó /etc/hostname=7c1118ac8da4
+07:22:34 r10  Traversal imagen     200     27 ms  funcionó, datos sintéticos  leyó /etc/hostname=7c1118ac8da4
+07:22:36 r10  IDOR pedido          200     43 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:38 r10  IDOR factura         200     35 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:39 r10  IDOR perfil          200     64 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:41 r11  SQLi búsqueda        200     16 ms  bloqueado  sin filas
+07:22:43 r11  SQLi login           401     15 ms  bloqueado  sin token
+07:22:44 r11  Traversal descarga   200     28 ms  funcionó, datos sintéticos  leyó /etc/hostname=7c1118ac8da4
+07:22:46 r11  Traversal imagen     200     19 ms  funcionó, datos sintéticos  leyó /etc/hostname=7c1118ac8da4
+07:22:48 r11  IDOR pedido          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:49 r11  IDOR factura         200     19 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:51 r11  IDOR perfil          200     51 ms  funcionó, datos sintéticos  datos de otro cliente
+07:22:52 r12  SQLi búsqueda        200     17 ms  bloqueado  sin filas
+07:22:54 r12  SQLi login           401     16 ms  bloqueado  sin token
+07:22:55 r12  Traversal descarga   200     17 ms  funcionó, datos sintéticos  leyó /etc/hostname=7c1118ac8da4
+07:22:57 r12  Traversal imagen     200     37 ms  funcionó, datos sintéticos  leyó /etc/hostname=7c1118ac8da4
+07:22:59 r12  IDOR pedido          200     32 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:00 r12  IDOR factura         200     43 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:02 r12  IDOR perfil          200    137 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:23:04 r13  SQLi búsqueda        200    108 ms  bloqueado  sin filas
+07:23:06 r13  SQLi login           401    150 ms  bloqueado  sin token
+07:23:07 r13  Traversal descarga   200     37 ms  funcionó, datos sintéticos  leyó /etc/hostname=33337be2e5f3
+07:23:09 r13  Traversal imagen     200     33 ms  funcionó, datos sintéticos  leyó /etc/hostname=33337be2e5f3
+07:23:10 r13  IDOR pedido          200     38 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:12 r13  IDOR factura         200    170 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:14 r13  IDOR perfil          200     25 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:15 r14  SQLi búsqueda        200    212 ms  bloqueado  sin filas
+07:23:17 r14  SQLi login           401     95 ms  bloqueado  sin token
+07:23:19 r14  Traversal descarga   200    223 ms  funcionó, datos sintéticos  leyó /etc/hostname=a350427eb461
+07:23:21 r14  Traversal imagen     404    536 ms  bloqueado  negado
+07:23:23 r14  IDOR pedido          200    234 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:25 r14  IDOR factura         200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:27 r14  IDOR perfil          200    311 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:29 r15  SQLi búsqueda        200      9 ms  bloqueado  sin filas
+07:23:30 r15  SQLi login           401     15 ms  bloqueado  sin token
+07:23:32 r15  Traversal descarga   200     16 ms  funcionó, datos sintéticos  leyó /etc/hostname=b0bbbeaf99b6
+07:23:34 r15  Traversal imagen     200    141 ms  funcionó, datos sintéticos  leyó /etc/hostname=b0bbbeaf99b6
+07:23:36 r15  IDOR pedido          200     30 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:37 r15  IDOR factura         200     12 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:39 r15  IDOR perfil          200    223 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:23:42 r16  SQLi búsqueda        200     16 ms  bloqueado  sin filas
+07:23:43 r16  SQLi login           401     50 ms  bloqueado  sin token
+07:23:45 r16  Traversal descarga   200    212 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:23:47 r16  Traversal imagen     200    256 ms  funcionó, datos sintéticos  leyó /etc/hostname=75c801b6ea0c
+07:23:49 r16  IDOR pedido          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:50 r16  IDOR factura         200     32 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:52 r16  IDOR perfil          200     43 ms  funcionó, datos sintéticos  datos de otro cliente
+07:23:54 r17  SQLi búsqueda        200     17 ms  bloqueado  sin filas
+07:23:55 r17  SQLi login           401     13 ms  bloqueado  sin token
+07:23:57 r17  Traversal descarga   200     78 ms  funcionó, datos sintéticos  leyó /etc/hostname=75c801b6ea0c
+07:23:58 r17  Traversal imagen     200     34 ms  funcionó, datos sintéticos  leyó /etc/hostname=75c801b6ea0c
+07:24:00 r17  IDOR pedido          200     18 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:02 r17  IDOR factura         200     15 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:03 r17  IDOR perfil          200     24 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:05 r18  SQLi búsqueda        200      9 ms  bloqueado  sin filas
+07:24:06 r18  SQLi login           401      8 ms  bloqueado  sin token
+07:24:08 r18  Traversal descarga   200    193 ms  funcionó, datos sintéticos  leyó /etc/hostname=75c801b6ea0c
+07:24:10 r18  Traversal imagen     200     22 ms  funcionó, datos sintéticos  leyó /etc/hostname=75c801b6ea0c
+07:24:12 r18  IDOR pedido          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:13 r18  IDOR factura         200     26 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:15 r18  IDOR perfil          200     42 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:24:16 r19  SQLi búsqueda        200     24 ms  bloqueado  sin filas
+07:24:18 r19  SQLi login           401     33 ms  bloqueado  sin token
+07:24:20 r19  Traversal descarga   200     37 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:24:21 r19  Traversal imagen     200     35 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:24:23 r19  IDOR pedido          200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:24 r19  IDOR factura         200     23 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:26 r19  IDOR perfil          200     31 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:28 r20  SQLi búsqueda        200     17 ms  bloqueado  sin filas
+07:24:30 r20  SQLi login           401     27 ms  bloqueado  sin token
+07:24:31 r20  Traversal descarga   200     41 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:24:33 r20  Traversal imagen     200    490 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:24:35 r20  IDOR pedido          200     19 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:36 r20  IDOR factura         200     18 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:38 r20  IDOR perfil          200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:40 r21  SQLi búsqueda        200      9 ms  bloqueado  sin filas
+07:24:41 r21  SQLi login           401     15 ms  bloqueado  sin token
+07:24:43 r21  Traversal descarga   200     27 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:24:44 r21  Traversal imagen     200     29 ms  funcionó, datos sintéticos  leyó /etc/hostname=685d06911688
+07:24:46 r21  IDOR pedido          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:48 r21  IDOR factura         200     35 ms  funcionó, datos sintéticos  datos de otro cliente
+07:24:49 r21  IDOR perfil          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:24:51 r22  SQLi búsqueda        200     18 ms  bloqueado  sin filas
+07:24:53 r22  SQLi login           401     13 ms  bloqueado  sin token
+07:24:54 r22  Traversal descarga   200    221 ms  funcionó, datos sintéticos  leyó /etc/hostname=5d12c19094b6
+07:24:56 r22  Traversal imagen     200    250 ms  funcionó, datos sintéticos  leyó /etc/hostname=ed00e501abe8
+07:24:58 r22  IDOR pedido          200     51 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:00 r22  IDOR factura         200    175 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:02 r22  IDOR perfil          404    326 ms  bloqueado  negado
+07:25:04 r23  SQLi búsqueda        200    307 ms  bloqueado  sin filas
+07:25:06 r23  SQLi login           401     13 ms  bloqueado  sin token
+07:25:07 r23  Traversal descarga   404     13 ms  bloqueado  negado
+07:25:09 r23  Traversal imagen     200    125 ms  funcionó, datos sintéticos  leyó /etc/hostname=663341ff3452
+07:25:10 r23  IDOR pedido          200     30 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:12 r23  IDOR factura         200    211 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:14 r23  IDOR perfil          200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:16 r24  SQLi búsqueda        200     24 ms  bloqueado  sin filas
+07:25:17 r24  SQLi login           401     18 ms  bloqueado  sin token
+07:25:19 r24  Traversal descarga   404      9 ms  bloqueado  negado
+07:25:22 r24  Traversal imagen     200     33 ms  funcionó, datos sintéticos  leyó /etc/hostname=663341ff3452
+07:25:23 r24  IDOR pedido          200     16 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:25 r24  IDOR factura         200     19 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:27 r24  IDOR perfil          200     21 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:25:28 r25  SQLi búsqueda        200     16 ms  bloqueado  sin filas
+07:25:30 r25  SQLi login           401     22 ms  bloqueado  sin token
+07:25:32 r25  Traversal descarga   404     16 ms  bloqueado  negado
+07:25:33 r25  Traversal imagen     200    170 ms  funcionó, datos sintéticos  leyó /etc/hostname=1f228b209e21
+07:25:35 r25  IDOR pedido          200    412 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:37 r25  IDOR factura         200    321 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:39 r25  IDOR perfil          200     20 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:41 r26  SQLi búsqueda        200      9 ms  bloqueado  sin filas
+07:25:42 r26  SQLi login           401     25 ms  bloqueado  sin token
+07:25:44 r26  Traversal descarga   404     20 ms  bloqueado  negado
+07:25:45 r26  Traversal imagen     200     30 ms  funcionó, datos sintéticos  leyó /etc/hostname=4437dc6704bd
+07:25:47 r26  IDOR pedido          200     20 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:49 r26  IDOR factura         200    107 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:51 r26  IDOR perfil          200     31 ms  funcionó, datos sintéticos  datos de otro cliente
+07:25:52 r27  SQLi búsqueda        200     12 ms  bloqueado  sin filas
+07:25:54 r27  SQLi login           401    131 ms  bloqueado  sin token
+07:25:56 r27  Traversal descarga   404     15 ms  bloqueado  negado
+07:25:58 r27  Traversal imagen     200     23 ms  funcionó, datos sintéticos  leyó /etc/hostname=4437dc6704bd
+07:25:59 r27  IDOR pedido          200     28 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:01 r27  IDOR factura         200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:03 r27  IDOR perfil          200     35 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:26:06 r28  SQLi búsqueda        200     28 ms  bloqueado  sin filas
+07:26:07 r28  SQLi login           401     17 ms  bloqueado  sin token
+07:26:09 r28  Traversal descarga   404     24 ms  bloqueado  negado
+07:26:10 r28  Traversal imagen     200     16 ms  funcionó, datos sintéticos  leyó /etc/hostname=1f228b209e21
+07:26:12 r28  IDOR pedido          200    291 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:14 r28  IDOR factura         200     17 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:15 r28  IDOR perfil          200     20 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:17 r29  SQLi búsqueda        200      8 ms  bloqueado  sin filas
+07:26:19 r29  SQLi login           401     10 ms  bloqueado  sin token
+07:26:20 r29  Traversal descarga   404     13 ms  bloqueado  negado
+07:26:22 r29  Traversal imagen     200     20 ms  funcionó, datos sintéticos  leyó /etc/hostname=6cb6d52442d6
+07:26:23 r29  IDOR pedido          200     55 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:25 r29  IDOR factura         200     25 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:27 r29  IDOR perfil          200     17 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:28 r30  SQLi búsqueda        200     19 ms  bloqueado  sin filas
+07:26:30 r30  SQLi login           401     22 ms  bloqueado  sin token
+07:26:31 r30  Traversal descarga   404     19 ms  bloqueado  negado
+07:26:33 r30  Traversal imagen     200     28 ms  funcionó, datos sintéticos  leyó /etc/hostname=6cb6d52442d6
+07:26:35 r30  IDOR pedido          200     43 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:36 r30  IDOR factura         200     39 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:39 r30  IDOR perfil          200    836 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:26:42 r31  SQLi búsqueda        200     23 ms  bloqueado  sin filas
+07:26:43 r31  SQLi login           401     12 ms  bloqueado  sin token
+07:26:45 r31  Traversal descarga   404     23 ms  bloqueado  negado
+07:26:47 r31  Traversal imagen     200   1107 ms  funcionó, datos sintéticos  leyó /etc/hostname=1f228b209e21
+07:26:49 r31  IDOR pedido          200     35 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:51 r31  IDOR factura         200     18 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:53 r31  IDOR perfil          200    513 ms  funcionó, datos sintéticos  datos de otro cliente
+07:26:54 r32  SQLi búsqueda        200      9 ms  bloqueado  sin filas
+07:26:56 r32  SQLi login           404    344 ms  bloqueado  sin token
+07:26:59 r32  Traversal descarga   404     34 ms  bloqueado  negado
+07:27:00 r32  Traversal imagen     404     11 ms  bloqueado  negado
+07:27:02 r32  IDOR pedido          200    142 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:04 r32  IDOR factura         200    454 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:05 r32  IDOR perfil          200     22 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:08 r33  SQLi búsqueda        200    279 ms  bloqueado  sin filas
+07:27:09 r33  SQLi login           401     17 ms  bloqueado  sin token
+07:27:11 r33  Traversal descarga   404     23 ms  bloqueado  negado
+07:27:12 r33  Traversal imagen     404     23 ms  bloqueado  negado
+07:27:14 r33  IDOR pedido          200     40 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:16 r33  IDOR factura         200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:17 r33  IDOR perfil          200     43 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:27:19 r34  SQLi búsqueda        200     21 ms  bloqueado  sin filas
+07:27:21 r34  SQLi login           401     23 ms  bloqueado  sin token
+07:27:22 r34  Traversal descarga   404     21 ms  bloqueado  negado
+07:27:24 r34  Traversal imagen     404     19 ms  bloqueado  negado
+07:27:25 r34  IDOR pedido          200    162 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:27 r34  IDOR factura         200     17 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:29 r34  IDOR perfil          200     20 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:30 r35  SQLi búsqueda        200     15 ms  bloqueado  sin filas
+07:27:32 r35  SQLi login           401     27 ms  bloqueado  sin token
+07:27:33 r35  Traversal descarga   404     59 ms  bloqueado  negado
+07:27:36 r35  Traversal imagen     404     17 ms  bloqueado  negado
+07:27:37 r35  IDOR pedido          200     77 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:39 r35  IDOR factura         200     16 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:40 r35  IDOR perfil          200     25 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:42 r36  SQLi búsqueda        200     16 ms  bloqueado  sin filas
+07:27:44 r36  SQLi login           401     14 ms  bloqueado  sin token
+07:27:46 r36  Traversal descarga   404     14 ms  bloqueado  negado
+07:27:47 r36  Traversal imagen     404     15 ms  bloqueado  negado
+07:27:49 r36  IDOR pedido          200     40 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:51 r36  IDOR factura         200     38 ms  funcionó, datos sintéticos  datos de otro cliente
+07:27:52 r36  IDOR perfil          200    124 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:27:55 r37  SQLi búsqueda        200     27 ms  bloqueado  sin filas
+07:27:56 r37  SQLi login           401     23 ms  bloqueado  sin token
+07:27:58 r37  Traversal descarga   404     11 ms  bloqueado  negado
+07:27:59 r37  Traversal imagen     404     21 ms  bloqueado  negado
+07:28:01 r37  IDOR pedido          200    340 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:03 r37  IDOR factura         200     14 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:05 r37  IDOR perfil          200    536 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:07 r38  SQLi búsqueda        200     32 ms  bloqueado  sin filas
+07:28:08 r38  SQLi login           401     34 ms  bloqueado  sin token
+07:28:10 r38  Traversal descarga   404     18 ms  bloqueado  negado
+07:28:12 r38  Traversal imagen     404     42 ms  bloqueado  negado
+07:28:13 r38  IDOR pedido          200     69 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:15 r38  IDOR factura         200     14 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:16 r38  IDOR perfil          200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:18 r39  SQLi búsqueda        200     18 ms  bloqueado  sin filas
+07:28:20 r39  SQLi login           401     32 ms  bloqueado  sin token
+07:28:21 r39  Traversal descarga   404     13 ms  bloqueado  negado
+07:28:23 r39  Traversal imagen     404     15 ms  bloqueado  negado
+07:28:24 r39  IDOR pedido          200     18 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:26 r39  IDOR factura         200    147 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:28 r39  IDOR perfil          200     23 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:28:31 r40  SQLi búsqueda        200    781 ms  bloqueado  sin filas
+07:28:33 r40  SQLi login           401     15 ms  bloqueado  sin token
+07:28:34 r40  Traversal descarga   404     23 ms  bloqueado  negado
+07:28:37 r40  Traversal imagen     404    891 ms  bloqueado  negado
+07:28:38 r40  IDOR pedido          404     30 ms  bloqueado  negado
+07:28:40 r40  IDOR factura         200    152 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:42 r40  IDOR perfil          200     24 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:43 r41  SQLi búsqueda        200     17 ms  bloqueado  sin filas
+07:28:45 r41  SQLi login           401     73 ms  bloqueado  sin token
+07:28:47 r41  Traversal descarga   404     42 ms  bloqueado  negado
+07:28:48 r41  Traversal imagen     404     67 ms  bloqueado  negado
+07:28:50 r41  IDOR pedido          404     17 ms  bloqueado  negado
+07:28:52 r41  IDOR factura         200    148 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:53 r41  IDOR perfil          200     43 ms  funcionó, datos sintéticos  datos de otro cliente
+07:28:55 r42  SQLi búsqueda        200     19 ms  bloqueado  sin filas
+07:28:56 r42  SQLi login           401     26 ms  bloqueado  sin token
+07:28:58 r42  Traversal descarga   404     14 ms  bloqueado  negado
+07:29:00 r42  Traversal imagen     404     19 ms  bloqueado  negado
+07:29:01 r42  IDOR pedido          404     14 ms  bloqueado  negado
+07:29:03 r42  IDOR factura         200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:04 r42  IDOR perfil          200     26 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:29:06 r43  SQLi búsqueda        200     37 ms  bloqueado  sin filas
+07:29:08 r43  SQLi login           401     52 ms  bloqueado  sin token
+07:29:09 r43  Traversal descarga   404     32 ms  bloqueado  negado
+07:29:11 r43  Traversal imagen     404     15 ms  bloqueado  negado
+07:29:13 r43  IDOR pedido          404     12 ms  bloqueado  negado
+07:29:14 r43  IDOR factura         200    166 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:16 r43  IDOR perfil          200     27 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:18 r44  SQLi búsqueda        200     94 ms  bloqueado  sin filas
+07:29:20 r44  SQLi login           401     51 ms  bloqueado  sin token
+07:29:21 r44  Traversal descarga   404     56 ms  bloqueado  negado
+07:29:23 r44  Traversal imagen     404     30 ms  bloqueado  negado
+07:29:25 r44  IDOR pedido          404     17 ms  bloqueado  negado
+07:29:26 r44  IDOR factura         200     20 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:28 r44  IDOR perfil          200     44 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:29 r45  SQLi búsqueda        200     26 ms  bloqueado  sin filas
+07:29:31 r45  SQLi login           401     23 ms  bloqueado  sin token
+07:29:33 r45  Traversal descarga   404     20 ms  bloqueado  negado
+07:29:34 r45  Traversal imagen     404     42 ms  bloqueado  negado
+07:29:36 r45  IDOR pedido          404     14 ms  bloqueado  negado
+07:29:37 r45  IDOR factura         200     38 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:39 r45  IDOR perfil          200    264 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:29:42 r46  SQLi búsqueda        200     87 ms  bloqueado  sin filas
+07:29:44 r46  SQLi login           401    445 ms  bloqueado  sin token
+07:29:45 r46  Traversal descarga   404     27 ms  bloqueado  negado
+07:29:47 r46  Traversal imagen     404     22 ms  bloqueado  negado
+07:29:49 r46  IDOR pedido          404     19 ms  bloqueado  negado
+07:29:50 r46  IDOR factura         404     33 ms  bloqueado  negado
+07:29:52 r46  IDOR perfil          200    180 ms  funcionó, datos sintéticos  datos de otro cliente
+07:29:54 r47  SQLi búsqueda        200     26 ms  bloqueado  sin filas
+07:29:55 r47  SQLi login           401     92 ms  bloqueado  sin token
+07:29:57 r47  Traversal descarga   404     17 ms  bloqueado  negado
+07:29:58 r47  Traversal imagen     404     11 ms  bloqueado  negado
+07:30:00 r47  IDOR pedido          404     58 ms  bloqueado  negado
+07:30:02 r47  IDOR factura         404     82 ms  bloqueado  negado
+07:30:04 r47  IDOR perfil          200     52 ms  funcionó, datos sintéticos  datos de otro cliente
+07:30:05 r48  SQLi búsqueda        200     16 ms  bloqueado  sin filas
+07:30:07 r48  SQLi login           401     12 ms  bloqueado  sin token
+07:30:10 r48  Traversal descarga   404    583 ms  bloqueado  negado
+07:30:11 r48  Traversal imagen     404     23 ms  bloqueado  negado
+07:30:13 r48  IDOR pedido          404     31 ms  bloqueado  negado
+07:30:15 r48  IDOR factura         404     19 ms  bloqueado  negado
+07:30:17 r48  IDOR perfil          200     31 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:30:18 r49  SQLi búsqueda        200     26 ms  bloqueado  sin filas
+07:30:20 r49  SQLi login           401     28 ms  bloqueado  sin token
+07:30:21 r49  Traversal descarga   404     16 ms  bloqueado  negado
+07:30:23 r49  Traversal imagen     404     23 ms  bloqueado  negado
+07:30:25 r49  IDOR pedido          404     11 ms  bloqueado  negado
+07:30:27 r49  IDOR factura         404    151 ms  bloqueado  negado
+07:30:28 r49  IDOR perfil          200    438 ms  funcionó, datos sintéticos  datos de otro cliente
+07:30:31 r50  SQLi búsqueda        404    308 ms  bloqueado  sin filas
+07:30:32 r50  SQLi login           401     34 ms  bloqueado  sin token
+07:30:34 r50  Traversal descarga   404    303 ms  bloqueado  negado
+07:30:36 r50  Traversal imagen     404    372 ms  bloqueado  negado
+07:30:38 r50  IDOR pedido          404    318 ms  bloqueado  negado
+07:30:40 r50  IDOR factura         404    375 ms  bloqueado  negado
+07:30:42 r50  IDOR perfil          200    179 ms  funcionó, datos sintéticos  datos de otro cliente
+07:30:45 r51  SQLi búsqueda        200     21 ms  bloqueado  sin filas
+07:30:46 r51  SQLi login           401     59 ms  bloqueado  sin token
+07:30:48 r51  Traversal descarga   404     23 ms  bloqueado  negado
+07:30:50 r51  Traversal imagen     404     26 ms  bloqueado  negado
+07:30:52 r51  IDOR pedido          404     29 ms  bloqueado  negado
+07:30:53 r51  IDOR factura         404     15 ms  bloqueado  negado
+07:30:55 r51  IDOR perfil          200     38 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:30:57 r52  SQLi búsqueda        200     26 ms  bloqueado  sin filas
+07:30:59 r52  SQLi login           401     65 ms  bloqueado  sin token
+07:31:00 r52  Traversal descarga   404     18 ms  bloqueado  negado
+07:31:02 r52  Traversal imagen     404    241 ms  bloqueado  negado
+07:31:04 r52  IDOR pedido          404     11 ms  bloqueado  negado
+07:31:06 r52  IDOR factura         404     31 ms  bloqueado  negado
+07:31:07 r52  IDOR perfil          200    266 ms  funcionó, datos sintéticos  datos de otro cliente
+07:31:09 r53  SQLi búsqueda        200     13 ms  bloqueado  sin filas
+07:31:11 r53  SQLi login           401     33 ms  bloqueado  sin token
+07:31:13 r53  Traversal descarga   404     24 ms  bloqueado  negado
+07:31:14 r53  Traversal imagen     404     13 ms  bloqueado  negado
+07:31:16 r53  IDOR pedido          404     38 ms  bloqueado  negado
+07:31:17 r53  IDOR factura         404     26 ms  bloqueado  negado
+07:31:19 r53  IDOR perfil          200     33 ms  funcionó, datos sintéticos  datos de otro cliente
+07:31:21 r54  SQLi búsqueda        200     29 ms  bloqueado  sin filas
+07:31:22 r54  SQLi login           401     30 ms  bloqueado  sin token
+07:31:24 r54  Traversal descarga   404     18 ms  bloqueado  negado
+07:31:25 r54  Traversal imagen     404     28 ms  bloqueado  negado
+07:31:27 r54  IDOR pedido          404     15 ms  bloqueado  negado
+07:31:29 r54  IDOR factura         404     10 ms  bloqueado  negado
+07:31:30 r54  IDOR perfil          200    186 ms  funcionó, datos sintéticos  datos de otro cliente
+-- sesión nueva: cuenta recién registrada, sin cookie --
+07:31:33 r55  SQLi búsqueda        200     21 ms  bloqueado  sin filas
+07:31:34 r55  SQLi login           401     42 ms  bloqueado  sin token
+07:31:36 r55  Traversal descarga   404     23 ms  bloqueado  negado
+07:31:37 r55  Traversal imagen     404     11 ms  bloqueado  negado
+07:31:39 r55  IDOR pedido          404     15 ms  bloqueado  negado
+07:31:41 r55  IDOR factura         404     19 ms  bloqueado  negado
+07:31:43 r55  IDOR perfil          404    343 ms  bloqueado  negado
+07:31:45 r56  SQLi búsqueda        404    330 ms  bloqueado  sin filas
+07:31:47 r56  SQLi login           404    358 ms  bloqueado  sin token
+07:31:48 r56  Traversal descarga   404     23 ms  bloqueado  negado
+07:31:50 r56  Traversal imagen     404    301 ms  bloqueado  negado
+07:31:52 r56  IDOR pedido          404    320 ms  bloqueado  negado
+07:31:54 r56  IDOR factura         404    786 ms  bloqueado  negado
+07:31:56 r56  IDOR perfil          404    366 ms  bloqueado  negado
+Los 7 exploits quedaron bloqueados 2 rondas seguidas.
+56 rondas, 0 intentos con datos reales
