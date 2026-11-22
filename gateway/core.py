@@ -27,6 +27,7 @@ from immune.auth import Authenticator, credential_key, prod_secret_for
 from immune_contracts import authtoken, events, wire
 
 from . import l0
+from .waf import WafClient
 from .classifier import (CAPTIVE, CLEAN, EVIDENCE, SUSPECT, EnumTracker, Manifest, Result, Rule, View, Who, is_builtin_rule,
                          classify, redact_form, redact_json, redact_query, REDACTED)
 from .pool import Clone, Pool
@@ -85,6 +86,7 @@ class Config:
     manifest_path: str = ""
     record_path: str = ""
     state_path: str = ""             # upstream, rules and mode survive a gateway restart (same run only)
+    waf_url: str = ""                # optional Coraza/OWASP-CRS detection sidecar; empty = disabled
     captive_ttl_s: float = 900.0
     mode: str = "enforce"            # enforce | observe | passthrough (initial; POST /_admin/mode changes it)
     aftercheck: bool = False         # replay clean requests in a clone after prod has answered (enforce mode only)
@@ -106,7 +108,7 @@ class Config:
                    prod_addr=g("PROD_ADDR", "127.0.0.1:8000"), prod_release=g("PROD_RELEASE", ""),
                    admin_token=g("ADMIN_TOKEN", ""), bus_url=g("BUS_URL", ""), bus_token=g("BUS_TOKEN", ""),
                    run_id=g("RUN_ID", ""), openapi_path=g("OPENAPI_PATH", ""), manifest_path=g("MANIFEST_PATH", ""),
-                   record_path=g("RECORD_PATH", ""), state_path=g("GW_STATE_PATH", ""),
+                   record_path=g("RECORD_PATH", ""), state_path=g("GW_STATE_PATH", ""), waf_url=g("WAF_URL", ""),
                    captive_ttl_s=float(g("GW_CAPTIVE_TTL_S", "900")))
 
 
@@ -209,6 +211,7 @@ class Gateway:
         self.stats = self._new_stats()
         self.prod_client = None
         self.clone_client = None
+        self.waf = WafClient(cfg.waf_url) if cfg.waf_url else None   # OWASP-CRS detection, fail-open
         self._tasks = []
         self._saved = None
         self.restore_state()
@@ -293,7 +296,7 @@ class Gateway:
         for t in self._tasks:
             t.cancel()
         await self.bus.stop()
-        for c in (self.prod_client, self.clone_client):
+        for c in (self.prod_client, self.clone_client, self.waf):
             if c is not None:
                 await c.aclose()
 
@@ -518,6 +521,8 @@ class Gateway:
 
         # 5. classify
         ctx.res = classify(view, self.spec, ctx.who, self.manifest, self.active_rules(), ctx.session, self.enum)
+        if ctx.res.cls == CLEAN:
+            await self._waf_upgrade(ctx)   # OWASP-CRS negative security: may flip clean -> suspect (detonate)
         self._publish_classified(ctx)
         if ctx.res.cls == CLEAN:
             return await self.to_prod(ctx)
@@ -848,6 +853,16 @@ class Gateway:
         if self.mode == "observe":
             data["observe"] = True
         return data
+
+    async def _waf_upgrade(self, ctx: Ctx) -> None:
+        """Consult the OWASP-CRS sidecar for an otherwise-clean request; on an anomaly, mark it suspect so
+        it detonates in a clone (never blocked). Fail-open: any error leaves the request clean."""
+        if self.waf is None:
+            return
+        v = await self.waf.check(ctx.method, ctx.raw_path, ctx.query, ctx.hmap, ctx.body)
+        if v and v.get("anomalous"):
+            ctx.res.cls = SUSPECT
+            ctx.res.reasons.append("waf:%s" % (v.get("rule_id") or "crs"))
 
     def _publish_classified(self, ctx: Ctx):
         self.bus.publish(events.REQ_CLASSIFIED, self._obs({"class": ctx.res.cls, "reasons": list(ctx.res.reasons),
