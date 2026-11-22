@@ -72,8 +72,17 @@ def docker_cmd(container: str, image: str, name: str, label: str = "", stack: in
            "--cap-drop", "ALL", "--cap-add", "SYS_PTRACE", "--cap-add", "KILL"]
     if label:
         cmd += ["--label", label]
-    # no -qq: the "attached" message is how we know the tracer is in place
-    return cmd + [image] + [a for a in base_args(stack) if a != "-qq"] + ["-p", "1"]
+    # no -qq: the "attached" message is how we know the tracer is in place.
+    # Attach to EVERY thread already present in the shared PID namespace, not just PID 1. The app's real
+    # worker (e.g. a JVM) is usually a child spawned before we attach, and the syscall we care about
+    # (Runtime.exec -> execve) is issued from one of its pre-existing worker threads; `strace -f -p 1`
+    # only follows children forked *after* attach, so it would miss it entirely. The tracer container
+    # shares the app's PID namespace, so /proc lists the app's processes: enumerate every task (thread)
+    # and pass one -p per tid, skipping our own shell ($$), which becomes the strace process after exec.
+    strace_cmd = " ".join(a for a in base_args(stack) if a != "-qq")
+    sh = ('set --; for d in /proc/[0-9]*/task/[0-9]*; do t=${d##*/}; [ "$t" = "$$" ] && continue; '
+          'set -- "$@" -p "$t"; done; exec ' + strace_cmd + ' "$@"')
+    return cmd + [image, "sh", "-c", sh]
 
 
 class Tracer:

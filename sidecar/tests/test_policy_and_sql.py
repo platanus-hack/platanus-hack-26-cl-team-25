@@ -103,7 +103,10 @@ def test_docker_tracer_is_confined():
     assert "--pid=container:immune-lab-shadow" in cmd and cmd[cmd.index("--network") + 1] == "none"
     assert cmd[cmd.index("--cap-drop") + 1] == "ALL" and "--privileged" not in cmd
     assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--cap-add"] == ["SYS_PTRACE", "KILL"]
-    assert cmd[-2:] == ["-p", "1"] and "-qq" not in cmd and "-f" in cmd
+    # attaches to every thread in the shared PID namespace (not just PID 1) via a small sh enumerator
+    assert cmd[-3] == "sh" and cmd[-2] == "-c"
+    script = cmd[-1]
+    assert "/proc/[0-9]*/task/[0-9]*" in script and "-qq" not in script and "strace -f" in script
 
 
 def test_config_keys():

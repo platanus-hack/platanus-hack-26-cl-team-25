@@ -401,3 +401,23 @@ def test_external_replay_below_3_of_3_keeps_the_rule_and_escalates(env, events, 
     assert len(env["gw"].rules) == 1
     if detail:
         assert "%d/3" % verdicts.count("oracle") in inc["reason"] and "needs a person" in inc["reason"]
+
+
+def test_external_patch_cmd_exit_codes(env):
+    """The external patch command's exit code decides the outcome: 0 = patched, 4 = no code patch applies
+    (by-design sink, e.g. the ScadaBR RCE) -> contained by rule, any other non-zero = did not verify."""
+    from pipeline.external import ExternalPipeline
+    cfg = env["cfg"]
+    p = ExternalPipeline(cfg, State(os.path.join(cfg.state_dir, "state.json")),
+                         Publisher(cfg.bus_url, cfg.bus_token, cfg.run_id), GatewayAdmin(cfg.gateway_admin_url, "at"),
+                         Fleet(cfg.fleet_url, "at"), None, validator=ScriptedValidator(), patcher=stub_patcher,
+                         repro_url="http://sidecar:1")
+
+    def inc():
+        return {"incident": "inc-x", "route": "/r", "vuln_class": "rce", "rule": {"id": "rule-x"}, "t": {}}
+
+    assert p._run_patch_cmd("sh -c 'exit 0'", inc())["outcome"] == "patched"
+    out4 = p._run_patch_cmd("sh -c 'exit 4'", inc())
+    assert out4["outcome"] == "rule_only" and "contained by rule rule-x" in out4["reason"]
+    out1 = p._run_patch_cmd("sh -c 'exit 1'", inc())
+    assert out1["outcome"] == "rule_only" and "did not verify" in out1["reason"]

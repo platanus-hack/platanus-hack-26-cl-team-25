@@ -130,8 +130,11 @@ class ExternalPipeline(Pipeline):
     def _run_patch_cmd(self, cmd: str, inc) -> dict:
         """Run an external patch command (e.g. the ScadaBR lab's Java build+verify). It is given the live
         incident and run id and publishes its own patch/gate/deploy events to the bus; we read only its exit
-        code. 0 -> patched (and we then remove the rule); non-zero -> the rule stays and we close rule_only."""
-        argv = shlex.split(cmd) + ["--incident", inc["incident"], "--run", self.cfg.run_id]
+        code. 0 -> patched (and we then remove the rule); exit 4 -> no code patch applies (a by-design sink,
+        e.g. the authenticated RCE): the rule stays and the incident is deliberately left contained; any other
+        non-zero -> the patch did not verify, the rule stays and we close rule_only."""
+        argv = shlex.split(cmd) + ["--incident", inc["incident"], "--run", self.cfg.run_id,
+                                   "--route", inc.get("route") or "", "--class", inc.get("vuln_class") or ""]
         self.note(inc, "external patch command: %s" % " ".join(argv))
         t = time.time()
         try:
@@ -146,6 +149,9 @@ class ExternalPipeline(Pipeline):
         inc["fix"] = {"cmd": " ".join(argv), "code": r.returncode, "out": tail}
         if r.returncode == 0:
             return {"outcome": "patched", "reason": "external patch verified and deployed"}
+        if r.returncode == 4:
+            return {"outcome": "rule_only",
+                    "reason": "no code patch applies (by-design sink); contained by rule %s" % inc["rule"]["id"]}
         return {"outcome": "rule_only",
                 "reason": "external patch did not verify (exit %d); the rule stays active" % r.returncode}
 
