@@ -375,3 +375,19 @@ if (process.argv[2]) {
   assert.deepStrictEqual(S.scoreboard(d2), sb);
 }
 console.log('reducer ok');
+
+// ---- canary summary on deploy.done
+(function () {
+  var st = S.newState();
+  var seq = 9000;
+  function ev(type, data) { return { type: type, ts: 100 + seq / 1000, seq: ++seq, run: 'r', src: 't', incident: 'inc-c', data: data }; }
+  S.reduce(st, ev('incident.opened', { incident: 'inc-c', vuln_class: 'sqli', method: 'GET', route: '/x' }));
+  S.reduce(st, ev('deploy.started', { release: 'abc' }));
+  S.reduce(st, ev('deploy.done', { release: 'abc', ok: false, rolled_back: false, detail: 'canary: worse',
+    canary: { verdict: 'worse', weight: 0.1, seconds: 3.2, canary: { requests: 30, '5xx': 9, '4xx': 0 }, stable: { requests: 270, '5xx': 1, '4xx': 2 } } }));
+  var c = st.incidents['inc-c'].deploy.canary;
+  if (!c || c.verdict !== 'worse' || c.requests !== 30 || c.e5 !== 9 || c.stableRequests !== 270 || c.weight !== 0.1) throw new Error('canary summary: ' + JSON.stringify(c));
+  S.reduce(st, ev('deploy.done', { release: 'abc', ok: true, rolled_back: false, canary: { verdict: 'nonsense' } }));
+  if (st.incidents['inc-c'].deploy.canary !== null) throw new Error('unknown canary verdict must be dropped');
+  console.log('canary ok');
+})();

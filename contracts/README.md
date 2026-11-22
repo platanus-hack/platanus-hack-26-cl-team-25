@@ -195,6 +195,7 @@ PUT  /_admin/pool        {"clones":[{"id","addr","key","release"}]}   full set o
 GET  /_admin/pool        {"clones":[{"id","state":"free|busy|captive|retired","session","release"}]}
 GET|POST /_admin/rules ; DELETE /_admin/rules/{id}
 GET|POST /_admin/upstream   {"addr":"prod-green:8000","release":"..."}   POST drains in-flight requests, then switches
+GET|POST|DELETE /_admin/canary   {"addr":"prod-green:8000","release":"...","weight":0.2}   POST: that share of prod traffic (per request) goes to addr; counters per side in /_admin/stats "canary"; a POST /_admin/upstream ends it (promotion); never persisted
 GET  /_admin/sessions       {"captive":[{"session","clone","since"}]}   clone is null until bound
 POST /_admin/mode           {"mode":"enforce|passthrough"}
 GET  /_admin/prodlog?rid=   {"forwarded": bool, "status": n}

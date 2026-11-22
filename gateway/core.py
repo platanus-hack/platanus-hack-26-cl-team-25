@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import secrets
+import random
 import time
 import uuid
 from collections import OrderedDict
@@ -136,6 +137,7 @@ class Ctx:
     verdict: str | None = None
     status: int = 0
     would: str | None = None          # observe mode: the route enforce would have taken
+    release: str | None = None        # release that answered, when it was not the stable upstream (canary)
 
 
 class Recorder:
@@ -197,6 +199,9 @@ class Gateway:
         self.after_seen: OrderedDict = OrderedDict()
         # upstream + drain
         self.upstream = {"addr": cfg.prod_addr, "release": cfg.prod_release}
+        # canary: a share of prod traffic answered by a release that is being tried out (never persisted: a
+        # restarted gateway serves the stable release only, and the fleet falls back to its plain switch)
+        self.canary = None        # {"addr", "release", "weight", "since", "canary": counters, "stable": counters}
         self.inflight = 0
         self.gate = None          # asyncio.Event: open when not switching
         self.idle = None          # asyncio.Event: set when inflight == 0
@@ -720,11 +725,28 @@ class Gateway:
         self.inflight += 1
         self.idle.clear()
         addr = self.upstream["addr"]
+        # Canary share, drawn per request and not per session: both releases then see the same mix of clients,
+        # so nobody can aim errors at the canary to veto a deploy (or at the stable release to wave one through).
+        can = self.canary
+        side = None
+        if can is not None:
+            side = "canary" if random.random() < can["weight"] else "stable"
+            if side == "canary":
+                addr = can["addr"]
+
+        def build(to):
+            return self.prod_client.build_request(ctx.method, self._url(to, ctx), headers=self._out_headers(ctx),
+                                                  content=ctx.body if ctx.body else None,
+                                                  extensions=self._target(ctx))
+
+        def conn_error():
+            if side == "canary":
+                can["canary"]["conn_errors"] += 1
+            else:
+                self.stats["prod_conn_errors"] += 1
         try:
             try:
-                req = self.prod_client.build_request(ctx.method, self._url(addr, ctx), headers=self._out_headers(ctx),
-                                                     content=ctx.body if ctx.body else None,
-                                                     extensions=self._target(ctx))
+                req = build(addr)
             except Exception as e:  # noqa: BLE001
                 # bytes that cannot be put on the wire as sent (header or target): the client's fault, not prod's.
                 # Counting it as a production error would let anyone roll a deploy back with a malformed cookie.
@@ -735,9 +757,17 @@ class Gateway:
                 try:
                     r = await self.prod_client.send(req)
                 except httpx.ConnectError:
-                    # nothing was sent: once more, for any method (the upstream may be restarting)
-                    await asyncio.sleep(0.2)
-                    r = await self.prod_client.send(req)
+                    if side == "canary":
+                        # the canary is gone and nothing was sent: it loses the request, the client does not
+                        can["canary"]["requests"] += 1
+                        can["canary"]["5xx"] += 1
+                        can["canary"]["conn_errors"] += 1
+                        side, req = "fallback", build(self.upstream["addr"])
+                        r = await self.prod_client.send(req)
+                    else:
+                        # nothing was sent: once more, for any method (the upstream may be restarting)
+                        await asyncio.sleep(0.2)
+                        r = await self.prod_client.send(req)
                 except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError):
                     # a pooled connection the upstream had already closed; replaying is only safe when idempotent
                     if ctx.method not in RETRY_SAFE:
@@ -745,14 +775,21 @@ class Gateway:
                     r = await self.prod_client.send(req)
                 up = Upstream(r.status_code, _clean_resp_headers(r.headers.multi_items()), r.content)
             except httpx.TimeoutException:
-                self.stats["prod_conn_errors"] += 1
+                conn_error()
                 up = Upstream(504, [("content-type", "application/json")], b'{"detail":"Gateway Timeout"}')
             except Exception:
-                self.stats["prod_conn_errors"] += 1
+                conn_error()
                 up = Upstream(502, [("content-type", "application/json")], b'{"detail":"Bad Gateway"}')
-            self.stats["prod_requests"] += 1
-            if up.status >= 500:
-                self.stats["prod_5xx"] += 1
+            if side == "canary":
+                # kept out of prod_*: those counters describe the stable release (the deploy watch reads them)
+                ctx.release = can["release"]
+                self._count_side(can["canary"], up.status)
+            else:
+                self.stats["prod_requests"] += 1
+                if up.status >= 500:
+                    self.stats["prod_5xx"] += 1
+                if side == "stable":
+                    self._count_side(can["stable"], up.status)
             self._prodlog(ctx.rid, {"forwarded": True, "status": up.status})
             return up
         finally:
@@ -829,10 +866,43 @@ class Gateway:
                 "query": redact_query(ctx.query, sens.get("query") or set()), "headers": headers,
                 "body_b64": base64.b64encode(body).decode(), "class": ctx.res.cls, "reasons": list(ctx.res.reasons),
                 "route": ctx.route, "verdict": ctx.verdict, "status": ctx.status, "ms": ms,
-                "release": self.upstream["release"], "mode": self.mode,
+                "release": ctx.release or self.upstream["release"], "mode": self.mode,
                 **({"observe": True, "would_route": ctx.would} if ctx.would is not None else {})}
 
     # ---------------------------------------------------------- admin
+    @staticmethod
+    def _side_counters() -> dict:
+        return {"requests": 0, "5xx": 0, "4xx": 0, "conn_errors": 0}
+
+    @staticmethod
+    def _count_side(c: dict, status: int) -> None:
+        c["requests"] += 1
+        if status >= 500:
+            c["5xx"] += 1
+        elif status >= 400:
+            c["4xx"] += 1
+
+    def canary_view(self) -> dict | None:
+        can = self.canary
+        if can is None:
+            return None
+        return {"addr": can["addr"], "release": can["release"], "weight": can["weight"], "since": can["since"],
+                "canary": dict(can["canary"]), "stable": dict(can["stable"])}
+
+    def start_canary(self, addr: str, release: str, weight: float) -> dict:
+        """Send `weight` of the prod traffic to `addr`. The stable upstream keeps the rest and stays the truth."""
+        self.canary = {"addr": addr, "release": release, "weight": min(1.0, max(0.0, float(weight))),
+                       "since": time.time(), "canary": self._side_counters(), "stable": self._side_counters()}
+        self.bus.publish(events.CANARY_STARTED, {"release": release, "addr": addr, "weight": self.canary["weight"]})
+        return self.canary_view()
+
+    def stop_canary(self, reason: str = "stopped") -> dict | None:
+        view, self.canary = self.canary_view(), None
+        if view is not None:
+            self.bus.publish(events.CANARY_DONE, {"release": view["release"], "reason": reason,
+                                                  "canary": view["canary"], "stable": view["stable"]})
+        return view
+
     async def switch_upstream(self, addr: str, release: str):
         async with self.switch_lock:
             self.gate.clear()
@@ -841,6 +911,8 @@ class Gateway:
                     await asyncio.wait_for(self.idle.wait(), timeout=30.0)
                 except asyncio.TimeoutError:
                     log.warning("drain timeout; switching with %d in flight", self.inflight)
+                if self.canary is not None:
+                    self.stop_canary("promoted" if self.canary["addr"] == addr else "superseded")
                 self.upstream = {"addr": addr, "release": release}
                 self.stats = self._new_stats()
                 self.after_seen.clear()
@@ -858,6 +930,7 @@ class Gateway:
         self.prodlog.clear()
         self.rid_ctx.clear()
         self.after_seen.clear()
+        self.canary = None
         self.stats = self._new_stats()
         self.reload_manifest(force=True)
         self.save_state()
@@ -941,6 +1014,24 @@ class Gateway:
             return JSONResponse(dict(gw.upstream))
 
         @authed
+        async def canary_get(request):
+            return JSONResponse({"canary": gw.canary_view()})
+
+        @authed
+        async def canary_post(request):
+            d = await body_json(request)
+            w = d.get("weight") if isinstance(d, dict) else None
+            if not isinstance(d, dict) or not isinstance(d.get("addr"), str) or not d["addr"] \
+                    or isinstance(w, bool) or not isinstance(w, (int, float)) or not 0 < w <= 1:
+                return JSONResponse({"detail": "body must be {addr, release, weight} with 0 < weight <= 1"},
+                                    status_code=422)
+            return JSONResponse({"canary": gw.start_canary(d["addr"], str(d.get("release") or ""), w)})
+
+        @authed
+        async def canary_delete(request):
+            return JSONResponse({"canary": gw.stop_canary("aborted")})
+
+        @authed
         async def sessions(request):
             return JSONResponse({"captive": gw.pool.captives()})
 
@@ -967,6 +1058,7 @@ class Gateway:
             st["rules"] = len(gw.active_rules())
             st["mode"] = gw.mode
             st["bus_dropped"] = gw.bus.dropped
+            st["canary"] = gw.canary_view()
             return JSONResponse(st)
 
         @authed
@@ -983,6 +1075,9 @@ class Gateway:
             Route("/_admin/rules/{rid}", rules_delete, methods=["DELETE"]),
             Route("/_admin/upstream", upstream_get, methods=["GET"]),
             Route("/_admin/upstream", upstream_post, methods=["POST"]),
+            Route("/_admin/canary", canary_get, methods=["GET"]),
+            Route("/_admin/canary", canary_post, methods=["POST"]),
+            Route("/_admin/canary", canary_delete, methods=["DELETE"]),
             Route("/_admin/sessions", sessions, methods=["GET"]),
             Route("/_admin/mode", mode, methods=["POST"]),
             Route("/_admin/prodlog", prodlog, methods=["GET"]),
