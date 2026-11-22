@@ -2,7 +2,7 @@
 merge -> release -> blue/green deploy -> verify -> closed.
 
 One incident at a time; the rest wait in a persistent queue. Dedupe key: oracle kind + method +
-route template + parameter. Patched / rule_only incidents are never reopened; not_reproducible ones
+route template + parameter. Patched / rule_only incidents are never reopened; escalated ones (fired live, not on every replay)
 may reopen after PIPELINE_REOPEN_COOLDOWN_S.
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ from .repo import RepoError
 log = logging.getLogger("pipeline")
 
 
+ESCALATED = "escalated"     # outcome_detail: fired once but not on every replay; contained by rule, a person decides
 TRANSIENT = "transient"     # outcome_detail: closed for a reason that may not hold later (see retry_transient)
 
 
@@ -131,7 +132,8 @@ class Pipeline:
                 old = d["incidents"].get(existing)
                 if old is not None:
                     old["hits"] = old.get("hits", 1) + 1
-                    reopen = (old.get("status") == "closed" and old.get("outcome") == "not_reproducible"
+                    reopen = (old.get("status") == "closed" and (old.get("outcome") == "not_reproducible"
+                                                                 or old.get("outcome_detail") == ESCALATED)
                               and time.time() - (old.get("closed_at") or 0) > self.cfg.reopen_cooldown_s)
                     if not reopen:
                         self.state.save()
@@ -167,8 +169,9 @@ class Pipeline:
             log.warning("retry pass failed: %s", e)
 
     def keep_rules(self) -> int:
-        """A rule has a TTL so a forgotten one cannot outlive its reason. While its incident is closed without
-        a deployed fix the reason stands: renew it before it expires, and put it back if the gateway lost it."""
+        """A rule lives until its incident's fix is deployed (no TTL by default). While the incident is closed
+        without a deployed fix the reason stands: put the rule back if the gateway lost it (e.g. a restart that
+        did not restore state), and, if a TTL was configured, renew it before it expires."""
         with self.state.lock:
             open_rules = [(i["incident"], dict(i["rule"])) for i in self.state.data["incidents"].values()
                           if i.get("status") == "closed" and i.get("outcome") == "rule_only"
@@ -179,9 +182,12 @@ class Pipeline:
         renewed = 0
         for iid, rule in open_rules:
             cur = active.get(rule.get("id"))
-            ttl = float(rule.get("ttl_s") or self.cfg.rule_ttl_s)
-            if cur is not None and float(cur.get("expires_in") or 0) > ttl / 4:
-                continue
+            if cur is not None:
+                ttl_s = rule.get("ttl_s") or self.cfg.rule_ttl_s
+                left = cur.get("expires_in")
+                # a no-ttl rule never expires; a timed one is renewed only in its last quarter
+                if ttl_s is None or left is None or float(left) > float(ttl_s) / 4:
+                    continue
             for k in ("created", "expires_in"):
                 rule.pop(k, None)
             self.gw.post_rule(rule)
@@ -300,6 +306,23 @@ class Pipeline:
         self.publish(E.INCIDENT_CLOSED, data, inc)
         self.state.save()
 
+    def escalate(self, inc, p, hits: int, runs: int):
+        """The oracle fired on the live request but not on every replay (possibly a non-deterministic or stateful
+        attack). It did fire once, so contain it with the rule; without a reliable PoC no fix can be validated,
+        so no automatic patch: a person decides. New evidence for the same key reopens the incident."""
+        rule, why = rules.finalize(None, inc, self.spec, self.cfg.rule_ttl_s)
+        if why:
+            self.note(inc, why)
+        self.gw.post_rule(rule)
+        inc["rule"] = rule
+        inc["rule_posted"] = time.time()
+        inc.setdefault("first_rule_posted", inc["rule_posted"])
+        self.note(inc, "rule %s posted (%s)" % (rule["id"], rule["scope"]))
+        self.state.save()
+        raise Closed("rule_only", "the %s oracle fired on the original request but in %d/%d replays: contained by "
+                     "rule %s, no automatic fix without a reliable PoC; needs a person"
+                     % (p["expect"]["oracle"], hits, runs, rule["id"]), ESCALATED)
+
     def _flow(self, inc):
         cfg = self.cfg
         iid = inc["incident"]
@@ -330,8 +353,7 @@ class Pipeline:
         self.publish(E.POC_READY, {"incident": iid, "reproducible": rep["reproducible"], "runs": rep["runs"], "poc": p}, inc)
         self.state.save()
         if not rep["reproducible"]:
-            raise Closed("not_reproducible", "the PoC triggered the %s oracle in %d/3 runs on release %s"
-                         % (p["expect"]["oracle"], rep["runs"], release))
+            self.escalate(inc, p, rep["runs"], 3)
         self.note(inc, "PoC reproduces 3/3; %d variants counted" % len(rep["counted"]))
         self._corpus_add(inc, p, rep)
 
@@ -541,6 +563,8 @@ class Pipeline:
 
     def _schedule_audit(self, inc) -> None:
         if inc.get("outcome") not in ("patched", "rule_only") or inc.get("vuln_class") not in auditmod.ORACLE_OF:
+            return
+        if inc.get("outcome_detail") == ESCALATED:      # no confirmed class to audit siblings for
             return
         if not self.audit_settings()[0]:
             return

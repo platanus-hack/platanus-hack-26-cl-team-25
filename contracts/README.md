@@ -172,7 +172,7 @@ Decision per request (enforce mode):
 7. `suspect` → acquire a free L1 clone (wait ≤ 300 ms), send with `x-imm-rid`, `x-imm-mode: L1`, and `x-imm-uid`/`x-imm-role` if identified. Read the full response, then the verdict:
    - `clean` → forward the **same bytes** to prod, return prod's response.
    - `oracle` → attack confirmed (see 8).
-   - `inconclusive` → if an active rule matched: generic deny; else forward to prod.
+   - `inconclusive` → if an active rule matched **strictly**: generic deny; else forward to prod. A `scope: all` rule and a `scope: param` rule always match strictly; a `scope: param_present` rule matches strictly only when the value is outside its `grammar` (a clone holds synthetic credentials, so a real user's login is a 401 there: denying every inconclusive would take the endpoint down).
    - no clone available → evict the oldest clone-bound captive (its clone becomes `retired`, so fleet replaces it), then: if an active rule matched **or the request is high-signal** (a reason of kind schema/grammar violation or duplicated parameter) → generic deny; else forward to prod.
 8. Confirmed attack (`oracle` verdict, or `evidence`):
    - trusted identity (`uid ≤ seed_max_uid`): never serve synthetic data → generic deny, publish `oracle.fired`.
@@ -181,7 +181,7 @@ Decision per request (enforce mode):
    - a captive request that cannot get a clone → generic deny, never prod.
 9. Generic deny = `404 {"detail":"Not Found"}`.
 
-Rules (`contracts/schemas/rule.schema.json`): a rule marks a confirmed-vulnerable point. Effects: values on that route+param not matching `grammar` are suspect **for every identity, trusted included**; `scope: "all"` makes every request on that route suspect; fail-closed as in step 7. Rules expire by TTL or `DELETE`.
+Rules (`contracts/schemas/rule.schema.json`): a rule marks a confirmed-vulnerable point. Effects, **for every identity, trusted included**: `scope: "param_present"` (what the pipeline emits for sqli and traversal) makes every request that carries the parameter suspect, whatever its value — the oracle in the clone is the detector, not a character whitelist (`1 UNION SELECT user,pass FROM users` has no unsafe character); `scope: "param"` makes only values not matching `grammar` suspect; `scope: "all"` makes every request on that route suspect; fail-closed as in step 7. A rule has no expiry unless it carries `ttl_s`: it lives until `DELETE` (the pipeline deletes it once the patch is deployed and verified). Active rules are written to `RULES_PATH` (default: `rules.json` next to `RECORD_PATH`) on every change and reloaded at start, so a restart does not uncover a confirmed-vulnerable point. `GET /_admin/rules` returns, per rule, `expires_in` (null without ttl) and `stats: {hits, oracle, denied}`; `denied` counts requests refused with no oracle fired (no clone, or inconclusive) and is the signal that a rule is hurting legitimate traffic.
 
 Captivity: TTL 15 min idle; when no clone is free and a new capture is needed, evict the oldest captive (its clone becomes `retired`).
 
@@ -195,6 +195,7 @@ PUT  /_admin/pool        {"clones":[{"id","addr","key","release"}]}   full set o
 GET  /_admin/pool        {"clones":[{"id","state":"free|busy|captive|retired","session","release"}]}
 GET|POST /_admin/rules ; DELETE /_admin/rules/{id}
 GET|POST /_admin/upstream   {"addr":"prod-green:8000","release":"..."}   POST drains in-flight requests, then switches
+GET|POST|DELETE /_admin/canary   {"addr":"prod-green:8000","release":"...","weight":0.2}   POST: that share of prod traffic (per request) goes to addr; counters per side in /_admin/stats "canary"; a POST /_admin/upstream ends it (promotion); never persisted
 GET  /_admin/sessions       {"captive":[{"session","clone","since"}]}   clone is null until bound
 POST /_admin/mode           {"mode":"enforce|passthrough"}
 GET  /_admin/prodlog?rid=   {"forwarded": bool, "status": n}
@@ -235,7 +236,7 @@ Retries after transient failures, rule renewal and deploys across a fleet restar
 
 Trigger: `oracle.fired` events on the bus. Per incident (dedupe key: oracle kind + route + param + sink file:line):
 
-1. Build the PoC (`contracts/schemas/poc.schema.json`), confirm it reproduces 3/3 in the runner (harness, container `--network none`).
+1. Build the PoC (`contracts/schemas/poc.schema.json`), confirm it reproduces 3/3 in the runner (harness, container `--network none`). Below 3/3: post the rule anyway, skip the fix, close `rule_only` / `outcome_detail: escalated`.
 2. Rule: derive it from the evidence, `POST /_admin/rules`.
 3. Patch: `patcher.propose(release_dir, evidence, feedback) -> unified diff`. Up to 3 attempts, feeding back gate output.
 4. Gates, in order, each published as `gate.result`: `policy`, `properties`, `poc`, `tests`, `legit` (`docs/plan-construccion.md` §4).

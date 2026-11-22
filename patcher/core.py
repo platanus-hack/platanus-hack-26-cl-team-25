@@ -80,7 +80,18 @@ def _source_dirs(dirs=None) -> list[str]:
 def editable_files(incident: dict, workdir: str, source_dirs: list[str] | None = None) -> list[str]:
     """Files the model may edit (relative to workdir): the app files of the stack under
     `app.source_dirs`, except a file that only appears as the innermost frame below app code
-    (the generic DB helper the statement reached, not where it was built), plus the reported sink file."""
+    (the generic DB helper the statement reached, not where it was built), plus the reported sink file.
+
+    An incident may instead declare `editable_files` explicitly (any language, e.g. a Java or JS sink the
+    Python stack heuristic below cannot find); those that exist in the workdir are used as given."""
+    explicit = incident.get("editable_files")
+    if explicit:
+        out = []
+        for x in explicit:
+            f = os.path.normpath(str(x))
+            if f not in out and os.path.isfile(os.path.join(workdir, f)):
+                out.append(f)
+        return out
     dirs = _source_dirs(source_dirs)
     cands = []
     for e in (incident.get("evidence") or {}).get("events") or []:
@@ -133,7 +144,10 @@ def render_prompt(incident: dict, feedback: list[str] | None, attempt: int, edit
 def propose(release_dir: str, incident: dict, feedback: list[str] | None = None, attempt: int = 1) -> dict:
     if os.environ.get("PATCHER_FORCE_FALLBACK") == "1":
         return apply_fallback(release_dir, incident, "PATCHER_FORCE_FALLBACK=1")
-    with Workspace(release_dir) as ws:
+    # an incident may name the release subtrees to copy (a non-default app, e.g. a Java/JS source tree);
+    # otherwise the configured app.release_paths are used.
+    paths = incident.get("app_subdirs") or None
+    with Workspace(release_dir, paths=paths) as ws:
         editable = editable_files(incident, ws.work)
         prompt = render_prompt(incident, feedback, attempt, editable)
         res = claude_cli.run(prompt, ws.work, editable)

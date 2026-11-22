@@ -1,0 +1,5 @@
+# Sandbox for building and testing Go apps (Grafana 8.3 needs Go 1.17; alpine/musl matches the official image).
+FROM golang:1.17-alpine
+RUN apk add --no-cache gcc g++ musl-dev git
+ENV CGO_ENABLED=1 GOFLAGS=-mod=mod GOCACHE=/cache/build GOMODCACHE=/cache/mod
+WORKDIR /src

@@ -1,23 +1,23 @@
 """Gateway rule for a confirmed-vulnerable point (contracts/schemas/rule.schema.json).
 
-sqli / traversal with a parameter -> scope "param": the grammar is the gateway's safe
-default, widened only where legitimate values need it and the attack shape does not:
+sqli / traversal with a parameter -> scope "param_present": every request that carries
+the parameter is detonated in the shadow, whatever the value looks like. The oracle is
+the detector; a character whitelist is not (an injection into an unquoted context needs
+only letters, digits and spaces: `1 UNION SELECT user,pass FROM users`).
+The grammar only breaks the tie when the clone is inconclusive (401/404/5xx, no oracle):
+a value inside it goes on to prod, a value outside it is denied. It is the gateway's safe
+default, widened only where legitimate values need it:
   * sqli: one apostrophe between two letters (O'Brien, o'neil@mail) is allowed, a
     comment marker "--" never is;
   * length capped by the OpenAPI maxLength of the parameter (else 128).
-The captured value must NOT match the grammar (checked); if it would, or the parameter
-is x-sensitive / unknown, the rule falls back to scope "all".
+An x-sensitive parameter is never read by the gateway -> scope "all".
 idor / other / no parameter -> scope "all".
+No ttl: the rule lives until the patch is deployed and verified, or it is deleted by hand.
 """
 from __future__ import annotations
 
-import base64
-import json
-from urllib.parse import parse_qsl
-
-from immune_contracts import grammar as G
-
-TTL_S = 3600
+TTL_S = None  # no expiry
+RULE_PARAM_IN = ("query", "path", "json", "form", "header")
 _SAFE_CHARS = r"A-Za-z0-9 _.,@:+\-"  # same set as grammar.SAFE_DEFAULT
 
 
@@ -47,31 +47,6 @@ def param_schema(openapi: dict, method: str, route: str, param: dict) -> dict | 
     return None
 
 
-def captured_value(incident: dict) -> str | None:
-    param = incident.get("param") or {}
-    where, name = param.get("in"), param.get("name")
-    req = incident.get("request") or (incident.get("evidence") or {}).get("request") or {}
-    if where == "query":
-        vals = [v for k, v in parse_qsl(req.get("query") or "", keep_blank_values=True) if k == name]
-        if vals:
-            return vals[-1]
-    elif where in ("json", "form"):
-        raw = base64.b64decode(req.get("body_b64") or "")
-        try:
-            obj = json.loads(raw) if where == "json" else dict(parse_qsl(raw.decode(), keep_blank_values=True))
-            for part in str(name).split(".") if where == "json" else [name]:
-                obj = obj[part]
-            if isinstance(obj, str):
-                return obj
-        except (ValueError, KeyError, TypeError, UnicodeDecodeError):
-            pass
-    for e in (incident.get("evidence") or {}).get("events") or []:
-        d = e.get("detail") or {}
-        if d.get("param") == name and isinstance(d.get("input"), str):
-            return d["input"]
-    return None
-
-
 def build_grammar(vuln_class: str, max_len: int) -> str:
     n = max(1, min(int(max_len), 128))
     if vuln_class == "sqli":
@@ -93,13 +68,9 @@ def derive_rule(incident: dict, openapi: dict) -> dict:
     schema = param_schema(openapi, method, route, param)
     if schema is not None and schema.get("x-sensitive"):
         return rule  # never grammar-checked by the gateway: block the whole route
-    value = captured_value(incident)
+    if param["in"] not in RULE_PARAM_IN:
+        return rule  # a location the gateway cannot address (cookie, raw body): cover the whole route
     max_len = (schema or {}).get("maxLength") or 128
-    g = build_grammar(vuln_class, max_len)
-    if value is None or G.matches(g, value):
-        g = G.SAFE_DEFAULT
-        if value is None or G.matches(g, value):
-            return rule
-    assert not G.matches(g, value)
-    rule.update(param={"in": param["in"], "name": param["name"]}, grammar=g, scope="param")
+    rule.update(param={"in": param["in"], "name": param["name"]}, grammar=build_grammar(vuln_class, max_len),
+                scope="param_present")
     return rule

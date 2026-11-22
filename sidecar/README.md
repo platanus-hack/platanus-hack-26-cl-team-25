@@ -6,14 +6,38 @@ from outside the process:
 
 | Oracle | Source | Fires when |
 |---|---|---|
-| `sql` | Postgres wire-protocol proxy (`pgproxy.py`) | a request input (from `shadow.inputs`) breaks out of a literal in a **successfully executed** statement (`shadow.sqltaint`, imported unchanged) |
-| `file` | strace `openat/openat2/open/creat` | a **successful** open whose kernel path is outside `allowed_file_roots` and the warm-up allowlist |
+| `sql` | Postgres wire-protocol proxy (`pgproxy.py`), or the shadow database's statement log (`sqllog.py`: Postgres, MySQL) | a request input (from `shadow.inputs`) breaks out of a literal in a **successfully executed** statement (`shadow.sqltaint`, imported unchanged); or the statement has a structure outside the learnt baseline (`reason: new_structure`) |
+| `file` | strace `openat/openat2/open/creat`; the response body | a **successful** open whose kernel path is outside `allowed_file_roots` and the warm-up allowlist; with `protected_paths`: only an open of a protected path, failed attempts included; a marker planted in a protected file appears in the response |
 | `proc` | strace `execve/execveat`, non-thread `clone/clone3/fork/vfork` | any process spawned during the request |
 | `net` | strace `connect/sendto/sendmsg` | an attempt to a non-loopback address, any DNS query (port 53), or a unix socket not seen in warm-up |
 | `owner` | response body | marker of another owner (same rule as `shadow.core.Engine.owner_events`) |
 
 Evidence `stack` is always `[]` (no frames from outside); `detail` is `{statement,input,param,location,reason}`,
 `{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
+
+One sidecar, three placements (`mode`), and the pieces around it:
+
+| | |
+|---|---|
+| `mode: attach` | sidecar container shares the app's PID and network namespaces (fleet clones, pipeline judge) |
+| `mode: launch` | sidecar starts the app as a traced child, one container |
+| `mode: docker` | sidecar runs outside (host); a tracer container (`immune-strace:1`, no network, `SYS_PTRACE`+`KILL` only) joins `container`'s PID namespace. Nothing is added to the app's container; it re-attaches and warms up again when the container is replaced, failing closed meanwhile. Used by `labs/grafana-cve-2021-43798` |
+| `python -m sidecar.learn` | replays the gateway's clean recordings in learn mode (signed with the clone key) to teach the sql structure baseline |
+| `python -m sidecar.prodwatch` | the same file/proc/net rules, from the same config file, on **production** containers with eBPF, alert only (`prod.alert`); candidates are replayed on the clone |
+
+Added rules (all optional, config keys in `config.py`):
+- `protected_paths` (globs) switches the `file` rule from "outside the allowed roots" to "a protected path was
+  opened or attempted", for apps that legitimately read all over the disk. Paths of file markers are protected.
+- Markers file: `{marker: uid}` entries feed `owner`; `{marker: {"path": …}}` entries are secrets planted in that
+  file: seen in a response → `file` event (`observed: response`, or `response+syscall` when the open was seen too).
+- `exec_allow` / `net_allow`: globs that never fire. `learn_background`: what the app does with no request in
+  flight (and none finished in the last second) stops firing.
+- `sql_log: {cmd, dialect}`: statements from the database log instead of the proxy. The log reports statements
+  that failed (`STATEMENT:`), and with this source those are checked too (error-based injection fails on purpose).
+- Without string constants of the app (no `source_dirs`, e.g. docker mode) or with MySQL, a taint match on a single
+  token is dropped: it cannot be told from an identifier the app wrote (`?sort=name` in `ORDER BY name`).
+- Structure rule: statements whose fingerprint is not in the baseline fire once a request has been learnt
+  (`sql_baseline` persists it). Covers input that never appears verbatim (base64, second order).
 
 ## How it works
 
@@ -157,7 +181,8 @@ No image was built or pulled.
 ## Tests
 
 ```
-.venv/bin/pytest sidecar/tests -q          # unit + integration (Docker; ~25 s)
+.venv/bin/pytest sidecar/tests -q          # unit + integration (Docker; ~25 s). test_policy_and_sql.py and
+                                           # test_prodwatch.py cover the rules above; docker mode end to end: the Grafana lab
 .venv/bin/python -m sidecar.tests.bench 200 30 [durable]
 ```
 
@@ -188,7 +213,11 @@ Confirmed (observed in tests or experiments here):
 
 Reasoned, not tested:
 - In-process databases (SQLite, H2, embedded KV) produce no SQL oracle; their file is opened at startup
-  (before attach or during warm-up), so they are invisible. Only Postgres has a proxy (no MySQL etc.).
+  (before attach or during warm-up), so they are invisible. Only Postgres has a proxy; MySQL goes through `sql_log`.
+- Docker mode traces PID 1 and the children it starts after the attach; processes already running besides PID 1
+  are not traced. The tracer's lines cross a docker pipe, so use a larger `grace_ms` (the lab uses 100).
+- The structure baseline is global, not per route. `sql_log` was run against a real Postgres 16 (time-based,
+  error-based, base64-wrapped input, forged learn request); the MySQL parser only has unit tests after the unification.
 - Memory-only effects (caches, globals, in-process privilege changes) are invisible; only `owner` (response body)
   sees data leaks that touch no syscall/SQL.
 - io_uring opens/connects bypass the traced syscalls (Docker's default seccomp profile blocks `io_uring_setup`, so

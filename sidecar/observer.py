@@ -4,10 +4,21 @@ Observations arrive from two sources: the strace reader thread (file / exec / fo
 pg proxy on the event loop (statements). Only those arriving while a request window is open are kept;
 everything else is dropped (counted in ``outside``). During warm-up (``learning``) file and net
 observations populate the allowlist instead.
+
+Two file rules:
+- allowlist (default): a successful open outside ``allowed_file_roots`` and the warm-up allowlist fires;
+- protected (``protected`` globs given, e.g. the files that hold the shadow's planted secrets): only an open of a
+  protected path fires, and a failed attempt counts. For apps that legitimately open files all over the disk.
+
+``exec_allow`` / ``net_allow`` are globs (program path, ``address:port``) that never fire.
+``learn_background``: what the app does on its own, with no request in flight and none just finished, is
+remembered and does not fire later (scheduled jobs, periodic reopens).
 """
 from __future__ import annotations
 
+import fnmatch
 import gzip
+import json
 import posixpath
 import re
 import threading
@@ -31,8 +42,31 @@ class Record:
         self.bound: list[tuple[str, list]] = []  # judge mode: (statement, bound params) of executed Executes
 
 
+def _match(key: str, patterns) -> bool:
+    return any(fnmatch.fnmatchcase(key, p) for p in patterns)
+
+
+def obs_key(o) -> tuple:
+    d = o.detail
+    if o.kind == "file":
+        return ("file", d["realpath"])
+    if o.kind == "exec":
+        return ("exec", d["path"])
+    if o.kind == "net":
+        return ("net",) + _net_key(d)
+    return (o.kind,)
+
+
 class Observer:
-    def __init__(self, allowed_roots, dns_fires: bool = True):
+    def __init__(self, allowed_roots, dns_fires: bool = True, protected=(), exec_allow=(), net_allow=(),
+                 learn_background: bool = False, quiet_s: float = 1.0):
+        self.protected = [p for p in protected if p]
+        self.exec_allow, self.net_globs = list(exec_allow or []), list(net_allow or [])
+        self.learn_background, self.quiet_s = learn_background, quiet_s
+        self.background: set[tuple] = set()
+        self.background_sql: list[str] = []     # statements seen with no request in flight (structure baseline)
+        self.last_end = 0.0
+        self.paused = False                     # the app is starting (tracer re-attached): observe nothing
         self.lock = threading.Lock()
         self.current: Record | None = None
         self.learning = False
@@ -45,6 +79,8 @@ class Observer:
     # ---------------------------------------------------------------- feeding
     def on_obs(self, obs):
         with self.lock:
+            if self.paused:
+                return
             if self.learning:
                 if obs.kind == "file":
                     self.file_allow.add(obs.detail["realpath"])
@@ -53,6 +89,9 @@ class Observer:
                 return
             if self.current is None:
                 self.outside += 1
+                # not right after a request: a late line of that request must not become "normal"
+                if self.learn_background and obs.kind != "fork" and time.time() - self.last_end > self.quiet_s:
+                    self.background.add(obs_key(obs))
                 return
             self.current.obs.append(obs)
             self.current.times.append(time.perf_counter())
@@ -61,6 +100,8 @@ class Observer:
         with self.lock:
             rec = self.current
             if rec is None:
+                if len(self.background_sql) < 5000:
+                    self.background_sql.append(sql)
                 return
             if ok:
                 rec.statements.append(sql)
@@ -80,12 +121,20 @@ class Observer:
     def end(self) -> Record:
         with self.lock:
             rec, self.current = self.current, None
+            self.last_end = time.time()
             return rec
+
+    def take_background_sql(self) -> list[str]:
+        with self.lock:
+            out, self.background_sql = self.background_sql, []
+            return out
 
     # ---------------------------------------------------------------- oracles
     def path_allowed(self, real: str) -> bool:
         if real in self.file_allow:
             return True
+        if self.protected:
+            return not _match(real, self.protected)
         for root in self.allowed_roots:
             if real == root or real.startswith(root.rstrip("/") + "/"):
                 return True
@@ -103,11 +152,16 @@ class Observer:
 
         for o in rec.obs:
             d = o.detail
+            if o.kind != "fork" and obs_key(o) in self.background:
+                continue
             if o.kind == "file":
+                if d.get("result") and not self.protected:
+                    continue  # a failed open only matters for a protected path
                 if not self.path_allowed(d["realpath"]):
-                    add("file", {"path": d["path"], "realpath": d["realpath"]})
+                    add("file", {k: d[k] for k in ("path", "realpath", "result") if k in d})
             elif o.kind == "exec":
-                add("proc", {"path": d["path"], "argv": d["argv"]})
+                if not _match(d["path"], self.exec_allow):
+                    add("proc", {"path": d["path"], "argv": d["argv"]})
             elif o.kind == "fork":
                 if d["child"] not in execed:  # fork without exec (exec'd children are reported by execve)
                     add("proc", {"syscall": d["syscall"], "child": d["child"]})
@@ -120,6 +174,8 @@ class Observer:
     def net_fires(self, d) -> bool:
         from .strace import is_loopback
         fam = d["family"]
+        if self.net_globs and _match("%s:%s" % (d.get("address"), d.get("port")), self.net_globs):
+            return False
         if fam in ("AF_INET", "AF_INET6"):
             if d["port"] == 53:
                 return self.dns_fires  # a name lookup during a request (SSRF to a hostname)
@@ -203,3 +259,48 @@ def is_public(public, path) -> bool:
         if path == p or path.startswith(p if p.endswith("/") else p + "/"):
             return True
     return False
+
+
+# ---------------------------------------------------------------- file markers (planted secrets)
+def load_file_markers(path: str | None) -> dict:
+    """Markers planted in files of the shadow: {marker: {"path": file it lives in, ...}}. The same JSON may also
+    hold owner markers ({marker: uid}); those belong to the owner oracle (identity.Identity.markers)."""
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {str(m): v for m, v in raw.items() if isinstance(v, dict) and v.get("path")}
+
+
+def marker_events(file_markers: dict, headers: dict, body: bytes, system: list[dict]) -> list[dict]:
+    """`file` events for markers found in the response, merged with the syscall events of the same file
+    (detail ``observed``: response | response+syscall). Returns the full event list."""
+    if not file_markers:
+        return system
+    text = decoded_body(headers, body)
+    by_path = {}
+    for m, info in file_markers.items():
+        if m.encode() in text and info["path"] not in by_path:
+            by_path[info["path"]] = {"oracle": "file", "stack": [],
+                                     "detail": {"path": info["path"], "realpath": info["path"], "marker": m,
+                                                "observed": "response"}}
+    rest = []
+    for e in system:
+        hit = by_path.get(e["detail"].get("realpath")) if e["oracle"] == "file" else None
+        if hit and not e["detail"].get("result"):
+            hit["detail"]["observed"] = "response+syscall"
+        else:
+            rest.append(e)
+    return list(by_path.values()) + rest
+
+
+def from_config(cfg, file_markers: dict | None = None, extra_allow=()) -> "Observer":
+    """The observer a config describes; paths of file markers are protected."""
+    protected = list(cfg.protected_paths or [])
+    protected += sorted({i["path"] for i in (file_markers or {}).values()} - set(protected))
+    protected = [p for p in protected if p not in set(extra_allow)]
+    return Observer(cfg.allowed_file_roots, protected=protected, exec_allow=cfg.exec_allow,
+                    net_allow=cfg.net_allow, learn_background=cfg.learn_background)

@@ -1,4 +1,8 @@
-"""python -m sidecar.marker --port 3902 : oracle sidecar in front of one shadow app (env: see sidecar/core.py Config)."""
+"""python -m sidecar.httpds --port 3922 : authz oracle sidecar in front of one shadow ScadaBR.
+
+Env (see sidecar/httpds/core.py Config): SHADOW_UPSTREAM, HTTPDS_MANIFEST, CLONE_ID, CLONE_KEY,
+COLLECTOR_URL, RELEASE, SIDECAR_TIMEOUT_S.
+"""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +14,7 @@ from .core import Config, Sidecar
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="python -m sidecar.marker")
+    ap = argparse.ArgumentParser(prog="python -m sidecar.httpds")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     a = ap.parse_args()

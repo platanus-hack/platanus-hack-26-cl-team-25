@@ -1,8 +1,8 @@
-# Demo defensiva de Inmune con FUXA v1.2.9
+# Demo defensiva de Immune con FUXA v1.2.9
 
 La demo usa únicamente el commit oficial 19c2471833e410eea235b81857ddcfde7b3851a0. Docker ejecuta el servicio FUXA en una red interna. El gateway publica la interfaz en 127.0.0.1:1881 y conserva la revisión anterior hasta verificar el cambio.
 
-Instala las dependencias de Python y activa los contenedores Linux de Docker. Ejecuta estos comandos desde la raíz de Inmune.
+Instala las dependencias de Python y activa los contenedores Linux de Docker. Ejecuta estos comandos desde la raíz de Immune.
 
     python -m immune fuxa baseline
     python -m immune fuxa up

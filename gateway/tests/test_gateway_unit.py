@@ -251,3 +251,60 @@ async def test_events_that_matter_survive_a_bus_outage():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)     # let it restore httpx.AsyncClient
+
+
+# ---------------------------------------------------------------- canary (a share of prod traffic on a new release)
+
+async def test_canary_takes_its_share_and_is_counted_apart_from_the_stable_release():
+    def handler(request):
+        return httpx.Response(500 if request.url.host == "prod-green" else 200)
+
+    gw = await _gw_with(handler)
+    try:
+        gw.start_canary("prod-green:8000", "r2", 0.25)
+        for _ in range(400):
+            await gw.to_prod(_ctx("GET"))
+        view = gw.canary_view()
+        can, stable = view["canary"], view["stable"]
+        assert can["requests"] + stable["requests"] == 400 and 50 < can["requests"] < 160
+        assert can["5xx"] == can["requests"] and stable["5xx"] == 0
+        # the stable counters the deploy watch reads never saw the canary's errors
+        assert gw.stats["prod_5xx"] == 0 and gw.stats["prod_requests"] == stable["requests"]
+        gw.stop_canary("aborted")
+        assert gw.canary is None
+        await gw.to_prod(_ctx("GET"))
+        assert gw.stats["prod_requests"] == stable["requests"] + 1
+    finally:
+        await gw.stop()
+
+
+async def test_canary_that_refuses_connections_loses_the_request_and_the_client_does_not():
+    def handler(request):
+        if request.url.host == "prod-green":
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200)
+
+    gw = await _gw_with(handler)
+    try:
+        gw.start_canary("prod-green:8000", "r2", 1.0)
+        up = await gw.to_prod(_ctx("POST"))
+        assert up.status == 200                                   # answered by the stable release
+        can = gw.canary_view()["canary"]
+        assert can == {"requests": 1, "5xx": 1, "4xx": 0, "conn_errors": 1}
+        assert gw.stats["prod_requests"] == 1 and gw.stats["prod_5xx"] == 0
+    finally:
+        await gw.stop()
+
+
+async def test_switching_to_the_canary_promotes_it_and_a_restart_forgets_it(tmp_path):
+    gw = await _gw_with(lambda request: httpx.Response(404 if request.url.host == "prod-green" else 200))
+    try:
+        gw.start_canary("prod-green:8000", "r2", 1.0)
+        ctx = _ctx("GET")
+        await gw.to_prod(ctx)
+        assert ctx.release == "r2" and gw.canary_view()["canary"]["4xx"] == 1
+        await gw.switch_upstream("prod-green:8000", "r2")
+        assert gw.canary is None and gw.upstream == {"addr": "prod-green:8000", "release": "r2"}
+        assert "canary" not in gw._state_doc()
+    finally:
+        await gw.stop()
