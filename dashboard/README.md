@@ -117,8 +117,9 @@ redacted.
   oracle (or the audit finding) and `incident.opened` is shown separately as queue time.
   `tests/test_public_surface.py` compares the page's numbers with `immune.metrics` on a recorded run
   (`tests/fixtures/real_run.jsonl`).
-- The panel "Bot atacante" appears only when the current run has `attack.attempt` events. No component of the
-  system emits that event; the only emitter is `demo_events.py`.
+- The panel "Bot atacante" appears only when the current run has `attack.attempt` events. They come from the demo
+  attacker `sim/attacker.py` (real attempts against the running shop) or from `demo_events.py` (invented, labelled
+  "DEMO").
 
 ### Scripted events for UI development
 
@@ -149,7 +150,8 @@ without it.
 - The page rebuilds its state from the events in memory. After eviction, request counts of the current run and
   incidents of earlier runs are incomplete on the page; the store still has them.
 - There is one bus token for all writers and no per-writer identity.
-- No attacker bot exists in the repository; the "Bot atacante" panel can only show scripted data.
+- The "Bot atacante" panel shows only what `sim/attacker.py` reports: the seven documented exploits of the shop,
+  not an attacker that finds new defects.
 
 The full list across components is in [`docs/limites.md`](../docs/limites.md). Operation (ports, files under the
 runtime directory) is in [`docs/operacion.md`](../docs/operacion.md).

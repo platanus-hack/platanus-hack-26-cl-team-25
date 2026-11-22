@@ -13,6 +13,7 @@ legitimate customer was harmed. Both speak only HTTP and know only this shop's r
 |---|---|---|
 | `sim.scenarios.SCENARIOS` (library) | The `legit` gate, because the demo project's `.immune/config.yaml` sets `scenarios: sim.scenarios` | Inside the pipeline's runner container, against a `TestClient` |
 | `python -m sim.legit` | A person, by hand | On the host, against the gateway's data port |
+| `python -m sim.attacker` | A person, during the demo; `deploy/record_demo.sh` | On the host, against the gateway's data port (loopback only) |
 
 Neither opens a port.
 
@@ -26,6 +27,7 @@ python -m sim.legit --base http://127.0.0.1:8080 --duration 60
 |---|---|
 | `scenarios.py` | The five scenarios, the response normaliser and the step recorder |
 | `legit.py` | The traffic generator: `Actor` (journeys and checks), `Stats`, `main` |
+| `attacker.py` | The demo attacker: replays the seven documented exploits in a loop, scores each attempt, publishes `attack.attempt` |
 | `tests/` | Tests of both |
 
 ## Configuration

@@ -768,7 +768,7 @@ Bounds:
 | `audit.started` | pipeline | `{incident, vuln_class, candidates}` |
 | `audit.finding` | pipeline | `{incident, parent, route, param}` |
 | `audit.done` | pipeline | `{incident, checked, findings, seconds}` |
-| `attack.attempt` | none in a live stack | `{vuln, ok, saw_real_data}`. The only emitter is `dashboard/demo_events.py`, a script that posts invented events to develop the panel |
+| `attack.attempt` | `sim/attacker.py` (`src: sim`), run by hand | `{vuln, ok, saw_real_data}`. `ok`: the response looks like the exploit worked; `saw_real_data`: it carried production values (scored against the production database and container). `dashboard/demo_events.py` also posts invented ones with `run: demo` |
 
 The pipeline rejects, before sending, an event whose `data` keys differ from this table (`pipeline/bus.py`,
 `FIELDS` and `OPTIONAL`). `immune_contracts/events.py` lists every type of this table in `TYPES`, the three

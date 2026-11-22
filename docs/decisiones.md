@@ -163,7 +163,7 @@ Límite: un ataque de segundo orden solo se detecta si algo dentro del clon ejec
 | Parte | Estado |
 |---|---|
 | Falla abierto para el tráfico sin señal; falla cerrado para lo que coincide con una regla activa o tiene señal fuerte | Construido |
-| El sistema corre entero en la infraestructura del cliente. Sale lo que se envía al proveedor del modelo: código de la app y evidencia del request | Construido; el proveedor es el login de Claude Code de la máquina |
+| El sistema corre entero en la infraestructura del cliente. Sale lo que se envía al proveedor del modelo: código de la app y evidencia del request | Construido; el proveedor es el login de Claude Code de la máquina o una identidad propia del generador de parches |
 | XDP, puntaje con GBDT, Firecracker, LLM dentro del señuelo, eBPF-LSM | Fuera de alcance por decisión |
 
 ## 4. Decisiones técnicas

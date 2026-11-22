@@ -305,7 +305,10 @@ Resultados posibles de un incidente:
 - La evidencia y el detalle de las validaciones anteriores van en el prompt entre marcas con un nonce, declaradas
   como dato no confiable. Los headers `authorization`, `cookie` y `x-imm-signature` se tachan.
 - El confinamiento lo aplica la propia CLI con esas opciones. No hay un sandbox del sistema operativo alrededor
-  del proceso `claude`, que corre con el usuario y el login de Claude Code de quien ejecutó `immune up`. El
+  del proceso `claude`, que corre con el usuario de quien ejecutó `immune up` y, salvo que se configure una
+  identidad propia (`PATCHER_CLAUDE_CONFIG_DIR` o `PATCHER_ANTHROPIC_API_KEY`), con su login de Claude Code. No
+  hereda el entorno del pipeline: recibe una lista permitida de variables, sin los secretos del stack
+  (`child_env` en `patcher/claude_cli.py`). El
   contenido del prompt (código de la aplicación y request del atacante) sale hacia el proveedor del modelo.
 
 El texto del atacante es dato, nunca instrucción. La defensa contra un parche dirigido por ese texto es el
@@ -366,7 +369,8 @@ diseño están en [decisiones.md](decisiones.md).
 | Snapshot del clon antes del request como estado del PoC | Parcial: SQLite sí; nulo para Postgres | `contracts/product.md` |
 | Auditoría de clase después de un parche ("memoria inmunológica") | Construido (python-asgi) | `pipeline/audit.py` |
 | Muestreo de tráfico limpio, gramática aprendida por parámetro, huella de actor | No construido | — |
-| Bot atacante simulado, prueba de vulnerabilidad ciega, equipo rojo, suite de punta a punta | No construido | — |
+| Atacante de demostración que repite los exploits documentados de la tienda | Construido | `sim/attacker.py` |
+| Prueba de vulnerabilidad ciega, equipo rojo, suite de punta a punta | No construido | — |
 | Oráculos fuera del proceso con eBPF o seccomp-notify | No construido: implementado con `strace` y un proxy de Postgres | `sidecar/` |
 | `immune deploy` delante de un servicio existente | No construido (esbozo experimental) | `immune/deploycmd.py` |
 | `immune init` para apps que no son Python | No construido (perfil escrito a mano) | `examples/tareas-node/.immune/` |

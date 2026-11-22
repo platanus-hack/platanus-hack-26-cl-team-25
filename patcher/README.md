@@ -55,6 +55,13 @@ For `app.runtime: generic` the pipeline uses `pipeline/generic_patch.py` instead
 | `CLAUDE_BIN` | `$CLAUDE_CODE_EXECPATH` if executable, else `claude` on `PATH` | CLI binary |
 | `PATCHER_FORCE_FALLBACK` | unset | `1` skips the LLM and uses the fallback |
 | `PATCHER_FALLBACK_DIR` | `fallbacks/` of this directory | Where fallback diffs are read from |
+| `PATCHER_CLAUDE_CONFIG_DIR` | unset (the machine's Claude Code login) | Passed to the CLI as `CLAUDE_CONFIG_DIR`: the patcher's own login and config |
+| `PATCHER_ANTHROPIC_API_KEY` | unset | Passed to the CLI as `ANTHROPIC_API_KEY` (and `ANTHROPIC_AUTH_TOKEN` is dropped): the patcher's own key |
+
+The CLI process does not inherit the caller's environment. `child_env` passes an allowlist (`PATH`, `HOME`, locale,
+temp dir, proxy and CA settings, `ANTHROPIC_*`, `CLAUDE_*`, and the Bedrock/Vertex provider variables) plus the
+identity above, so the stack secrets the pipeline holds (`ADMIN_TOKEN`, `BUS_TOKEN`, app secrets, `GH_TOKEN`) never
+reach it. `identity()` names the credentials in use without printing them.
 
 The CLI inherits the environment of the pipeline process unchanged (including `ANTHROPIC_BASE_URL` and any API
 credentials) and uses the login already configured for the invoking user.

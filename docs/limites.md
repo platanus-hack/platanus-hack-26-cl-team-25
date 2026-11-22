@@ -151,9 +151,9 @@ Qué no detecta cada validación está junto a su descripción en [validaciones.
 - Las lecturas son públicas. Un lector sin token recibe los eventos tachados, pero ve método, ruta, parámetros no
   sensibles, claves de sesión `uid:<n>`, pilas, diffs, detalle de las validaciones, gramáticas de las reglas y
   tiempos. El JSONL en disco nunca se tacha.
-- El panel "Bot atacante" aparece solo si la corrida tiene eventos `attack.attempt`. **No existe un bot atacante
-  en el repositorio**: el único emisor de ese evento es `dashboard/demo_events.py`, que publica eventos inventados
-  para desarrollar la interfaz.
+- El panel "Bot atacante" aparece solo si la corrida tiene eventos `attack.attempt`. Los emite el atacante de
+  demostración `sim/attacker.py`, que repite los siete exploits documentados de la tienda; no busca defectos
+  nuevos. `dashboard/demo_events.py` también los emite, con datos inventados y la etiqueta "DEMO".
 
 Detalle en `dashboard/README.md`.
 
@@ -166,7 +166,10 @@ Detalle en `dashboard/README.md`.
 - `install.sh` está probado solo en Ubuntu 24.04 ARM64.
 - No está contemplada la pérdida de la máquina ni del propio Docker.
 - El Postgres de demostración del runtime genérico no está supervisado.
-- El generador de parches comparte el login de Claude Code de la máquina y su cuota.
+- El generador de parches usa por defecto el login de Claude Code de la máquina y su cuota. Se le puede dar una
+  identidad propia con `PATCHER_CLAUDE_CONFIG_DIR` o `PATCHER_ANTHROPIC_API_KEY` ([operacion.md](operacion.md)).
+  El proceso `claude` no hereda el entorno del pipeline: recibe una lista permitida de variables, sin los secretos
+  del stack. Sigue sin haber un sandbox del sistema operativo alrededor de ese proceso.
 
 ## Resultados
 
@@ -187,7 +190,7 @@ Elementos del diseño que no existen en el código. La columna "Dónde" de la ta
 | Revisor independiente con un segundo modelo | |
 | Tope de cautivos por origen, pausa y bajada a disco | |
 | Muestreo de tráfico limpio, gramática aprendida por parámetro, huella de actor | |
-| Bot atacante simulado, prueba de vulnerabilidad ciega, equipo rojo, suite de punta a punta | |
+| Prueba de vulnerabilidad ciega, equipo rojo, suite de punta a punta | El atacante de demostración (`sim/attacker.py`) solo repite exploits conocidos |
 | Oráculos con eBPF o seccomp-notify | Hoy `strace` y proxy de Postgres |
 | `immune deploy` delante de un servicio existente | |
 | `immune init` para aplicaciones que no son Python | |

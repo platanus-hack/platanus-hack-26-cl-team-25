@@ -287,6 +287,8 @@ procesos del host. Las variables internas de cada módulo están en su README.
 | `PATCHER_MODEL` | Modelo del generador de parches | `sonnet` | `patcher/claude_cli.py` |
 | `PATCHER_TIMEOUT_S` | Tiempo máximo de una llamada al modelo, en segundos | 180 | `patcher/claude_cli.py` |
 | `PATCHER_FORCE_FALLBACK=1` | Usa siempre el parche de respaldo | sin definir | `patcher/core.py` |
+| `PATCHER_CLAUDE_CONFIG_DIR` | Directorio de configuración y login propio de la CLI del generador de parches (se le pasa como `CLAUDE_CONFIG_DIR`) | sin definir: el login de la máquina | `patcher/claude_cli.py` |
+| `PATCHER_ANTHROPIC_API_KEY` | Clave de API propia del generador de parches (se le pasa como `ANTHROPIC_API_KEY`) | sin definir | `patcher/claude_cli.py` |
 | `PIPELINE_MAX_ATTEMPTS` | Intentos de parche por incidente | 3 | `pipeline/config.py` |
 | `PIPELINE_RULE_TTL_S` | TTL de una regla, en segundos | 3600 | `pipeline/config.py` |
 | `PIPELINE_RETRY_COOLDOWN_S` | Espera base, en segundos, antes de reintentar un cierre transitorio | 60 | `pipeline/config.py` |
@@ -413,7 +415,8 @@ sus contenedores existan, porque `immune down` elimina las imágenes de la aplic
 
 - Nada levanta el stack al iniciar la máquina.
 - No hay integración continua.
-- Los procesos del host comparten el login de Claude Code de la máquina y, por lo tanto, su cuota.
+- Sin `PATCHER_CLAUDE_CONFIG_DIR` ni `PATCHER_ANTHROPIC_API_KEY`, los procesos del host usan el login de Claude Code
+  de la máquina y, por lo tanto, su cuota.
 - `install.sh` solo está probado en Ubuntu 24.04 ARM64.
 - El Postgres de demostración del runtime genérico no está supervisado y no persiste datos entre `down` y `up`.
 
