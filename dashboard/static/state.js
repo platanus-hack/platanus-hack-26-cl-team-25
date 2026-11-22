@@ -62,7 +62,7 @@
     if (typeof x === 'string') return x;
     try { return JSON.stringify(x); } catch (e) { return String(x); }
   }
-  function sinkOf(x) { return isObj(x) && typeof x.file === 'string' ? { file: x.file, line: x.line } : null; }
+  function sinkOf(x) { return isObj(x) && typeof x.file === 'string' && x.file ? { file: x.file, line: x.line } : null; }
   function paramOf(x) { return isObj(x) && str(x.name) != null ? { 'in': str(x['in']), name: str(x.name) } : null; }
 
   function ensure(st, id, ts) {
