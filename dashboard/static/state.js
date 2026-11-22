@@ -69,7 +69,7 @@
     var inc = st.incidents[id];
     if (!inc) {
       inc = st.incidents[id] = {
-        id: id, rev: 0, opened: null, vuln_class: null, method: null, route: null, param: null, sink: null,
+        id: id, rev: 0, opened: null, vuln_class: null, anon: false, method: null, route: null, param: null, sink: null,
         evidence_rid: null, oracles: [], hits: 0, rule: null, ruleExpired: null, poc: null, origin: 'live', parent: null,
         request: null, attempts: [], pr: null, merged: null, deploy: null, prod: null, verify: null, closed: null, t: {}
       };
@@ -340,6 +340,7 @@
         st.lastOpened = id;
         inc.vuln_class = str(d.vuln_class); inc.route = str(d.route); inc.param = paramOf(d.param); inc.sink = sinkOf(d.sink);
         inc.method = str(d.method);
+        inc.anon = !!d.anon;   // owner oracle with no identity = missing-authentication (CWE-306), not classic IDOR
         inc.evidence_rid = sid(d.evidence_rid);
         inc.fuxa = isObj(d.fuxa) ? { synthetic: !!d.fuxa.synthetic, timed: !!d.fuxa.timed } : null;
         if (isObj(d.request)) inc.request = slimEvidence({ request: d.request }).request;
@@ -410,6 +411,12 @@
             target.deploy.doneTs = ts; target.deploy.ok = !!d.ok;
             target.deploy.rolled_back = !!d.rolled_back; target.deploy.detail = text(d.detail); target.t.deploy = ts;
             target.deploy.canary = canaryOf(d.canary);
+            /* external-patch flow (e.g. the ScadaBR lab) has no PR/merge, so upstream.switched never sets prod
+               (it requires target.merged). A successful deploy.done IS the switch to production there. */
+            if (d.ok && !d.rolled_back && !target.prod) {
+              target.prod = { ts: ts, release: str(d.release), addr: str(d.addr) || null };
+              target.t.inProd = target.t.inProd || ts;
+            }
           }
           touch(target);
         }
