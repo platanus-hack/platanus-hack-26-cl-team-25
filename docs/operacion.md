@@ -104,6 +104,26 @@ Para generar tráfico legítimo de fondo contra la tienda (desde la raíz del ch
 .venv/bin/python -m sim.legit --base http://127.0.0.1:8080 --duration 60
 ```
 
+Para que un atacante automático repita en bucle los siete exploits documentados de la tienda (con una cuenta
+recién registrada; cada tres rondas vuelve con cuenta y sesión nuevas), hasta que los siete queden bloqueados dos rondas seguidas:
+
+```bash
+.venv/bin/python -m sim.attacker --interval 1.5 --until-closed 2
+```
+
+Cada línea dice si el ataque fue bloqueado, si funcionó sobre un clon con datos sintéticos o si obtuvo datos
+reales de producción; esto último se comprueba contra la base y el contenedor de producción. Los intentos
+alimentan el panel "Bot atacante". Solo apunta al gateway de esta máquina.
+
+Para grabar el video de respaldo de la demo (reset, tráfico legítimo, atacante y panel con la terminal al lado;
+necesita Node con `playwright-core` y un Chromium):
+
+```bash
+PLAYWRIGHT_CORE_DIR=<directorio con node_modules/playwright-core> deploy/record_demo.sh
+```
+
+El guion de la presentación está en [demo/guion.md](demo/guion.md).
+
 Para volver al estado inicial (datos nuevos, `t0` en producción, sin incidentes) y para detener todo:
 
 ```bash
@@ -199,7 +219,7 @@ la vez.
 ## Referencia de comandos
 
 Todos los comandos salvo `anticipate` y `fuxa` aceptan `--project DIR`. Sin él, `up`, `down`, `status`, `reset`,
-`report`, `mode`, `autopatch`, `doctor` y `deploy` usan, en este orden: la variable `IMMUNE_PROJECT`; el directorio más cercano hacia
+`report`, `mode`, `autopatch`, `rollback`, `doctor` y `deploy` usan, en este orden: la variable `IMMUNE_PROJECT`; el directorio más cercano hacia
 arriba que contenga `.immune/config.yaml`; y si no hay ninguno, el checkout de Immune (el demo incorporado).
 `init` usa el directorio actual.
 
@@ -212,6 +232,7 @@ arriba que contenga `.immune/config.yaml`; y si no hay ninguno, el checkout de I
 | `immune report [--json]` | Resumen desde el bus y la grabación: clasificación, rutas, detonaciones, oráculos, incidentes; en `observe`, lo que `enforce` habría hecho | 0 |
 | `immune mode observe\|enforce` | Escribe `mode` en la configuración y lo cambia en el gateway en marcha | 0 |
 | `immune autopatch off\|pr\|merge` | Escribe `autopatch`. El pipeline lo lee al empezar cada incidente | 0 |
+| `immune rollback [--to RELEASE] [--keep-autopatch]` | Vuelve a poner en producción la release anterior (o `RELEASE`) por el mismo camino blue/green, con chequeo de salud y ventana de observación. Si `autopatch` es `merge`, lo deja en `pr`, salvo con `--keep-autopatch`. Las reglas activas se mantienen | 0; 1 si el despliegue no se completa |
 | `immune init [--yes] [--no-llm] [--prod-db PATH] [--seed N]` | Genera `.immune/` para una aplicación. `--yes` sobrescribe un `.immune/` existente | 0 `READY`; 1 `NEEDS ATTENTION` |
 | `immune doctor [--json] [--only 1,2]` | Ejecuta las comprobaciones de adaptación de un proyecto | 0 si todas pasan |
 | `immune doctor --prereqs [--openemr] [--json]` | Comprueba los requisitos de la máquina; no necesita proyecto. `--openemr` incluye las imágenes fijadas de OpenEMR y MariaDB | 0 si no falta nada obligatorio |

@@ -3,7 +3,9 @@
     python -m sim.attacker [--project DIR] [--rounds N] [--interval S] [--only sqli-search,...] [--no-bus]
 
 It sends the seven exploits listed in docs/demo/respuestas/tienda.md through the gateway, one after the other,
-round after round, and prints one line per attempt so the terminal moves on its own during the demo. Each
+with a freshly registered account (a seeded, trusted one is denied without detonation and never opens an incident),
+round after round. It keeps one session for --fresh-every rounds, like a single attacker (once captive, its decoy
+keeps answering it), then comes back with a new account and no cookie, which shows what production does now. It and prints one line per attempt so the terminal moves on its own during the demo. Each
 attempt is scored against ground truth read on the host:
 
 - ``ok``: the response looks like the exploit worked (rows came back, a token, a file, another user's order).
@@ -148,14 +150,14 @@ def load_truth(prod_db: str, prod_container: str | None) -> Truth:
     return Truth(admin, [s for s in (note, addr, owner) if s], owner, user, host)
 
 
-def legit_login(c, manifest: dict) -> str:
-    for u in manifest.get("legit_users") or []:
-        if u.get("role") != "user":
-            continue
-        r = c.post("/api/login", json={"email": u["email"], "password": u["password"]})
-        if r.status_code == 200:
-            return r.json()["token"]
-    raise SystemExit("attacker: no legit user of the manifest could log in")
+def attacker_account(c, rnd: int) -> str:
+    """A freshly registered account, like a real attacker's. A seeded (trusted) identity probing another user's
+    object is denied by the gateway without a detonation, so it would never open an incident."""
+    email = "atacante-%d-%d@example.invalid" % (int(time.time()), rnd)
+    r = c.post("/api/register", json={"email": email, "password": "atacante-clave-1", "name": "Visitante"})
+    if r.status_code not in (200, 201):
+        raise SystemExit("attacker: could not register an account (%s %s)" % (r.status_code, r.text[:200]))
+    return r.json()["token"]
 
 
 def _loopback(url: str) -> bool:
@@ -207,6 +209,9 @@ def main(argv=None) -> int:
     ap.add_argument("--until-closed", type=int, default=0, metavar="K",
                     help="stop after K consecutive rounds in which every exploit was blocked (0: never)")
     ap.add_argument("--max-seconds", type=float, default=0, help="stop after this many seconds (0: no limit)")
+    ap.add_argument("--fresh-every", type=int, default=3, metavar="N",
+                    help="come back with a new account and a new session every N rounds (0: never). In between, "
+                         "the attacker keeps one session, like a single real attacker")
     a = ap.parse_args(argv)
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -216,8 +221,6 @@ def main(argv=None) -> int:
         raise SystemExit("attacker: only the built-in shop has a documented exploit list (project %r)" % cfg.name)
     base = "http://127.0.0.1:%d" % cfg.ports["gateway"]
     assert _loopback(base)
-    with open(cfg.rt("data", "manifest.json")) as f:
-        manifest = json.load(f)
     def truth_now() -> Truth:
         """Re-read every round: blue/green switches change the production container (and its hostname)."""
         active = None
@@ -248,12 +251,13 @@ def main(argv=None) -> int:
     rnd = 0
     closed_streak = 0
     t_start = time.monotonic()
+    c = None
+    token = ""
     try:
-        # every attempt is a fresh session (no cookie jar shared between attempts): each exploit takes its own
-        # path through the gateway instead of riding on a session an earlier attempt made captive
-        def fresh():
-            return httpx.Client(base_url=base, timeout=30)
-
+        # One session (cookie jar + account) for N rounds, like a single attacker: once an oracle fires the session
+        # is captive and keeps being answered by its decoy, so it keeps "winning" on synthetic data. Every N rounds
+        # the attacker comes back clean (new account, no cookie): that session shows what production does now.
+        # A new session per attempt would be a botnet: each one takes a clone of the pool (see docs/limites.md).
         while not a.rounds or rnd < a.rounds:
             if a.max_seconds and time.monotonic() - t_start > a.max_seconds:
                 break
@@ -264,13 +268,16 @@ def main(argv=None) -> int:
             rnd += 1
             all_blocked = True
             truth = truth_now()
-            with fresh() as c:
-                token = legit_login(c, manifest)
+            if c is None or (a.fresh_every and (rnd - 1) % a.fresh_every == 0):
+                if c is not None:
+                    c.close()
+                c = httpx.Client(base_url=base, timeout=30)
+                token = attacker_account(c, rnd)
+                print(DIM + "-- sesión nueva: cuenta recién registrada, sin cookie --" + RESET, flush=True)
             for e in chosen:
                 t0 = time.monotonic()
                 try:
-                    with fresh() as c:
-                        res = e.run(c, token, truth)
+                    res = e.run(c, token, truth)
                 except httpx.HTTPError as err:
                     res = Attempt(False, False, 0, "error de red: %s" % err.__class__.__name__)
                 ms = (time.monotonic() - t0) * 1000
@@ -289,6 +296,9 @@ def main(argv=None) -> int:
             closed_streak = closed_streak + 1 if all_blocked else 0
     except KeyboardInterrupt:
         pass
+    finally:
+        if c is not None:
+            c.close()
     print(BOLD + "%d rondas, %d intentos con datos reales" % (rnd, leaks) + RESET)
     return 1 if leaks else 0
 

@@ -466,6 +466,12 @@ def prereqs(openemr: bool = False) -> list[dict]:
     ok, why = _tool(["git", "--version"])
     add("git", ok, True, why, "building and applying patches", "install git")
     ok, why = _tool([_claude_bin(), "--version"])
+    if ok:
+        try:
+            from patcher.claude_cli import identity
+            why = "%s; credentials: %s" % (why, identity())
+        except Exception:  # noqa: BLE001
+            pass
     add("claude CLI", ok, False, why, "LLM steps of immune init, automatic patches",
         "install Claude Code (https://claude.com/claude-code) and log in once with `claude`, or set CLAUDE_BIN; "
         "without it: `immune init --no-llm`, and incidents stop at the blocking rule")

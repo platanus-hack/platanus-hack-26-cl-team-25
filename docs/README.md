@@ -65,3 +65,4 @@ Sin README propio: `waf/` (WAF de detección; ver [arquitectura.md](arquitectura
 | [demo/respuestas/](demo/respuestas/README.md) | Listas de defectos plantados de las tres aplicaciones de demostración |
 | `docs/demo/dashboard/` | Capturas del panel |
 | `docs/demo/pitch.html`, `docs/demo/presentacion.html` | Material de presentación |
+| [demo/guion.md](demo/guion.md) | Guion de la demo, video de respaldo y respuestas a las preguntas difíciles del jurado |

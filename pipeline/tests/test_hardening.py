@@ -164,6 +164,30 @@ def test_verification_needs_the_gateways_confirmation_that_the_request_reached_p
     assert not ok and "still diverted" in detail
 
 
+def test_a_denial_for_want_of_a_free_clone_is_retried_not_judged(env, monkeypatch):
+    monkeypatch.setattr(verify.time, "sleep", lambda s: None)
+    admin = GatewayAdmin(env["cfg"].gateway_admin_url, "at")
+    real = verify._find_route
+    answers = [("rid-a", "deny", "no_clone"), ("rid-b", "deny", "no_clone")]
+
+    def find(cfg, session, path, since, deadline):
+        return answers.pop(0) if answers else real(cfg, session, path, since, deadline)
+    monkeypatch.setattr(verify, "_find_route", find)
+    ok, detail = _verify(env, admin)
+    assert ok and "forwarded to prod" in detail and not answers
+
+    # never a free clone: reported as not judged, after the configured tries
+    monkeypatch.setattr(verify, "_find_route", lambda *a: ("rid", "deny", "no_clone"))
+    ok, detail = _verify(env, admin)
+    assert not ok and "not verified, the code was not judged" in detail
+
+    # a denial decided by a verdict is not retried
+    calls = []
+    monkeypatch.setattr(verify, "_find_route", lambda *a: calls.append(1) or ("rid", "deny", "oracle"))
+    ok, detail = _verify(env, admin)
+    assert not ok and "still diverted" in detail and len(calls) == 1
+
+
 # ------------------------------------------------------------------ outcome when nothing contains the incident
 def test_failure_before_any_rule_is_not_reported_as_contained(env, events):
     p = make(env)

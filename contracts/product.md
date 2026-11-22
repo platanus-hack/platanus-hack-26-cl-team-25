@@ -277,6 +277,7 @@ environment, builds the images and links `bin/immune` into `~/.local/bin`; insta
 | `immune report` | `--project DIR`, `--json` | summary from the bus store and the recording: classes, routes, detonations, verdicts, oracles, incidents, what `enforce` would have done in observe mode | 0 |
 | `immune mode observe\|enforce` | `--project DIR` | rewrite `mode` in `config.yaml` and switch the running gateway | 0 |
 | `immune autopatch off\|pr\|merge` | `--project DIR` | rewrite `autopatch` in `config.yaml`; read by the pipeline at the start of each incident | 0 |
+| `immune rollback` | `--project DIR`, `--to RELEASE`, `--keep-autopatch` | fleet `/deploy` of the previous release (or RELEASE); `autopatch merge` -> `pr` unless `--keep-autopatch`; rules kept | 0; 1 deploy not completed |
 | `immune init` | `--project DIR` (default: current directory), `--yes`, `--no-llm`, `--prod-db PATH`, `--seed N` | analyse a project and write its `.immune/` | 0 `READY`; 1 `NEEDS ATTENTION` |
 | `immune doctor` | `--project DIR`, `--json`, `--only 1,2` | run the verification checks | 0 when all pass; 1 otherwise |
 | `immune doctor --prereqs` | `--json`, `--openemr` | check host prerequisites only; `--openemr` also requires `immune-sidecar:1` and the images of `examples/openemr/` | 0 when every required one is present |

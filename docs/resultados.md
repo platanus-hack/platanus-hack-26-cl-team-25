@@ -15,7 +15,8 @@ Cada resultado indica uno de tres niveles de respaldo:
 ## Advertencia sobre las cifras de tiempo
 
 Las mediciones de tiempo de las secciones 1 y 3 son del 2026-11-21. Son anteriores a las correcciones de la
-auditoría del 2026-11-22 y **no se volvieron a medir** después.
+auditoría del 2026-11-22. La sección 6 es una corrida posterior, de un solo ciclo de siete incidentes, con
+condiciones distintas.
 
 También son anteriores a tres cambios del código actual que afectan a esos tiempos: el canario de despliegue,
 que agrega hasta `CANARY_S` segundos (8 por defecto; 2 sin tráfico) antes del cambio de upstream; las reglas de
@@ -197,7 +198,45 @@ Fuente: [fuxa.md](fuxa.md). No hay mediciones. `immune fuxa demo` usa evidencia 
 registra la detección de un ataque real. Con datos: los tests de `immune/tests/test_fuxa.py`, que forman parte de
 la suite de la sección 2.
 
-## 6. Lo que no se midió
+## 6. Corrida con atacante y tráfico legítimo, posterior a la auditoría
+
+| | |
+|---|---|
+| Nivel | Con datos: `docs/demo/corrida-2026-11-22.json` (salida de `immune.metrics` y conteos de la grabación del gateway) y `docs/demo/corrida-2026-11-22-atacante.log` |
+| Fecha | 2026-11-22, después de las correcciones de la auditoría |
+| Máquina | La del demo (ARM64, 4 núcleos, compartida) |
+| Método | `deploy/record_demo.sh`: `immune reset`, tráfico legítimo a 3 requests por segundo (`sim.legit`) y el atacante de demostración (`sim.attacker`) hasta que los siete exploits quedaron bloqueados dos rondas seguidas |
+| Muestra | n = 7 incidentes, una sola corrida |
+
+Resultado: **7 de 7 incidentes parchados y verificados**, los 7 con `source: llm` y en el primer intento. El
+atacante hizo 56 rondas (392 intentos) y **ninguno obtuvo datos de producción**: según la verificación contra la
+base y el contenedor de producción, cada intento fue bloqueado o respondido por un clon con datos sintéticos.
+
+Tiempos desde `incident.opened`, en segundos (misma definición que la sección 1):
+
+| Hito | Mediana | Mínimo | Máximo |
+|---|---|---|---|
+| Regla activa en el gateway | **4.3** | 2.4 | 7.0 |
+| El modelo devuelve un diff | 13.3 | 11.1 | 18.1 |
+| Validaciones pasadas y merge | 38.9 | 27.8 | 60.3 |
+| Release parchado atendiendo producción | **45.2** | 30.4 | 64.6 |
+| Verificado a través del gateway | **78.5** | 63.4 | 100.4 |
+
+Daño colateral sobre el tráfico legítimo, medido en la grabación del gateway: de 4551 requests de clientes de la
+semilla, **82 recibieron un 404**. 74 fueron pedidos de un cliente sobre **sus propios** pedidos creados después
+de la semilla, mientras estaba activa la regla de un IDOR (ver [limites.md](limites.md#gateway)); 8, requests
+sospechosos sin un clon libre para detonarlos. El generador de tráfico legítimo contó 31 violaciones.
+
+Cómo leerlo:
+
+- Son los mismos siete defectos plantados de la sección 1, con el mismo modelo de amenaza. Esta corrida no
+  demuestra generalización; muestra que el ciclo sigue funcionando después de la auditoría, con carga legítima y
+  un atacante activo al mismo tiempo.
+- Los tiempos son más altos que los de la sección 1 porque la máquina atendía también al atacante, al tráfico
+  legítimo y a la grabación del video. No son comparables uno a uno.
+- Una sola corrida: no hay dispersión entre corridas.
+
+## 7. Lo que no se midió
 
 - Latencia que agrega la detonación a un request sospechoso, y latencia del gateway para un request limpio.
 - Latencia que agrega el WAF de detección a cada request limpio, y su tasa de anomalías sobre tráfico legítimo.

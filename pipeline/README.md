@@ -93,6 +93,7 @@ Environment variables read by `config.py` (defaults in parentheses):
 | `PIPELINE_MAX_ATTEMPTS` (3) | Patch attempts per incident |
 | `PIPELINE_PATCHER_TIMEOUT_S` (600) | Limit of one `propose` call |
 | `PIPELINE_HTTP_TIMEOUT_S` (5), `PIPELINE_DEPLOY_TIMEOUT_S` (300), `PIPELINE_VERIFY_WAIT_S` (8) | HTTP, deploy and verification waits |
+| `PIPELINE_VERIFY_CAPACITY_RETRIES` (4), `PIPELINE_VERIFY_CAPACITY_WAIT_S` (3) | The gateway check is repeated this many times, this many seconds apart, while the gateway denies it for want of a free clone (`verdict: no_clone`); that denial says nothing about the code. After the last try the result is "not verified, the code was not judged" |
 | `PIPELINE_RULE_TTL_S` (unset) | `ttl_s` given to a rule that has none. Unset or `0`: `ttl_s` is `null` and the rule does not expire |
 | `PIPELINE_REOPEN_COOLDOWN_S` (300) | Wait before a closed incident can reopen (see "Intake and deduplication") |
 | `PIPELINE_RETRY_COOLDOWN_S` (60), `PIPELINE_MAX_RETRIES` (5) | Retry of transient closes |

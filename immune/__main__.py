@@ -4,6 +4,7 @@
     immune report [--project DIR] [--json]
     immune mode observe|enforce [--project DIR]
     immune autopatch off|pr|merge [--project DIR]
+    immune rollback [--to RELEASE] [--keep-autopatch] [--project DIR]
     immune init | doctor | deploy ...      (modules immune.init, immune.doctor, immune.deploycmd)
     immune anticipate ...                  (alias of python -m anticipate)
     immune fuxa ...                        (FUXA v1.2.9 demo)
@@ -731,6 +732,54 @@ def cmd_set(cfg: icfg.Config, key: str, value: str) -> int:
     return 0
 
 
+def previous_release(cfg: icfg.Config, current: str) -> str | None:
+    """The release built just before `current` (release directories by mtime); t0 when nothing else is left."""
+    root = cfg.rt("releases")
+    try:
+        names = [n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n))]
+    except OSError:
+        return None
+    names.sort(key=lambda n: os.path.getmtime(os.path.join(root, n)))
+    if current in names:
+        older = names[:names.index(current)]
+        return older[-1] if older else None
+    others = [n for n in names if n != current]
+    return others[-1] if others else None
+
+
+def cmd_rollback(cfg: icfg.Config, to: str | None, keep_autopatch: bool) -> int:
+    """Human override: put an earlier release back in production through the same blue/green path, and stop the
+    pipeline from merging on its own (autopatch merge -> pr) unless --keep-autopatch. Active rules stay."""
+    tok = stack_secrets(cfg)["ADMIN_TOKEN"]
+    base = "http://127.0.0.1:%d" % cfg.ports["fleet"]
+    try:
+        st = http("GET", base + "/state", token=tok, timeout=5)
+    except (urllib.error.URLError, OSError) as e:
+        raise CliError("fleet not reachable (%s): is the stack up?" % getattr(e, "reason", e))
+    current = str((st.get("prod") or {}).get("release") or "")
+    target = to or previous_release(cfg, current)
+    if not target:
+        raise CliError("no earlier release than %r under %s; pass --to RELEASE" % (current, cfg.rt("releases")))
+    if target == current:
+        say("release %s is already in production" % current)
+        return 0
+    if not os.path.isdir(cfg.release_dir(target)):
+        raise CliError("release %r not found under %s" % (target, cfg.rt("releases")))
+    if not keep_autopatch and cfg.autopatch == "merge":
+        cmd_set(cfg, "autopatch", "pr")
+    say("rolling back production %s -> %s (blue/green, with health check and watch)" % (current, target))
+    try:
+        res = http("POST", base + "/deploy", {"release": target}, tok, timeout=600)
+    except urllib.error.HTTPError as e:
+        raise CliError("fleet refused the deploy: %s %s" % (e.code, e.read()[:300].decode("utf-8", "replace")))
+    say(json.dumps(res))
+    if not res.get("ok"):
+        say("rollback did not complete; production stays on %s" % res.get("release"))
+        return 1
+    say("production on %s. Containment rules stay active; `immune status` lists them." % target)
+    return 0
+
+
 def dispatch(cmd: str, argv: list) -> int:
     if cmd == "anticipate":
         try:
@@ -782,6 +831,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("autopatch")
     p.add_argument("value", choices=icfg.AUTOPATCH)
     p.add_argument("--project", default=argparse.SUPPRESS)
+    p = sub.add_parser("rollback", help="put the previous release (or --to RELEASE) back in production")
+    p.add_argument("--to", default=None, help="release to put back (default: the one built before the current one)")
+    p.add_argument("--keep-autopatch", action="store_true", help="do not switch autopatch merge to pr")
+    p.add_argument("--project", default=argparse.SUPPRESS)
     for c in list(DISPATCH) + ["anticipate"]:
         sub.add_parser(c, add_help=False)
     a = ap.parse_args(argv)
@@ -800,6 +853,8 @@ def main(argv=None) -> int:
             return cmd_report(cfg, a.json)
         if a.cmd in ("mode", "autopatch"):
             return cmd_set(cfg, a.cmd, a.value)
+        if a.cmd == "rollback":
+            return cmd_rollback(cfg, a.to, a.keep_autopatch)
     except icfg.ConfigError as e:
         print("immune: %s" % e, file=sys.stderr)
         return 2

@@ -32,10 +32,20 @@ construido, parcial, no construido, fuera de alcance.
   el request a prod. Lo mismo ocurre cuando no hay clon libre y el request no tiene señal fuerte.
 - **Los clones corren la semilla.** Un objeto creado en prod después de la semilla da 404 en el clon. Un IDOR
   sobre ese objeto obtiene un veredicto `inconclusive` y puede llegar a prod.
+- **Una regla de IDOR niega a los dueños legítimos de objetos nuevos.** La regla de un IDOR cubre todos los
+  valores del parámetro y fuerza la detonación. Un objeto creado en prod después de la semilla no existe en el
+  clon, que responde 404; el veredicto `inconclusive` con una regla activa termina en 404 para el cliente, aunque
+  pida un objeto suyo. Dura lo que la regla: hasta que el parche se verifica. Con `autopatch: pr`, hasta que una
+  persona mergea. En la corrida del 2026-11-22 fueron 74 requests legítimos en unos 70 segundos por regla
+  ([resultados.md](resultados.md)).
 - **Objetos fuera del manifiesto.** La comprobación de dueño para identidades de la semilla
   (`owner_scoped:mismatch`) solo marca objetos que el manifiesto atribuye a otro. Los que no figuran no se marcan.
 - **Confianza binaria.** Una identidad es confiable si su uid es de la semilla. No hay gradación por antigüedad,
   MFA ni pagos. Una cuenta real comprometida se trata como confiable: nunca queda cautiva.
+- **Evidencia de una identidad confiable: se niega, no se aprende.** Si una cuenta de la semilla pide un objeto
+  ajeno o un canario, el gateway responde 404 sin detonar (`evidence` en `gateway/core.py`). No hay fuga, pero
+  tampoco oráculo, incidente, regla ni parche: el defecto sigue en el código hasta que lo ejerza una identidad no
+  confiable.
 - **`gwsid` no está firmada.** La cookie la aporta el cliente. El cautiverio de un cliente anónimo depende de que
   conserve la cookie; si la descarta, vuelve a empezar como sesión nueva.
 - **Regla incorporada de traversal.** Solo reconoce segmentos `..`, en sus formas codificadas conocidas.
@@ -70,6 +80,13 @@ construido, parcial, no construido, fuera de alcance.
   plantadas.
 - **Sesiones cautivas.** Tope global, desalojo de la más antigua y vencimiento por inactividad. Sin tope por
   origen, pausa ni bajada a disco (no construido).
+- **Pool agotado por muchas sesiones atacantes.** Cada sesión cautiva toma un clon del pool (4 por defecto). Con
+  un ataque que abre una sesión nueva por intento, el pool se vacía: lo que coincide con una regla o tiene señal
+  fuerte se niega con 404 (falla cerrado, también para un cliente legítimo con ese mismo valor) y lo demás va a
+  prod sin detonar. La verificación del pipeline a través del gateway reintenta cuando la negación es por falta de clon
+  (`PIPELINE_VERIFY_CAPACITY_RETRIES`); si el pool sigue lleno, el incidente se cierra como `rule_only` aunque el
+  parche esté desplegado, con el detalle "the code was not judged". Observado una vez el 2026-11-22 con `sim/attacker.py` en su
+  versión de una sesión por intento: 39 negaciones `no_clone` y 3 incidentes `rule_only` en 3 minutos.
 - **Request truncado.** Si el cliente se desconecta a mitad del cuerpo, el request se descarta sin registrarse.
 - **Eventos de tráfico.** Si el bus no responde, los eventos `request.*` del gateway se pierden. Sus demás eventos
   se reintentan durante 120 segundos, con un máximo de 2000 retenidos. Los eventos de `fleet` no se reintentan.
