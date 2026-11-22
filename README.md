@@ -1,5 +1,7 @@
 # Immune · team-25 · Platanus Hack 26: Santiago ft. Buk
 
+**Current project logo:** project-logo.png
+
 <img src="./project-logo.png" alt="Logo de Immune" width="200" />
 
 Track: 🛡️ AI Safety
