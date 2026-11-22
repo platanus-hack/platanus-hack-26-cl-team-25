@@ -77,3 +77,35 @@ def test_verdict_inconclusive_on_error_status():
     assert verdict_of(404, []) == wire.VERDICT_INCONCLUSIVE
     assert verdict_of(500, []) == wire.VERDICT_INCONCLUSIVE
     assert verdict_of(200, []) == wire.VERDICT_CLEAN
+
+
+# ---- where in the app's code: the servlet that handled the request (sidecar/servlets.py) ----
+def _servlet_index(tmp_path):
+    from sidecar import servlets
+    from sidecar.tests.test_servlets import make_class
+    cdir = tmp_path / "classes" / "com" / "acme"
+    cdir.mkdir(parents=True)
+    (cdir / "HttpDataSourceServlet.class").write_bytes(
+        make_class("HttpDataSourceServlet.java", {"doGet": [79], "doPost": [84]}, "com/acme/HttpDataSourceServlet"))
+    (tmp_path / "web.xml").write_text(
+        "<web-app><servlet><servlet-name>h</servlet-name><servlet-class>com.acme.HttpDataSourceServlet</servlet-class>"
+        "</servlet><servlet-mapping><servlet-name>h</servlet-name><url-pattern>/httpds</url-pattern>"
+        "</servlet-mapping></web-app>")
+    return servlets.ServletIndex.load(str(tmp_path / "web.xml"), str(tmp_path / "classes"), context="/ScadaBR")
+
+
+async def test_oracle_event_names_the_servlet_that_handled_the_request(tmp_path):
+    sc, _, pushed = make(b"")
+    sc.cfg.servlets = _servlet_index(tmp_path)
+    await sc.handle(scope("/ScadaBR/httpds", b"__device=gw1&tank_level=777", headers=[("x-imm-rid", "r1")]), b"")
+    import json
+    evidence = json.loads(pushed[0][1])
+    assert evidence["events"][0]["stack"] == [
+        {"file": "src/com/acme/HttpDataSourceServlet.java", "line": 79, "func": "doGet"}]
+
+
+async def test_stack_stays_empty_without_a_servlet_index():
+    sc, _, pushed = make(b"")
+    await sc.handle(scope("/ScadaBR/httpds", b"__device=gw1&tank_level=777", headers=[("x-imm-rid", "r1")]), b"")
+    import json
+    assert json.loads(pushed[0][1])["events"][0]["stack"] == []

@@ -29,6 +29,12 @@ SYSCALLS = "openat,openat2,open,creat,execve,execveat,connect,sendto,sendmsg,for
 BASE_ARGS = ["strace", "-f", "-y", "-qq", "-s", "4096", "-e", "signal=none", "-e", f"trace={SYSCALLS}"]
 
 
+def base_args(stack: int = 0) -> list:
+    """strace arguments; ``stack`` > 0 adds the native call stack of every traced syscall (-k), at most that many
+    frames (sidecar/nativestack.py turns them into the evidence ``stack``)."""
+    return BASE_ARGS + (["-k", f"--stack-trace-frame-limit={int(stack)}"] if stack else [])
+
+
 def mntns(pid) -> str | None:
     try:
         return os.readlink(f"/proc/{pid}/ns/mnt")
@@ -61,20 +67,21 @@ def traced(pid: int) -> bool:
     return False
 
 
-def docker_cmd(container: str, image: str, name: str, label: str = "") -> list:
+def docker_cmd(container: str, image: str, name: str, label: str = "", stack: int = 0) -> list:
     cmd = ["docker", "run", "--rm", "--name", name, "--pid=container:" + container, "--network", "none",
            "--cap-drop", "ALL", "--cap-add", "SYS_PTRACE", "--cap-add", "KILL"]
     if label:
         cmd += ["--label", label]
     # no -qq: the "attached" message is how we know the tracer is in place
-    return cmd + [image] + [a for a in BASE_ARGS if a != "-qq"] + ["-p", "1"]
+    return cmd + [image] + [a for a in base_args(stack) if a != "-qq"] + ["-p", "1"]
 
 
 class Tracer:
     def __init__(self, on_obs, mode: str = "attach", command: list[str] | None = None, anchor: int | None = None,
                  seccomp: bool = True, container: str = "", image: str = "immune-strace:1", label: str = "",
-                 attempts: bool = False, on_attach=None):
+                 attempts: bool = False, on_attach=None, stack: int = 0):
         self.on_obs = on_obs
+        self.stack = stack                  # > 0: strace -k with this frame limit (native stacks for the evidence)
         self.container, self.image, self.label = container, image, label
         self.name = container + "-strace"
         self.attempts = attempts            # failed opens are observations too (protected-path rule)
@@ -125,7 +132,7 @@ class Tracer:
     def _spawn_docker(self):
         subprocess.run(["docker", "rm", "-f", self.name], capture_output=True)
         self.attached.clear()
-        self.proc = subprocess.Popen(docker_cmd(self.container, self.image, self.name, self.label),
+        self.proc = subprocess.Popen(docker_cmd(self.container, self.image, self.name, self.label, self.stack),
                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding="utf-8", errors="surrogateescape")
 
@@ -187,9 +194,9 @@ class Tracer:
             if not self.pids:
                 raise RuntimeError("no app process found in the shared PID namespace (run with --pid container:<app>)")
             self.root_pid = self.pids[0]
-            args = BASE_ARGS + ["-o", out] + [x for p in self.pids for x in ("-p", str(p))]
+            args = base_args(self.stack) + ["-o", out] + [x for p in self.pids for x in ("-p", str(p))]
         else:
-            args = BASE_ARGS + (["--seccomp-bpf"] if self.seccomp else []) + ["-o", out, "--"] + self.command
+            args = base_args(self.stack) + (["--seccomp-bpf"] if self.seccomp else []) + ["-o", out, "--"] + self.command
         log.info("starting tracer: %s", " ".join(args))
         self.proc = subprocess.Popen(args, pass_fds=(wfd,), stdin=subprocess.DEVNULL)
         os.close(wfd)

@@ -30,6 +30,7 @@ from urllib.parse import parse_qsl
 import httpx
 
 from immune_contracts import wire
+from sidecar import servlets
 
 log = logging.getLogger("sidecar")
 
@@ -48,6 +49,7 @@ class Config:
     collector_url: str = ""
     release: str = "1.2"
     timeout_s: float = 15.0
+    servlets: "servlets.ServletIndex | None" = None   # entry point of a request, for the evidence stack
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -56,10 +58,16 @@ class Config:
         if path:
             with open(path) as f:
                 manifest = json.load(f)
+        # where in the app's code: WEB-INF/web.xml + WEB-INF/classes of the shadow's webapp (copied out by the lab)
+        index = None
+        if env.get("HTTPDS_WEB_XML") and env.get("HTTPDS_CLASSES"):
+            index = servlets.ServletIndex.load(env["HTTPDS_WEB_XML"], env["HTTPDS_CLASSES"],
+                                               context=env.get("HTTPDS_CONTEXT", ""),
+                                               src_root=env.get("HTTPDS_SRC_ROOT", "src"))
         return cls(upstream=env.get("SHADOW_UPSTREAM", "127.0.0.1:8080"), manifest=manifest,
                    clone_id=env.get("CLONE_ID", "sidecar-0"), clone_key=env.get("CLONE_KEY", ""),
                    collector_url=env.get("COLLECTOR_URL", "").rstrip("/"), release=env.get("RELEASE", "1.2"),
-                   timeout_s=float(env.get("SIDECAR_TIMEOUT_S", "15")))
+                   timeout_s=float(env.get("SIDECAR_TIMEOUT_S", "15")), servlets=index)
 
 
 def consumed_points(query: str, body: bytes, manifest: dict) -> list:
@@ -163,7 +171,8 @@ class Sidecar:
                         "detail": {"route": raw_path, "consumed": hits,
                                    "observed": "data point value written by a request with no established identity",
                                    "expected": "the HTTP Data Source receiver requires an authenticated device"},
-                        "stack": []})
+                        # the servlet that handled the request (static: web.xml + the compiled class's line table)
+                        "stack": self.cfg.servlets.stack(scope["method"], raw_path) if self.cfg.servlets else []})
             verdict = verdict_of(status, events)
             if verdict == wire.VERDICT_ORACLE:
                 await self._push({

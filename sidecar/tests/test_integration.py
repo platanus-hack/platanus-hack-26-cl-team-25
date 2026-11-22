@@ -230,6 +230,31 @@ def test_c_file_oracle(cstack):
     assert get(cstack, "/safe-download", {"name": "../../etc/hostname"}).headers[wire.H_VERDICT] == "inconclusive"
 
 
+@pytest.fixture(scope="module")
+def cdynstack():
+    s = Stack(tag="d" + os.urandom(2).hex(), app="cdyn").up()
+    yield s
+    print(s.logs(s.sc)[-3000:])
+    s.down()
+
+
+def test_c_file_event_carries_the_native_stack_of_the_sink(cdynstack):
+    """The compiled app is observed from outside, yet the evidence says where in its code the file was opened:
+    strace -k frames + addr2line (the demo is built with -g and linked dynamically: strace's unwinder loses the
+    frames of a static glibc), mapped back to the repo path."""
+    cdynstack.clear_evidence()
+    r = get(cdynstack, "/download", {"name": "../../etc/hostname"}, rid="c-stack")
+    assert r.headers[wire.H_VERDICT] == "oracle"
+    ev = next(e for e in last_evidence(cdynstack)["events"] if e["oracle"] == "file")
+    stack = ev["stack"]
+    assert stack, "native_stack is on: the file event must carry frames"
+    sink = stack[-1]
+    # fopen() in serve_file(), called from handle() (the compiler may inline the former into the latter)
+    assert sink["file"] == "sidecar/examples/c/app.c" and sink["func"] in ("serve_file", "handle")
+    assert 162 <= sink["line"] <= 163
+    assert all(set(f) == {"file", "line", "func"} and isinstance(f["line"], int) for f in stack)
+
+
 def test_c_owner_oracle_via_identity_command(cstack):
     assert get(cstack, "/notes/2", uid=1).headers[wire.H_VERDICT] == "oracle"
     assert get(cstack, "/notes/1", uid=1).headers[wire.H_VERDICT] == "clean"

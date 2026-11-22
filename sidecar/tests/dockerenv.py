@@ -159,15 +159,18 @@ class Stack:
         if self.app_kind == "node":
             self._run(self.app, ["--network", self.net, "--read-only", "-v", f"{EX}/node:/app:ro", "-w", "/app", *env,
                                  "node:22-alpine", "node", "/app/server.js"])
-        elif self.app_kind == "c":
+        elif self.app_kind in ("c", "cdyn"):
             cbin = os.path.join(self.tmp, "cbin")
             os.makedirs(cbin, exist_ok=True)
-            subprocess.run([os.path.join(EX, "c", "build.sh"), cbin], check=True, capture_output=True)
+            env_ = {**os.environ, **({"DYNAMIC": "1"} if self.app_kind == "cdyn" else {})}
+            subprocess.run([os.path.join(EX, "c", "build.sh"), cbin], check=True, capture_output=True, env=env_)
             os.chmod(cbin, 0o755)
-            # a static binary: any image works; node:22-alpine is used only because it is present
+            # static binary: any image works (node:22-alpine is used only because it is present); the dynamic
+            # variant needs glibc, which the sidecar image has
+            image = SIDECAR_IMAGE if self.app_kind == "cdyn" else "node:22-alpine"
             self._run(self.app, ["--network", self.net, "--read-only", "-v", f"{cbin}:/cbin:ro",
                                  "-v", f"{EX}/c/static:/app/static:ro", "-e", "APP_STATIC=/app/static",
-                                 "-e", "PORT=3000", "-e", "PGUSER=capp", "node:22-alpine", "/cbin/app"])
+                                 "-e", "PORT=3000", "-e", "PGUSER=capp", image, "/cbin/app"])
         else:
             raise ValueError(self.app_kind)
 
@@ -178,11 +181,13 @@ class Stack:
                "postgres": {"listen": "127.0.0.1:5432", "upstream": f"{self.pg}:5432",
                             "admin_url": f"postgres://postgres:pw@{self.pg}:5432/postgres",
                             "database": "clone", "template": "seed"}}
-        if self.app_kind == "c":
+        if self.app_kind in ("c", "cdyn"):
             del cfg["profile"]
             cfg["identity_command"] = 'echo "x-user: $IMM_UID"'
             cfg["public_paths"] = ["/health", "/search", "/safe-search", "/download", "/safe-download"]
             cfg["source_dirs"] = []
+            # native call stacks in the evidence; the demo is built from /src (see examples/c/build.sh)
+            cfg["native_stack"] = {"frame_limit": 48, "path_map": [["/src", "sidecar/examples/c"]]}
         if self.grace_ms is not None:
             cfg["grace_ms"] = self.grace_ms
         return cfg

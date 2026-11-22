@@ -12,7 +12,7 @@ from outside the process:
 | `net` | strace `connect/sendto/sendmsg` | an attempt to a non-loopback address, any DNS query (port 53), or a unix socket not seen in warm-up |
 | `owner` | response body | marker of another owner (same rule as `shadow.core.Engine.owner_events`) |
 
-Evidence `stack` is always `[]` (no frames from outside); `detail` is `{statement,input,param,location,reason}`,
+Evidence `stack` is `[]` unless a source of frames is configured (see *Where in the app's code* below); `detail` is `{statement,input,param,location,reason}`,
 `{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
 
 One sidecar, three placements (`mode`), and the pieces around it:
@@ -38,6 +38,28 @@ Added rules (all optional, config keys in `config.py`):
   token is dropped: it cannot be told from an identifier the app wrote (`?sort=name` in `ORDER BY name`).
 - Structure rule: statements whose fingerprint is not in the baseline fire once a request has been learnt
   (`sql_baseline` persists it). Covers input that never appears verbatim (base64, second order).
+
+## Where in the app's code (evidence `stack`)
+
+The sidecar sees the app from outside, so by default evidence carries no frames. Three optional sources fill the
+evidence `stack` (`[{file, line, func}]`, outermost first, the innermost app frame last = the incident's sink,
+`pipeline/incident.py`); none of them can change a verdict, a failure just leaves a shorter or empty stack:
+
+| Source | Apps | How | Config |
+|---|---|---|---|
+| `native_stack` (`nativestack.py`) | compiled: C, C++, Rust, Go with symbols | `strace -k` prints the native call stack of every traced syscall (`file`/`proc`/`net` events, and the open behind a response marker); frames of libc, the loader and interpreters/VMs are dropped; `addr2line` gives `file:line` when the binary has debug info (`-g`), otherwise the frame keeps its function name. strace reports the ELF *file offset*, so it is mapped through the binary's `PT_LOAD` segments first (PIE: identical; non-PIE and static: `p_vaddr - p_offset`) | `native_stack: {frame_limit, include, exclude, path_map, addr2line}` |
+| servlet entry point (`servlets.py`) | Java servlets on Tomcat | static, not a runtime stack: `WEB-INF/web.xml` says which servlet class serves the URL (exact, longest `/*` prefix, `*.ext`, default, Servlet spec 12.1) and the compiled class's `SourceFile` + `LineNumberTable` give the file and the first line of the HTTP entry method (`doGet`/`doPost`/...). A servlet that is not in `WEB-INF/classes` (a library's) gives no frame | `HTTPDS_WEB_XML`, `HTTPDS_CLASSES`, `HTTPDS_CONTEXT`, `HTTPDS_SRC_ROOT` (`sidecar/httpds`, the ScadaBR lab) |
+| `tracer` (`phptrace.py`) | PHP | Xdebug function traces of a shadow-only image | `tracer: {kind: php-xdebug, dir}` |
+
+`path_map` turns the build path DWARF recorded (`/src/app.c`) into the repo path the patcher edits
+(`sidecar/examples/c/app.c`). The image needs `addr2line` (`binutils`, in `deploy/Dockerfile.sidecar`).
+
+Limits, measured: `strace -k` unwinds **dynamically** linked glibc binaries fully, but loses the frames of a **static**
+glibc (the demo `examples/c` built `-static` yields a single `__internal_syscall_cancel` frame, which is dropped, so
+`stack` stays `[]`: build the shadow image dynamically, `DYNAMIC=1 sidecar/examples/c/build.sh`). In `mode: docker`
+the sidecar cannot read the app's binaries, so frames keep function names but have no line. A stripped binary has no
+function names either. `strace -k` adds the cost of unwinding to every traced syscall. A JVM has no native frames
+worth reading: the servlet entry point names the file the handler lives in, not the line of the sink inside it.
 
 ## How it works
 

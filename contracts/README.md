@@ -145,7 +145,7 @@ Oracles (kinds in `wire.ORACLES`):
 | `net` | an outbound connection is made during a request | the wrapper's own evidence push |
 | `owner` | the response body contains a marker of an owner ≠ requester, requester is not admin, path not in `public_paths()` | login/register, public data |
 
-Each event: `{"oracle": kind, "detail": {...}, "stack": [{"file": "<path relative to the release>", "line": n, "func": "..."}]}` with only frames inside the victim package. `detail` for `sql`: `{statement, input, param}`; `file`: `{path, realpath}`; `owner`: `{marker_owner, requester}`.
+Each event: `{"oracle": kind, "detail": {...}, "stack": [{"file": "<path relative to the release>", "line": n, "func": "..."}]}` with only frames inside the victim package. Out-of-process oracles (`sidecar/`) fill `stack` when a frame source is configured (native `strace -k` frames resolved with `addr2line`, the servlet entry point of a Java app, PHP Xdebug traces: `sidecar/README.md` *Where in the app's code*); without one it is `[]`. `detail` for `sql`: `{statement, input, param}`; `file`: `{path, realpath}`; `owner`: `{marker_owner, requester}`.
 
 In-process harness (used by the pipeline runner as the judge):
 
