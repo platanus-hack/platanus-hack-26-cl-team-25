@@ -1,4 +1,4 @@
-"""python -m sidecar.marker --port 3902 : oracle sidecar in front of one shadow app (env: see sidecar/core.py Config)."""
+"""python -m sidecar.marker --port 3902 : oracle sidecar in front of one shadow app (env: see sidecar/marker/core.py Config)."""
 from __future__ import annotations
 
 import argparse

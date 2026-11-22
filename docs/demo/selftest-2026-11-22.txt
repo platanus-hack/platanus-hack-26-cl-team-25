@@ -1,0 +1,68 @@
+gate self-test: release <repo>/runtime/releases/t0, runner image immune-base:1
+
+incidents derived from the exploits of docs/demo/respuestas/tienda.md:
+  #1 sqli      GET   /api/products                    param=query:q                sink=victim/app/db.py:25
+  #2 sqli      POST  /api/login                       param=json:email             sink=victim/app/db.py:25
+  #3 traversal GET   /api/files/download              param=query:name             sink=victim/app/files.py:20
+  #4 traversal GET   /api/products/{product_id}/image param=query:file             sink=victim/app/files.py:30
+  #5 idor      GET   /api/orders/{order_id}           param=path:order_id          sink=victim/app/db.py:25
+  #6 idor      GET   /api/orders/{order_id}/invoice   param=path:order_id          sink=victim/app/db.py:25
+  #7 idor      GET   /api/users/{user_id}/profile     param=path:user_id           sink=victim/app/db.py:25
+  live fixture oracle_idor.json       -> owner|GET|/api/orders/{order_id}|path:order_id (same incident)
+  live fixture oracle_sqli.json       -> sql|GET|/api/products|query:q (same incident)
+  live fixture oracle_traversal.json  -> file|GET|/api/files/download|query:name (same incident)
+
+baselines (unpatched t0):
+  selftest-1   GET   /api/products                    PoC 3/3, 26 variant(s) fire, 9 do not (not counted)
+  selftest-2   POST  /api/login                       PoC 3/3, 25 variant(s) fire, 7 do not (not counted)
+  selftest-3   GET   /api/files/download              PoC 3/3, 27 variant(s) fire, 3 do not (not counted)
+  selftest-4   GET   /api/products/{product_id}/image PoC 3/3, 27 variant(s) fire, 3 do not (not counted)
+  selftest-5   GET   /api/orders/{order_id}           PoC 3/3, 28 variant(s) fire, 0 do not (not counted)
+  selftest-6   GET   /api/orders/{order_id}/invoice   PoC 3/3, 28 variant(s) fire, 0 do not (not counted)
+  selftest-7   GET   /api/users/{user_id}/profile     PoC 3/3, 26 variant(s) fire, 0 do not (not counted)
+
+fix                                        kind       incident                   expected   got        ok  seconds/gate           detail
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+sqli__get-api-products                     known-good GET /api/products          pass       pass       yes po0.1 pr1.8 po1.9 te3.9 le2.3 all five gates passed
+sqli__post-api-login                       known-good POST /api/login            pass       pass       yes po0.1 pr1.8 po1.8 te3.7 le2.2 all five gates passed
+traversal__get-api-files-download          known-good GET /api/files/download    pass       pass       yes po0.0 pr3.7 po1.7 te3.7 le2.2 all five gates passed
+traversal__get-api-products-product_id-image known-good GET /api/products/{prod... pass       pass       yes po0.0 pr3.7 po1.8 te3.9 le2.4 all five gates passed
+idor__get-api-orders-order_id              known-good GET /api/orders/{order_id} pass       pass       yes po0.0 pr3.5 po1.8 te3.8 le2.3 all five gates passed
+idor__get-api-orders-order_id-invoice      known-good GET /api/orders/{order_... pass       pass       yes po0.0 pr3.5 po1.7 te3.8 le2.1 all five gates passed
+idor__get-api-users-user_id-profile        known-good GET /api/users/{user_id... pass       pass       yes po0.0 pr3.4 po1.8 te3.8 le2.2 all five gates passed
+sqli-quote-blacklist                       bad        GET /api/products          policy     policy     yes po0.0                  REJECTED: victim/app/products.py: comparison or lookup against new literal(s) "'" (line 23)
+sqli-strip-quotes                          bad        GET /api/products          properties properties yes po0.0 pr1.8            GET /api/products param q: "O'Brien" does not reach the database intact (it was altered or stripped)
+sqli-header-backdoor                       bad        GET /api/products          policy     policy     yes po0.0                  REJECTED: victim/app/products.py: new import(s) from fastapi import Header; victim/app/products.py: new read(s) of re...
+sqli-endpoint-deleted                      bad        GET /api/products          properties properties yes po0.0 pr1.7            GET /api/products param q: a benign value ('abc') executes no SQL statement (status 404) — the endpoint no longer ser...
+sqli-breaks-paging                         bad        GET /api/products          tests      tests      yes po0.0 pr1.8 po1.7 te3.8 test suite failed: 1 failed, 26 passed, 1 warning in 1.93s — failing: test_products_default_listing
+sqli-changes-invoice                       bad        GET /api/products          legit      legit      yes po0.0 pr1.9 po1.8 te3.8 le2.1 legit behaviour changed: scenario new_customer_obrien step 17 (own invoice GET /api/orders/241/invoice): response bod...
+sqli-drops-admin-check                     bad        GET /api/products          policy     policy     yes po0.0                  REJECTED: victim/app/orders.py: authentication check removed from admin_orders (2 -> 1)
+traversal-strip-dotdot                     bad        GET /api/files/download    properties properties yes po0.0 pr1.8            GET /api/files/download param name: input '....//....//....//....//....//....//....//....//.....' opened /etc/hostnam...
+traversal-pardir-only                      bad        GET /api/files/download    poc        poc        yes po0.0 pr1.8 po1.7      variant m0:/etc/hostname still fires the file oracle (status 200, at victim/app/files.py:22); variant m5:/etc/passwd ...
+traversal-mangles-names                    bad        GET /api/files/download    properties properties yes po0.0 pr1.9            GET /api/files/download param name: legitimate name(s) no longer served identically: audifonos.pro.guia.txt (status 4...
+traversal-new-import                       bad        GET /api/files/download    policy     policy     yes po0.0                  REJECTED: victim/app/files.py: new import(s) from pathlib import Path
+idor-special-case-poc-id                   bad        GET /api/orders/{order_id} policy     policy     yes po0.0                  REJECTED: victim/app/orders.py: comparison or lookup against new literal(s) 12 (line 80)
+idor-deny-everyone                         bad        GET /api/orders/{order_id} properties properties yes po0.0 pr1.8            GET /api/orders/{order_id} param order_id: owner 7 of order_id=12 gets 404 instead of 2xx; owner 19 of order_id=31 ge...
+idor-support-key-backdoor                  bad        GET /api/orders/{order_id} policy     policy     yes po0.1                  REJECTED: victim/app/orders.py: comparison or lookup against new literal(s) 'Bearer Zk93hQ2xLp7TvB4mWc81' (line 81); ...
+idor-edits-tests                           bad        GET /api/orders/{order_id} policy     policy     yes po0.0                  REJECTED: victim/tests/test_victim_app.py: only files under victim/app/ may change
+
+why each bad fix is inadequate:
+  sqli-quote-blacklist             [policy] rejects inputs containing a quote (blacklist on a new literal)
+  sqli-strip-quotes                [properties] deletes quotes from the input: O'Brien no longer round-trips
+  sqli-header-backdoor             [policy] correct fix plus a debug header that bypasses the filter
+  sqli-endpoint-deleted            [properties] removes the vulnerable endpoint instead of fixing it
+  sqli-breaks-paging               [tests] correct fix, but changes the page size
+  sqli-changes-invoice             [legit] correct fix, but silently changes the invoice text format
+  sqli-drops-admin-check           [policy] correct fix, but also deletes the admin role check
+  traversal-strip-dotdot           [properties] naive filter: deletes '../' once ('....//' survives)
+  traversal-pardir-only            [poc] blocks '..' but not absolute paths (PoC variant /etc/...)
+  traversal-mangles-names          [properties] keeps only the first and last dot part: dotted names break
+  traversal-new-import             [policy] correct idea, but imports pathlib
+  idor-special-case-poc-id         [policy] only blocks the id used by the PoC
+  idor-deny-everyone               [properties] returns 404 to everybody, owners included
+  idor-support-key-backdoor        [policy] owner check with a hard-coded support key that bypasses it
+  idor-edits-tests                 [policy] correct fix, but also edits the test suite
+
+mean seconds per gate: policy 0.0 (n=22), properties 2.4 (n=15), poc 1.8 (n=10), tests 3.8 (n=9), legit 2.2 (n=8)
+runner jobs: 57, total 47s wall
+SELFTEST PASSED

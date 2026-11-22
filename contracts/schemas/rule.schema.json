@@ -5,6 +5,6 @@
   "method":{"type":"string"},"route":{"type":"string","description":"OpenAPI path template, e.g. /api/orders/{order_id}"},
   "param":{"type":["object","null"],"required":["in","name"],
     "properties":{"in":{"enum":["query","path","json","form","header"]},"name":{"type":"string","description":"for json: dotted path"}}},
-  "grammar":{"type":["string","null"],"description":"immune_contracts.grammar regex; values NOT matching are suspect. null with scope=all."},
+  "grammar":{"type":["string","null"],"description":"immune_contracts.grammar regex; values NOT matching are suspect. null: SAFE_DEFAULT with scope=param, unused with scope=all."},
   "scope":{"enum":["param","all"],"description":"param: only values outside grammar. all: every request on the route."},
   "ttl_s":{"type":"integer","minimum":1},"created":{"type":"number"}}}

@@ -1,4 +1,4 @@
-"""Sidecar in front of an unmodified shadow app (docs/plan-producto.md §6b, response-marker oracle).
+"""Sidecar in front of an unmodified shadow app (response-marker oracle; see sidecar/README.md).
 
 Speaks the same clone protocol as `shadow/` (contracts/README.md §5), so the gateway cannot tell them apart:
 
@@ -11,7 +11,7 @@ Speaks the same clone protocol as `shadow/` (contracts/README.md §5), so the ga
 6. release the response with x-imm-verdict / x-imm-events.
 
 One request at a time (lock), as the gateway expects. No stack: the app is not instrumented, so evidence
-carries the file path and the request; the patch stage localises the sink from those.
+carries the file path and the request only.
 """
 from __future__ import annotations
 

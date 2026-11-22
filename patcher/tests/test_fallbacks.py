@@ -20,9 +20,12 @@ CLASS = {"SQL injection": "sqli", "Path traversal": "traversal", "IDOR (missing 
 TEMPLATE = {"GET /api/products/{id}/image": "/api/products/{product_id}/image"}
 
 
+ANSWER_KEY = os.path.join(REPO, "docs", "demo", "respuestas", "tienda.md")   # outside every release path
+
+
 def vulns():
     out = []
-    for line in open(os.path.join(REPO, "victim", "VULNS.md")):
+    for line in open(ANSWER_KEY):
         m = re.match(r"\d+\. (.+?) \| (\w+) (\S+) \| (\w+) \| (\S+):(\d+) \| `(.+)`", line.strip())
         if m:
             cls, method, route, param, f, ln, example = m.groups()
@@ -38,7 +41,7 @@ IDS = [f"{v['vuln_class']}:{v['method']} {v['route']}" for v in VULNS]
 
 
 def exploit_request(v, manifest_owner_uid=61):
-    """The VULNS.md example as a harness request."""
+    """The answer-key example as a harness request."""
     ex = v["example"]
     if v["method"] == "POST":
         body = re.search(r"(\{.*\})", ex).group(1).encode()
@@ -201,6 +204,51 @@ def test_cli_edit_becomes_llm_diff(sqli, t0_release, monkeypatch, tmp_path):
                                                 f"Edit(/{os.path.realpath(r['cwd'])}/victim/app/products.py)"]
     assert "--bare" not in argv
     assert "gate tests failed: boom" in r["prompt"] and "Previous attempt rejected" in r["prompt"]
+
+
+def test_workspace_of_the_demo_release_holds_no_answer_key():
+    """The list of planted bugs (with file:line and exploit) must not be readable by the patch generator."""
+    from immune import config as icfg
+    from patcher.workspace import Workspace
+    assert not os.path.exists(os.path.join(REPO, "victim", "VULNS.md"))
+    assert os.path.isfile(ANSWER_KEY)
+    paths = icfg.load(REPO).app.release_paths
+    assert not any(ANSWER_KEY.startswith(os.path.join(REPO, p) + os.sep) for p in paths)
+    key_lines = [l.strip() for l in open(ANSWER_KEY) if re.match(r"\d+\. ", l)]
+    with Workspace(REPO, paths=paths) as ws:
+        seen = 0
+        for d, _dirs, files in os.walk(ws.work):
+            for fn in files:
+                seen += 1
+                assert not re.search(r"vuln|answer|respuesta|solution|exploit|review_notes", fn, re.I), os.path.join(d, fn)
+                with open(os.path.join(d, fn), "rb") as fh:
+                    text = fh.read().decode("utf-8", "replace")
+                assert not any(l in text for l in key_lines), os.path.join(d, fn)
+        assert seen > 10
+
+
+def test_prompt_templates_name_no_particular_application():
+    from patcher.core import PROMPT_DIR
+    for name in ("fix.md", "classes.md", "feedback.md"):
+        text = open(os.path.join(PROMPT_DIR, name)).read()
+        for word in ("victim", "FastAPI", "sqlite", "usb-hub", "tienda", "404", "node-postgres"):
+            assert word not in text, (name, word)
+
+
+def test_prompt_facts_come_from_the_project_config(incidents):
+    from types import SimpleNamespace as NS
+    demo = render_prompt(incidents["sql"], [], 1, ["victim/app/products.py"])       # the repo's .immune/config.yaml
+    assert "written in Python" in demo and "sources are in `victim/app/`" in demo and "`?` placeholders for sqlite3" in demo
+    trav = render_prompt(incidents["file"], [], 1, ["victim/app/files.py"])
+    assert "`os.path.realpath`" in trav and "exactly like a missing file does today" in trav
+    other = NS(app=NS(source_dirs=["src/shop/", "lib"]), database=NS(kind="postgres"))
+    p = render_prompt(incidents["sql"], [], 1, ["src/shop/search.py"], other)
+    assert "sources are in `src/shop/`, `lib/`" in p and "`%s` for psycopg" in p
+    assert "sqlite" not in p and "victim/app/`" not in p
+    js = render_prompt(incidents["sql"], [], 1, ["src/search.js"], other)
+    assert "written in JavaScript (Node.js)" in js and "`$1, $2, ...`" in js
+    unknown = render_prompt(incidents["sql"], [], 1, ["src/search.zig"], NS(app=NS(source_dirs=["src"]), database=NS(kind="mysql")))
+    assert "the code already uses and pass" in unknown                  # no driver hint rather than a wrong one
 
 
 def test_prompt_delimits_untrusted_evidence(incidents):

@@ -251,3 +251,86 @@ async def test_events_that_matter_survive_a_bus_outage():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)     # let it restore httpx.AsyncClient
+
+
+# ---------------------------------------------------------------- a client that goes away mid-body
+async def test_request_truncated_by_a_disconnect_is_dropped_not_forwarded():
+    from gateway.core import ClientGone
+    gw = Gateway(Config(prod_addr="a:1"))
+    msgs = [{"type": "http.request", "body": b'{"items":[{"product_id":1,', "more_body": True},
+            {"type": "http.disconnect"}]
+
+    async def receive():
+        return msgs.pop(0)
+    with pytest.raises(ClientGone):
+        await gw._read(_scope(headers=[(b"content-length", b"64")]), receive)
+
+    msgs[:] = [{"type": "http.request", "body": b"half", "more_body": True}, {"type": "http.disconnect"}]
+    handled, sent = [], []
+
+    async def handle(ctx):
+        handled.append(ctx)
+    gw.handle = handle
+
+    async def send(msg):
+        sent.append(msg)
+    await gw.data_app(_scope(), receive, send)
+    assert handled == [] and sent == [] and gw.stats["requests"] == 0
+
+
+# ---------------------------------------------------------------- the gateway's own cookie stays at the gateway
+def test_gwsid_cookie_is_not_forwarded():
+    gw = Gateway(Config(prod_addr="a:1"))
+    sid = "a" * 24
+    out = dict(gw._out_headers(_ctx(headers=[("cookie", f"session=s7; gwsid={sid}; theme=dark"), ("x-a", "1"),
+                                             ("connection", "close")])))
+    assert out == {"cookie": "session=s7; theme=dark", "x-a": "1"}
+    assert gw._out_headers(_ctx(headers=[("cookie", f"gwsid={sid}")])) == []     # nothing left: no empty header
+
+
+# ---------------------------------------------------------------- observe decides exactly what enforce does
+@pytest.mark.parametrize("path,query", [("/files/%2e%2e/%2e%2e/etc/passwd", ""),       # built-in traversal rule
+                                        ("/api/products", "q=a'b"),                    # high signal, no rule
+                                        ("/api/products", "q=usb&x=1")])               # active rule (scope all)
+@pytest.mark.parametrize("verdict", ["clean", "inconclusive", "oracle", None])         # None: no clone answered
+@pytest.mark.parametrize("trusted", [False, True])
+async def test_observe_would_route_is_the_route_enforce_takes(path, query, verdict, trusted, monkeypatch):
+    import os
+    import gateway.core as core
+    from gateway.classifier import Rule
+    from gateway.core import Upstream
+    monkeypatch.setattr(core, "CLONE_WAIT_S", 0.01)
+
+    async def run(mode):
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        gw = Gateway(Config(prod_addr="a:1", mode=mode, openapi_path=os.path.join(root, "contracts/openapi.yaml")))
+        if "x=1" in query:
+            gw.rules["r"] = Rule({"id": "r", "method": "GET", "route": "/api/products", "scope": "all", "ttl_s": 60})
+        if verdict is not None:
+            await gw.pool.set_clones([{"id": "c1", "addr": "clone:1", "key": "k"}])
+        clone_calls = []
+
+        async def to_clone(ctx, clone, level):
+            clone_calls.append(level)
+            return Upstream(200, [], b"clone", verdict)
+
+        async def to_prod(ctx):
+            ctx.route = "prod"
+            return Upstream(200, [], b"prod")
+        gw.to_clone, gw.to_prod = to_clone, to_prod
+        ctx = Ctx(rid="r1", t0=0.0, method="GET", raw_path=path, query=query, headers=[], hmap={}, body=b"",
+                  who=Who(uid=1 if trusted else None, role="user" if trusted else None, trusted=trusted),
+                  session="gwsid:x", cookie_session="gwsid:x", new_sid=None)
+        gw.manifest.seed_max_uid = 5
+        up = await gw.handle(ctx)
+        assert clone_calls == ([] if verdict is None else ["L1"])          # detonated once, in both modes
+        assert gw.pool.counts().get("free", 0) == (0 if verdict is None else 1)   # and the clone went back
+        return gw, ctx, up
+
+    gw, enforced, _ = await run("enforce")
+    gwo, observed, up = await run("observe")
+    assert observed.would == enforced.route and observed.verdict == enforced.verdict
+    assert observed.route == "prod" and up.body == b"prod"       # observe always answers from prod
+    assert gwo.pool.captives() == []                              # and captures nobody
+    if path.startswith("/files/"):
+        assert enforced.route == ("shadow_l1" if verdict == "oracle" and not trusted else "deny")

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import re
 
+from immune_contracts import wire
+
 _TOKEN = re.compile(
     r"""
     (?P<ws>\s+)
@@ -121,7 +123,7 @@ def check(statements, inputs, constants) -> list[dict]:
                     key = (sql, param, value)
                     if key not in seen:
                         seen.add(key)
-                        events.append({"oracle": "sql",
+                        events.append({"oracle": wire.ORACLE_SQL,
                                        "detail": {"statement": sql, "input": value, "param": param,
                                                   "location": location, "reason": hit},
                                        "stack": stack})

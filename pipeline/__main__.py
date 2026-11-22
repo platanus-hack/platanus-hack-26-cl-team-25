@@ -84,7 +84,7 @@ def main(argv=None) -> int:
         follower = Follower(cfg.bus_url, lambda: pipe.state.data["last_seq"], pipe.on_event, pipe.on_reset)
         follower.start()
     log.info("pipeline up: run=%s bus=%s repo=%s runner=%s patcher=%s", cfg.run_id, cfg.bus_url, cfg.repo_target,
-             cfg.runner_mode, cfg.patcher_module)
+             cfg.runner_image, cfg.patcher_module)
     idle_since = time.time()
     was_paused = False
     while not stop.is_set():

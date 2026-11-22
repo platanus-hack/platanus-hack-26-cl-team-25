@@ -1,190 +1,375 @@
-# Sistema inmunológico autónomo — arquitectura v2
+# Arquitectura
 
-Revisión estricta de la v1 (`arquitectura-sistema-inmunologico.md`) y arquitectura corregida.
-Las cifras de latencia de la v1 no fueron re-verificadas; acá no se depende de ellas.
+Tipo de documento: explicación. Describe la arquitectura tal como está construida.
+Los comandos, puertos y variables están en [operacion.md](operacion.md); los protocolos y esquemas, en
+[`contracts/`](../contracts/README.md); las razones de cada decisión, en [decisiones.md](decisiones.md); los
+límites, en [limites.md](limites.md).
 
-## 1. Qué se conserva de la v1
+Inmune es un proxy inverso que se pone delante de una aplicación web. Cada request que considera sospechoso lo
+ejecuta primero en una copia de la misma aplicación con datos sintéticos. Si ahí el ataque funciona, queda
+confirmado por ejecución: el gateway contiene el punto vulnerable con una regla, y un pipeline propone un parche
+de código, lo valida de forma mecánica y lo despliega.
 
-- El señuelo corre **el código real** (gemelo sombra), no un servicio falso.
-- **Nada arranca en el camino crítico**: se asigna desde un pool ya caliente.
-- El **PoC ejecutable** es el artefacto central; lo que dice el LLM solo vale si se verifica mecánicamente.
-- Remediación en dos velocidades: "bloqueado en segundos, curado en minutos".
+## 1. Glosario
 
-## 2. Fallas de la v1
+Estos términos se usan con el mismo significado en toda la documentación en español. Entre paréntesis, el término
+de la documentación en inglés (`contracts/` y los README de cada módulo).
 
-### Críticas (rompen la premisa)
-
-| # | Falla | Por qué rompe |
-|---|---|---|
-| F1 | **La detección por score necesita historial.** Tasa, entropía de rutas y timing son features de sesión. | Los primeros requests siempre llegan a prod. Un exploit de un solo disparo (explotación masiva de un CVE conocido, sin reconocimiento previo) nunca se desvía. El sistema solo atrapa atacantes ruidosos. |
-| F2 | **"Nunca desviar sesiones autenticadas".** | Registrar una cuenta alcanza para volverse inmune. La mayoría de los bugs serios (IDOR, SQLi en endpoints internos) están detrás del login. |
-| F3 | **Inyección de prompt al agente defensivo.** El payload es texto del atacante y entra a un LLM cuyo output termina en prod. | El atacante puede dirigir el parche: introducir una puerta trasera o desactivar un control. La v1 no lo menciona. |
-| F4 | **Autoinmunidad.** El nivel 0 bloquea por huella (JA4 lo comparten todos los clientes con la misma librería TLS) y el nivel 1 genera reglas de forma autónoma "porque son reversibles". | Un atacante fabrica ataques con la forma del tráfico legítimo (p. ej. del checkout) e induce una regla que tumba a los clientes reales. Además, bloquear contradice la premisa de no alertar. |
-| F5 | **Una microVM de un solo uso por huella.** | Rotar IP o huella cuesta cero; cada rotación nos cuesta 128–512 MB. El pool se agota y la asimetría de costos queda a favor del atacante. El tarpit (retener mucho) y el pool (rotar rápido) tiran en direcciones opuestas. |
-
-### Altas
-
-| # | Falla | Consecuencia |
-|---|---|---|
-| F6 | **Oráculo diferencial.** Con un segundo punto de vista limpio (otra IP), el atacante compara respuestas: datos públicos distintos o estado propio que no aparece delatan el señuelo. | La clave sticky "por huella" es débil en los dos sentidos: colisiona entre usuarios (JA4, CGNAT) y se evade rotando. |
-| F7 | **Egress denegado sin simulación.** | SSRF, reverse shells, exfiltración por DNS y descarga de segunda etapa fallan en el señuelo y funcionarían en prod: delata la trampa y se pierde la captura de la etapa 2. |
-| F8 | **No se define qué es "el exploit funcionó".** Syscalls y pcap no ven bugs de lógica. | IDOR y fallas de autorización no disparan ningún sink; pasan sin ser detectados. |
-| F9 | **Validación de parche insuficiente.** "El PoC falla y la suite pasa" lo cumple un parche que filtra ese payload exacto o que borra la funcionalidad. | Parches sobreajustados: la variante siguiente del exploit vuelve a entrar. |
-| F10 | **No dice dónde aplican las reglas ni qué versión corre el cautivo.** | Si la regla también filtra el camino al señuelo, el atacante ve el cambio. Si prod se redeploya, el PoC queda validado contra una versión vieja. |
-| F11 | **Replay re-inyectando bytes desde pcap.** | Frágil con tokens de sesión, CSRF y nonces por clon, y con exploits de varios pasos. El gateway ya ve el texto plano: el pcap sobra. |
-
-### Medias
-
-| # | Falla |
+| Término | Significado |
 |---|---|
-| F12 | **seccomp no se aplica en caliente** a un proceso ya corriendo (lo instala el propio proceso; requiere reinicio). eBPF-LSM sí, pero exige kernel con `CONFIG_BPF_LSM` y `lsm=bpf` y privilegios en el host del cliente. "En segundos" solo vale para la regla del gateway. |
-| F13 | **La base de datos no está dimensionada.** Cada clon necesita su propio estado de base; con la base adentro, 128–256 MB no alcanza y la densidad "de miles" baja. El page-in perezoso hace más lento el primer request: es una huella de timing. |
-| F14 | **Contradicción de soberanía.** Dice que los payloads no salen del país y a la vez pone el análisis en Alemania; además el LLM por API recibe payloads y código fuente del cliente. |
-| F15 | **Gateway inline propio sin modo de falla definido.** Es un punto único de falla delante de prod. |
-| F16 | **Sobre-ingeniería para un MVP.** XDP (el problema no es volumétrico), GBDT (no hay datos para entrenarlo), orquestador Firecracker (2–3 meses según la propia v1), LLM local dentro del señuelo (con código real no hace falta). |
+| **prod** | La aplicación protegida, con sus datos reales. Corre desde un *release*. |
+| **release** | Copia completa de las rutas `app.release_paths` del proyecto, en `<runtime>/releases/<id>/`. `t0` es el release inicial. Se monta de solo lectura en `/app`. |
+| **clon** (*clone*) | Contenedor que corre el mismo release que prod, con una base de datos sintética (la *semilla sombra*) y con los oráculos activos. |
+| **oráculo** (*oracle*) | Comprobación mecánica, de sí o no, sobre lo que la aplicación hizo al atender un request dentro de un clon. Hay cinco: `sql`, `file`, `proc`, `net`, `owner`. |
+| **detonación** (*detonation*) | Ejecutar un request sospechoso en un clon antes de decidir si llega a prod. |
+| **veredicto** (*verdict*) | Resultado de una detonación: `clean`, `oracle` o `inconclusive`. |
+| **L0** | Respuestas falsas y deterministas del propio gateway para una lista fija de rutas de escáner. |
+| **L1** | Clon compartido de detonación. Atiende un request y vuelve al estado de la semilla. |
+| **L2** / **cautivo** (*captive*) | Sesión que disparó un oráculo y desde entonces es atendida solo por un clon dedicado, nunca por prod. |
+| **marcador** (*marker*) | Cadena `MK` + 10 caracteres, distinta por dueño, incrustada en cada dato privado sintético. |
+| **manifiesto** (*manifest*) | `manifest.json`: mayor uid de la semilla (`seed_max_uid`), dueño de cada objeto, ids canario. |
+| **incidente** (*incident*) | Unidad de trabajo del pipeline: un oráculo disparado en una ruta y un parámetro. |
+| **PoC** | Estado previo del clon más los requests que reproducen el incidente. |
+| **regla** (*rule*) | Entrada del gateway que marca un punto confirmado como vulnerable: ruta + parámetro + gramática, con TTL. |
+| **validación** (*gate*) | Cada una de las cinco comprobaciones mecánicas que un parche debe pasar: `policy`, `properties`, `poc`, `tests`, `legit`. |
+| **runner** | Contenedor sin red donde se ejecuta código de la aplicación durante la reproducción y las validaciones. |
+| **bus** | Registro de eventos (HTTP + JSONL) que sirve el dashboard. |
+| **identidad confiable** | Usuario con `uid <= seed_max_uid`. Cualquier otro, o un anónimo, es no confiable. |
 
-## 3. Cambios de diseño
-
-### C1. El veredicto lo da la evidencia, no el score (resuelve F1, F2, F4 en parte)
-
-El score deja de decidir quién es atacante. Solo decide **a quién se detona**.
-
-```
-request ─► GATEWAY
-            ├─ limpio ───────────────► PROD
-            ├─ dudoso ──► DETONACIÓN en sombra ──┬─ ningún oráculo dispara ─► PROD (reenvío)
-            │                                    └─ oráculo dispara ─► CAUTIVO
-            └─ cautivo (ya confirmado) ─► su clon
-```
-
-- **Detonación:** el request dudoso se ejecuta primero en un clon sombra. Si ningún oráculo dispara, se reenvía a prod y el cliente recibe la respuesta real. El costo de un falso positivo pasa de "le servimos datos falsos" a "unas decenas de ms extra".
-- **Cautiverio:** solo con evidencia mecánica (oráculo disparado o honeytoken tocado). El clon donde detonó **pasa a ser** el clon del atacante: ya tiene su estado, no hay que trasplantar nada.
-- **Un disparo:** el contenido del request alcanza para marcarlo dudoso (forma de payload, ruta inexistente, parámetro fuera de gramática). No hace falta historial, así que el primer request ya puede detonarse.
-- **Límite:** la detonación tiene fidelidad parcial cuando el request depende de datos que solo existen en prod (ver C3).
-
-### C2. Oráculos explícitos (resuelve F8)
-
-Instrumentación dentro del gemelo sombra. Cada uno es un sí/no mecánico:
-
-| Oráculo | Detecta |
-|---|---|
-| La estructura de la query SQL difiere de su plantilla | SQLi |
-| Apertura de archivo fuera de la raíz permitida | Path traversal, LFI |
-| Proceso hijo o `exec` no esperado | RCE, inyección de comandos |
-| Conexión saliente a destino no declarado | SSRF, reverse shell |
-| Lectura de una fila o recurso **canario** por una identidad que no es su dueña | IDOR, fallas de autorización |
-| Uso de un honeytoken (credencial, JWT, clave falsa) | Robo de credenciales; también identifica al mismo actor desde otra IP |
-
-### C3. Confianza de identidad en vez de "autenticado" (resuelve F2)
-
-- No se desvía ni se detona con datos falsos a identidades con **confianza establecida**: antigüedad, historial de uso, MFA, pagos.
-- Una cuenta creada hace minutos desde una sesión dudosa **es del atacante** y sí entra al flujo. Al capturarla, el gateway crea en el clon una persona equivalente (mismo usuario e id, resto sintético) y traduce la cookie.
-- Límite que queda: una cuenta real comprometida con buena reputación no se desvía; para ella solo aplican las reglas de C6.
-
-### C4. Señuelos por niveles (resuelve F5)
-
-| Nivel | Qué es | Costo por atacante | Cuándo |
-|---|---|---|---|
-| L0 | Respuestas procedurales sin estado desde el gateway (rutas que la app no tiene, paginación infinita, goteo lento) | ~0 | Reconocimiento masivo |
-| L1 | Clones sombra compartidos para detonación, reciclados cada N requests o al disparar un oráculo | bajo | Requests dudosos |
-| L2 | Clon dedicado (cautivo) | un clon | Solo con evidencia |
-
-- Tope de cautivos por origen y global. Un cautivo inactivo se pausa y luego se baja a disco.
-- Si el pool se agota: el tráfico va a prod protegido por las reglas vigentes. Nunca peor que no tener el sistema.
-
-### C5. Indistinguibilidad (resuelve F6, F7, F13)
-
-- **Datos públicos idénticos a prod** (catálogo, páginas, conteos visibles). Solo lo privado es sintético.
-- **Honeytokens como pegamento de identidad:** si una credencial robada del señuelo aparece desde una IP limpia, esa sesión es el mismo actor y se captura.
-- **Internet falso:** el egress del clon no se corta, se redirige a un sumidero: DNS que responde todo, HTTP genérico y un endpoint de metadata de nube (`169.254.169.254`) con credenciales señuelo. El exploit "funciona" y se captura la etapa 2.
-- **Base de datos dentro del snapshot** y working set pre-cargado, para que el primer request no sea más lento que en prod.
-- Límite que queda: el estado que el atacante escribe en el señuelo no es visible desde un punto de vista limpio hasta que ese punto se captura.
-
-### C6. Reglas que no pueden volverse contra nosotros (resuelve F4, F10, F12)
-
-Una regla solo se activa si pasa todo esto, de forma automática:
-
-1. **Replay contra un corpus de tráfico legítimo reciente** (grabado en el gateway): cero coincidencias, o por debajo de un umbral fijo.
-2. **Alcance mínimo:** ruta + parámetro + gramática. Nunca por huella, IP ni user-agent.
-3. **Solo en el camino a prod.** Los clones sombra siguen vulnerables para que el cautivo no vea cambios.
-4. **TTL:** caduca cuando el parche de código está desplegado.
-5. **Reversión automática** si la tasa de coincidencias sobre tráfico limpio supera el umbral; presupuesto máximo de reglas activas.
-
-No hay nivel 0 de bloqueo: al atacante confirmado se lo sigue desviando. La regla de kernel queda fuera del MVP.
-
-### C7. El agente no decide, propone (resuelve F3, F9)
-
-- **Entrada:** primero la evidencia mecánica (oráculo, stack trace, archivo y línea). El payload va como dato inerte y escapado, nunca como instrucción.
-- **Sin poder:** el agente corre sin credenciales ni red. Su única salida es un diff.
-- **Límites del diff:** solo archivos presentes en el stack trace; sin dependencias nuevas, sin llamadas de red ni `exec` nuevas; tamaño acotado.
-- **Revisor independiente:** un segundo modelo ve solo el diff y el código, nunca el payload.
-- **Puertas de validación** (todas mecánicas, en el runner aislado):
-  1. el PoC falla;
-  2. una **familia de variantes** del PoC falla (otras codificaciones, otros parámetros, fuzzing corto con el oráculo como juez);
-  3. la suite de tests pasa;
-  4. **replay diferencial:** el corpus de tráfico legítimo da las mismas respuestas antes y después del parche.
-- **Despliegue:** blue/green con rollback automático. En el demo, automático; en un cliente real, con aprobación humana hasta tener historial.
-- El PoC se revalida contra **la versión actual de prod** antes de parchear (F10) y queda como test de regresión.
-
-### C8. Captura por snapshot, no por replay de bytes (resuelve F11)
-
-- El gateway graba los requests en texto plano por sesión (no hace falta pcap).
-- Cuando un oráculo dispara, se toma un **snapshot del clon cautivo en el estado previo al request**. El PoC es "este estado + este request", lo que cubre exploits de varios pasos sin reconstruir tokens ni nonces.
-- Límite: ataques de segundo orden (payload guardado que dispara cuando otro usuario lo ve) solo se detectan si algo en el clon lo ejecuta.
-
-### C9. Operación (resuelve F14, F15, F16)
-
-- **Fail-open:** si falla el scoring, el pool o el control plane, el gateway reenvía a prod con las reglas locales.
-- **Soberanía:** el análisis corre junto al plano de datos, en el entorno del cliente. El LLM se consume por un endpoint en la región o nube del cliente; si eso no existe, se declara que payloads y código salen.
-- **Fuera del MVP:** XDP, GBDT, Firecracker, LLM dentro del señuelo, eBPF-LSM. El scoring del MVP son reglas + honeytokens + forma del payload.
-
-## 4. Arquitectura v2
+## 2. Componentes y dónde corre cada uno
 
 ```mermaid
 flowchart LR
-  A[Cliente / atacante] --> GW
-  subgraph DP[Plano de datos - mismo host o red que prod]
-    GW[Gateway L7<br/>scoring por request<br/>reglas con TTL<br/>L0 procedural]
-    GW -->|limpio, o detonado sin hallazgos| PROD[Producción]
-    GW -->|dudoso| DET[L1: clones de detonación]
-    DET -->|oráculo dispara: el clon queda asignado| CAU[L2: clon cautivo]
-    GW -->|sesión cautiva| CAU
-    CAU --> SINK[Internet falso<br/>DNS, HTTP, metadata]
-    DET --> SINK
+  C[Cliente] -->|127.0.0.1:8080| GW
+  subgraph Contenedores["Contenedores (docker compose, proyecto immune-NOMBRE)"]
+    GW[gateway<br/>datos 8080, admin 8081,<br/>ingesta de evidencia 9000]
+    DASH[dashboard<br/>bus de eventos, 8090]
   end
-  CAU -->|oráculo + snapshot previo + request| AN
-  subgraph CP[Plano de análisis - sin credenciales ni red]
-    AN[Agente: PoC mínimo + variantes]
-    AN --> RG[Regla candidata]
-    AN --> PD[Diff candidato]
-    PD --> REV[Revisor: solo ve el diff]
-    RG --> RUN
-    REV --> RUN[Runner aislado<br/>PoC + variantes + tests<br/>replay diferencial de tráfico legítimo]
+  subgraph Fleet["Contenedores creados por fleet"]
+    PROD[prod blue / green<br/>red prodnet]
+    CL[clones L1 / L2<br/>red clonenet]
   end
-  RUN -->|regla validada, solo camino a prod| GW
-  RUN -->|blue/green con rollback| PROD
+  subgraph Host["Procesos del host (unidades systemd de usuario)"]
+    FL[fleet<br/>127.0.0.1:8070]
+    PL[pipeline<br/>+ patcher como librería]
+    LLM[CLI claude<br/>confinada]
+  end
+  RUN[runner<br/>contenedor sin red]
+  GW --> PROD
+  GW --> CL
+  CL -->|evidencia firmada| GW
+  GW -->|eventos| DASH
+  FL -->|eventos| DASH
+  PL -->|eventos| DASH
+  DASH -->|oracle.fired| PL
+  PL -->|reglas| GW
+  PL -->|deploy| FL
+  FL -->|pool y upstream| GW
+  PL --> RUN
+  PL --> LLM
 ```
 
-## 5. Lo que se construye para el demo
+| Componente | Directorio | Corre como | Función |
+|---|---|---|---|
+| Gateway | `gateway/` | contenedor `immune-<proyecto>-gateway`; puertos 8080 (datos) y 8081 (admin) publicados en `127.0.0.1`; puerto 9000 solo en las redes internas | Clasifica, detona, decide la ruta de cada request, aplica las reglas, graba los requests |
+| Instrumentación en proceso | `shadow/` | dentro de cada clon de una app Python ASGI | Oráculos y veredicto |
+| Observador externo | `sidecar/` | contenedor junto a cada clon de una app con `app.runtime: generic` | Oráculos desde fuera del proceso: `strace` y proxy del protocolo de Postgres |
+| Fleet | `fleet/` | proceso del host, `127.0.0.1:8070` | Crea y destruye los contenedores de prod y de los clones; despliegue blue/green |
+| Pipeline | `pipeline/` | proceso del host | Ciclo de vida del incidente, runner, las cinco validaciones, auditoría de clase |
+| Patcher | `patcher/` | librería cargada por el pipeline | Arma el prompt, llama a la CLI `claude` confinada, deriva la regla y las variantes del PoC, parches de respaldo |
+| Dashboard | `dashboard/` | contenedor `immune-<proyecto>-dashboard`; puerto 8090 publicado en `127.0.0.1` | Bus de eventos y panel en vivo |
+| CLI | `immune/` | comando del host | `init`, `up`, `down`, `reset`, `status`, `report`, `mode`, `autopatch`, `doctor`, `deploy`, `anticipate` |
+| Código compartido | `immune_contracts/` | librería | Token de autenticación, gramática, headers internos, tipos de evento |
 
-Todo en un solo host (la VM ARM de 4 cores y 23 GB; no tiene KVM, así que Docker).
-El gestor del pool habla con un **driver de sandbox** (`acquire`, `snapshot`, `reset`, `destroy`): Docker ahora, Firecracker después sin tocar el resto.
+Los cuatro puertos por defecto (8080, 8081, 8090, 8070) se cambian en la clave `ports` de `.immune/config.yaml`.
+`deploy/compose.yaml` publica los tres primeros solo en `127.0.0.1`, y `fleet/__main__.py` enlaza el suyo a
+`127.0.0.1`.
 
-Orden de construcción:
+Redes de Docker (definidas en `deploy/compose.yaml`): `prodnet`, `clonenet` y `ctrlnet` son `internal`, sin salida
+a internet. El gateway está en las tres y en `edge`, la única red con puerto publicado. Los contenedores de prod
+solo están en `prodnet` y los clones solo en `clonenet`: un clon no comparte red con prod ni con el dashboard. Lo
+único que alcanza es el gateway.
 
-1. **App víctima** con SQLi, path traversal e IDOR plantados, suite de tests y base con filas canario.
-2. **Build sombra** de la misma app con los oráculos de C2 como hooks (driver de base, apertura de archivos, procesos, red).
-3. **Gateway** (reverse proxy): scoring por request, tres caminos de C1, L0 procedural, grabación de requests, reglas con TTL.
-4. **Pool** de 3–5 contenedores sombra con internet falso.
-5. **Agente + runner**: PoC, regla validada contra el corpus, diff, puertas de C7, blue/green.
-6. **Panel en vivo** con la línea de tiempo: detonación → cautiverio → regla → parche.
+`fleet` y `pipeline` corren bajo `immune.supervise`, que los reinicia si mueren. Con un gestor systemd de usuario
+son las unidades transitorias `immune-<proyecto>-fleet` e `immune-<proyecto>-pipeline`; sin él, procesos
+desacoplados de la terminal (`start_host` en `immune/__main__.py`).
 
-Recortes aceptados para el demo: un solo revisor, corpus de tráfico legítimo generado por script, familia de variantes chica, sin persona equivalente para cuentas (C3) salvo que sobre tiempo.
+Las aplicaciones de demostración (`victim/`, `examples/notas/`, `examples/tareas-node/`), el generador de tráfico
+(`sim/`), el laboratorio de Grafana (`labs/grafana-cve-2021-43798/`) y el modo de revisión de código fuente
+(`anticipate/`) no forman parte del camino de un request. Cada uno tiene su README.
 
-## 6. Límites que quedan abiertos
+## 3. Camino de un request por el gateway
 
-- Cuentas reales comprometidas con buena reputación (C3).
-- Estado escrito en el señuelo que no aparece desde un punto de vista limpio (C5).
-- Ataques de segundo orden (C8).
-- La detonación suma latencia a la fracción dudosa y pierde fidelidad en requests que dependen de datos de prod (C1).
-- Un atacante paciente que nunca dispara un oráculo no entrena nada: el sistema aprende solo de exploits que funcionan en la sombra.
+El código está en `gateway/core.py` (`Gateway.handle` y `Gateway._detonation`) y `gateway/classifier.py`
+(`classify`).
+
+```mermaid
+flowchart TD
+  R[Request] --> RD{Legible y dentro<br/>de los límites}
+  RD -->|no| E4[400 / 408 / 413<br/>responde el gateway]
+  RD -->|sí| CAP{Sesión cautiva<br/>y no confiable}
+  CAP -->|sí| L2[Clon L2 de la sesión]
+  CAP -->|no| SC{Ruta de escáner que<br/>la app no define}
+  SC -->|sí| L0[Respuesta L0]
+  SC -->|no| CL{classify}
+  CL -->|limpio| PROD[prod]
+  CL -->|evidencia directa| EV{Identidad confiable}
+  EV -->|sí| DENY[404 genérico]
+  EV -->|no| L2
+  CL -->|sospechoso| DET[Detonación en un clon L1]
+  DET -->|sin clon libre en 0.3 s| NC{Regla activa, traversal<br/>o señal fuerte}
+  NC -->|sí| DENY
+  NC -->|no| PROD
+  DET -->|veredicto oracle| OR{Identidad confiable}
+  OR -->|sí| DENY
+  OR -->|no| SH[Responde el clon;<br/>la sesión queda cautiva]
+  DET -->|veredicto clean| TR{Segmento .. en la ruta}
+  TR -->|sí| DENY
+  TR -->|no| PROD
+  DET -->|veredicto inconclusive| RU{Regla activa o<br/>segmento .. en la ruta}
+  RU -->|sí| DENY
+  RU -->|no| PROD
+```
+
+### 3.1 Lectura
+
+`Gateway._read` rechaza sin reenviar: un destino que no empieza por `/` (400), un cuerpo de más de 10 MiB (413) y
+un cuerpo que no termina en 30 segundos (408). Si el cliente se desconecta a mitad del cuerpo, el request se
+descarta: no se reenvía, no se responde y no se registra. Los headers entrantes con el prefijo interno
+(`wire.INTERNAL_PREFIX`) se eliminan, de modo que un cliente no puede hacerse pasar por el gateway ante un clon.
+
+La sesión es `uid:<n>` si el request trae una identidad válida, y `gwsid:<valor>` en otro caso. `gwsid` es una
+cookie que el gateway emite cuando falta. La cookie se quita del header `Cookie` que se reenvía a prod y a los
+clones (`_out_headers`).
+
+### 3.2 Clasificación
+
+`classify` devuelve una de tres clases, a partir del request, del OpenAPI del proyecto, del manifiesto y de las
+reglas activas. No usa historial, IP ni user-agent, salvo el contador de enumeración por sesión.
+
+| Clase | Motivos (`reasons`) |
+|---|---|
+| Evidencia directa | `honeytoken`: llega desde fuera un token firmado con el secreto de los clones (`immune/auth.py`). `canary:<param>`: un parámetro de ruta apunta a un id canario del manifiesto y quien pide no es su dueño ni administrador. |
+| Sospechoso | `grammar:*` o `schema:*`: un valor se sale de la gramática segura o del esquema del OpenAPI. `dup_query:<k>`: parámetro de consulta duplicado. `traversal:path` y `traversal:query.<k>`: segmentos `..` (regla incorporada, también en rutas fuera del OpenAPI). `path:encoded_slash`: las dos lecturas de la ruta enrutan distinto. `owner_scoped:anonymous` y `owner_scoped:untrusted`: ruta marcada `x-owner-scoped` con identidad no confiable. `owner_scoped:mismatch:<param>`: identidad de la semilla, no administradora, que pide un objeto que el manifiesto atribuye a otro. `enumeration`: más de 8 ids distintos en rutas de dueño desde una sesión en 30 segundos. `rule:<id>`: coincide con una regla activa. |
+| Limpio | Ningún motivo. |
+
+Rutas: el gateway compara rutas y reglas contra dos lecturas del destino, la que decodifica una vez y luego separa
+por `/` (como uvicorn y starlette) y la que separa y luego decodifica. Una regla aplica si coincide con cualquiera
+de las dos. `%252F` y `%5C` nunca cuentan como separadores.
+
+Los campos marcados `x-sensitive` no se inspeccionan y se tachan en la grabación. Las rutas que no están en el
+OpenAPI se clasifican como limpias, salvo que coincidan con una regla, con la regla incorporada de traversal o con
+la lista L0, o que traigan un parámetro de consulta duplicado o un honeytoken.
+
+### 3.3 Detonación y decisión
+
+Un request sospechoso se ejecuta en un clon L1 libre con los mismos bytes que recibiría prod. El clon responde con
+un header de veredicto; si falta, el veredicto es `inconclusive`. Después de cada request el clon L1 vuelve al
+estado de la semilla. La decisión está en un solo lugar, `Gateway._detonation`:
+
+| Resultado de la detonación | Identidad no confiable | Identidad confiable |
+|---|---|---|
+| `oracle` | Recibe la respuesta del clon (datos sintéticos); la sesión queda cautiva | 404 genérico: nunca se le sirven datos sintéticos |
+| `clean` | prod, salvo `traversal:path`, que recibe 404 | igual |
+| `inconclusive` (401, 404 o 5xx en el clon, o sin confirmación) | 404 si coincide con una regla activa o trae `traversal:path`; si no, prod | igual |
+| Sin clon libre en 0.3 s | 404 si hay regla activa, traversal incorporado o señal fuerte (`schema:`, `grammar:`, `dup_query:`, `traversal:`); si no, prod | igual |
+
+Una excepción dentro del manejo del request también termina en 404 genérico (`Gateway.data_app`).
+
+Consecuencias que conviene tener presentes:
+
+- Un falso positivo del clasificador cuesta la latencia de una detonación; el cliente recibe la respuesta real de
+  prod.
+- Sin regla activa, un veredicto `inconclusive` falla abierto: el request llega a prod.
+- Una regla fuerza la detonación y falla cerrado cuando no hay clon o el veredicto es `inconclusive`. Si el clon
+  dice `clean`, el request pasa a prod. Una regla es, por lo tanto, tan fuerte como el oráculo.
+- Los clones corren la semilla. Un objeto creado en prod después de la semilla no existe en el clon y da 404 allí.
+
+### 3.4 Sesiones cautivas
+
+Una sesión cautiva se atiende desde un clon L2 que se asigna en su siguiente request (`Gateway.captive`). Hay un
+tope global de sesiones (`max_sessions` en `gateway/pool.py`), desalojo de la más antigua cuando falta un clon y
+vencimiento por inactividad a los 900 s. Una identidad confiable nunca queda cautiva. No hay tope por origen.
+
+### 3.5 Modo `observe`
+
+`Gateway.observe` clasifica y detona igual que `enforce`, pero toda respuesta sale de prod: nada se niega, se
+desvía ni se captura. Cada evento registra en `would_route` la decisión que `enforce` habría tomado.
+`immune report` las resume.
+
+### 3.6 Segunda comprobación opcional (`aftercheck`)
+
+Con `aftercheck: true` (desactivado por defecto), un request clasificado como limpio y ya respondido por prod se
+repite después en un clon L1. Si un oráculo dispara, se abre el incidente como en cualquier detonación. La primera
+respuesta no se detiene. El detalle está en [`contracts/product.md`](../contracts/product.md).
+
+## 4. Oráculos
+
+| Oráculo | App Python ASGI (`shadow/`) | Runtime genérico (`sidecar/`) |
+|---|---|---|
+| `sql` | Comprobación por tokens (`shadow/sqltaint.py`) sobre las sentencias ejecutadas con `sqlite3`: un valor de entrada que abarca más de un token | La misma comprobación sobre el texto de las sentencias `Q` y `Parse` que ve el proxy de Postgres (`sidecar/pgproxy.py`) |
+| `file` | `sys.addaudithook` con una lista de permitidos aprendida en el precalentamiento (`shadow/instrument.py`): apertura fuera de las raíces permitidas | `strace` sobre los procesos de la app: `openat`, `openat2`, `open`, `creat` |
+| `proc` | El mismo hook: proceso hijo | `execve`, `execveat`, `fork`, `vfork`, `clone`, `clone3` |
+| `net` | El mismo hook: conexión saliente | `connect`, `sendto`, `sendmsg` |
+| `owner` | La respuesta contiene el marcador de otro dueño | Igual, en el cuerpo de la respuesta |
+
+Los oráculos corren solo en los clones, nunca en el proceso de prod. Lo que cada uno no ve está en
+[limites.md](limites.md) y en `shadow/README.md` y `sidecar/README.md`.
+
+## 5. Ciclo de vida de un incidente
+
+El código está en `pipeline/orchestrator.py` (`Pipeline._flow`). El pipeline procesa un incidente a la vez; los
+demás esperan en una cola persistente. La clave de deduplicación es tipo de oráculo + método + plantilla de ruta +
+parámetro.
+
+```mermaid
+sequenceDiagram
+  participant GW as gateway
+  participant BUS as bus (dashboard)
+  participant PL as pipeline
+  participant RUN as runner
+  participant LLM as CLI claude
+  participant FL as fleet
+  GW->>BUS: oracle.fired
+  BUS->>PL: evento
+  PL->>BUS: incident.opened
+  PL->>RUN: PoC x3 + variantes, release actual
+  PL->>BUS: poc.ready
+  PL->>GW: POST regla
+  GW->>BUS: rule.active
+  loop hasta 3 intentos
+    PL->>LLM: prompt (evidencia como dato)
+    LLM-->>PL: diff
+    PL->>BUS: patch.attempt, patch.diff
+    PL->>RUN: validaciones policy, properties, poc, tests, legit
+    PL->>BUS: gate.result (una por validación), pr.opened al pasar policy
+  end
+  PL->>BUS: pr.merged
+  PL->>FL: POST /deploy
+  FL->>GW: cambio de upstream
+  FL->>BUS: deploy.started, deploy.done
+  PL->>GW: DELETE regla
+  PL->>RUN: PoC + variantes, release desplegado
+  PL->>GW: el mismo request, sesión nueva
+  PL->>BUS: verify.result, incident.closed
+```
+
+1. **Reproducción.** El PoC se ejecuta tres veces en el runner sobre el release actual. Las tres deben disparar el
+   tipo de oráculo del incidente y, cuando el incidente tiene archivo de origen, con ese archivo en la pila (el
+   runtime genérico no lo tiene). Si no, el incidente se cierra como `not_reproducible` y no se publica ninguna
+   regla.
+2. **Regla.** `patcher.derive_rule` propone la regla y `pipeline/rules.py` la valida. El pipeline la publica en el
+   gateway. Para `sqli` y `traversal` con parámetro conocido el alcance es `param`: ruta, parámetro y una
+   gramática que el valor capturado no cumple. Para `idor`, o sin parámetro, el alcance es `all`: toda la ruta
+   (`patcher/rule.py`). Sin parche, el pipeline la renueva antes de que venza.
+3. **Parche.** Si `autopatch` es `off`, el incidente se cierra como `rule_only`. Si no, `patcher.propose` devuelve
+   un diff, hasta `PIPELINE_MAX_ATTEMPTS` veces (3 por defecto); el detalle de la validación que rechazó un intento
+   se entrega al siguiente.
+4. **Validaciones.** Las cinco de [validaciones.md](validaciones.md), en orden, deteniéndose en la primera que
+   falla. El pull request se abre cuando pasa `policy`.
+5. **Merge y release.** Con `autopatch: merge` y sin topes, el pipeline hace merge y materializa el release
+   `<sha[:12]>`. Con `autopatch: pr`, o si una validación fue omitida o quedó sin cobertura, el incidente se
+   cierra como `rule_only` con el PR abierto y la regla activa.
+6. **Despliegue.** `fleet` arranca el color libre, espera la salud, hace un request de humo, cambia el upstream del
+   gateway, observa la tasa de 5xx durante `DEPLOY_WATCH_S` y revierte si empeora (`fleet/manager.py`, `_deploy`).
+7. **Verificación.** El pipeline quita la regla y comprueba dos cosas: en el runner, el PoC y sus variantes no
+   disparan ningún oráculo sobre el release desplegado; por el gateway, el mismo request desde una sesión nueva es
+   reenviado a prod (el registro `prodlog` del gateway debe confirmar `forwarded: true`). Si alguna falla, la
+   regla se vuelve a publicar y el incidente se cierra como `rule_only`.
+8. **Auditoría de clase.** Tras cerrar un incidente como `patched` o `rule_only`, `pipeline/audit.py` deriva del
+   OpenAPI, por forma del esquema, los demás pares operación y parámetro que la misma clase podría afectar, y los
+   prueba en el runner. Cada oráculo que dispara abre un incidente con origen `audit`, que sigue el mismo flujo.
+   Hay una auditoría por clase y por release. Está activa por defecto solo para `python-asgi`.
+
+Resultados posibles de un incidente:
+
+| `outcome` | Significado |
+|---|---|
+| `patched` | Release desplegado y verificado |
+| `rule_only` | Se publicó una regla y sigue activa; no hay parche desplegado. `outcome_detail` dice por qué (`autopatch_off`, `pr_open`, `transient`) |
+| `not_reproducible` | El PoC no disparó 3 de 3 |
+| `error` | El flujo falló antes de publicar una regla; se reintenta como un cierre transitorio |
+
+## 6. Fronteras de confianza
+
+### Qué puede leer y escribir el modelo
+
+- El modelo se invoca como proceso del host: `claude -p` con `--tools Read,Edit`, `--strict-mcp-config`,
+  `--disable-slash-commands`, `--restricted`, `--permission-mode dontAsk` y `--permission-prompts none`
+  (`patcher/claude_cli.py`, `command`). No tiene herramienta de shell ni de red.
+- Lee una copia temporal de las rutas `app.release_paths` del release (`patcher/workspace.py`). El directorio git
+  de esa copia vive fuera del árbol de trabajo.
+- Puede editar solo una lista de archivos: los de la pila del incidente que están bajo `app.source_dirs`
+  (`editable_files` en `patcher/core.py`). `Write` y la edición de directorios `tests` están denegadas.
+- Su única salida aceptada es el diff de esa copia. No decide nada: deciden las validaciones.
+- La evidencia y el detalle de las validaciones anteriores van en el prompt entre marcas con un nonce, declaradas
+  como dato no confiable. Los headers `authorization`, `cookie` y `x-imm-signature` se tachan.
+- El confinamiento lo aplica la propia CLI con esas opciones. No hay un sandbox del sistema operativo alrededor
+  del proceso `claude`, que corre con el usuario y el login de Claude Code de quien ejecutó `immune up`. El
+  contenido del prompt (código de la aplicación y request del atacante) sale hacia el proveedor del modelo.
+
+El texto del atacante es dato, nunca instrucción. La defensa contra un parche dirigido por ese texto es el
+confinamiento de herramientas más las validaciones, y la validación `policy` es heurística
+([validaciones.md](validaciones.md)).
+
+### Dónde se ejecuta código de la aplicación
+
+| Lugar | Aislamiento |
+|---|---|
+| prod y clones (`fleet/manager.py`, `_create`) | Contenedor con sistema de archivos de solo lectura, `cap_drop ALL`, `no-new-privileges`, límites de pids y memoria, red interna |
+| runner (`pipeline/runner.py`) | `docker run --network none --read-only`, capacidades eliminadas, límites de pids, memoria y CPU; `runtime/` y `.git` ocultos |
+| `immune init` y `immune doctor` | Las comprobaciones 1, 7 y 8 del doctor corren en contenedores `--network none`. El volcado del OpenAPI (`dump` en `immune/initsteps/openapi.py`) se intenta primero en un contenedor `--network none`; si Docker o la imagen `immune-base:1` no están disponibles, o si ese intento no devuelve el documento, se repite en un subproceso del host. La validación del perfil y las comprobaciones 2 a 5 corren siempre en el host, como el usuario que invoca (`immune/initsteps/hostrun.py`). Lo que corre en el host es separación de procesos, no un sandbox |
+
+El resultado del runner vuelve por stdout en una línea `@@RESULT@@ <nonce> <json>` con un nonce por ejecución.
+Resiste a código que imprime una línea de resultado falsa; no resiste a código que inspecciona su propio
+intérprete.
+
+### Quién tiene acceso a Docker
+
+Ningún contenedor del stack tiene el socket de Docker. Lo usan procesos del host: `fleet` (contenedores de prod y
+de los clones; solo elimina contenedores con su propia etiqueta), `pipeline` (lanza los contenedores runner con
+`docker run`) y la CLI `immune` (`docker compose`, y contenedores de `init` y `doctor`).
+
+### Autenticación entre componentes
+
+- La API de `fleet` exige el header `x-admin-token` en todas sus rutas, comparado en tiempo constante. `fleet` no
+  arranca sin `ADMIN_TOKEN` en su entorno.
+- La API de administración del gateway (`/_admin/*`, puerto 8081) usa el mismo token.
+- Publicar en el bus (`POST /events`) exige `x-bus-token`. Las lecturas son públicas y, sin token, llegan tachadas
+  ([`dashboard/README.md`](../dashboard/README.md)).
+- Prod y los clones no comparten secreto: `PROD_APP_SECRET` y `SHADOW_APP_SECRET` son distintos. Un token firmado
+  con el secreto de los clones que llega desde fuera es evidencia directa.
+- Los cuatro secretos son aleatorios por proyecto y viven en `<runtime>/secrets.env` ([operacion.md](operacion.md)).
+
+## 7. Diseñado y construido
+
+Estado de cada elemento del diseño. "Construido" significa implementado y cubierto por tests. Las razones del
+diseño están en [decisiones.md](decisiones.md).
+
+| Elemento del diseño | Estado | Dónde |
+|---|---|---|
+| Veredicto por ejecución en un clon, no por puntaje | Construido | `gateway/core.py`, `shadow/` |
+| Oráculos explícitos: SQL, archivo, proceso, red, dueño | Construido | `shadow/`, `sidecar/` |
+| Honeytoken como pegamento de identidad | Parcial: un token firmado con el secreto de los clones visto desde fuera es evidencia; no hay credenciales señuelo plantadas | `immune/auth.py`, `gateway/core.py` |
+| Confianza de identidad en vez de "autenticado" | Parcial: comprobación binaria por uid de la semilla; sin gradación por antigüedad, MFA o pagos | `gateway/classifier.py` |
+| Señuelos procedurales L0 | Parcial: lista fija de rutas de escáner; sin paginación infinita ni goteo lento | `gateway/l0.py` |
+| Clones compartidos de detonación L1 y clon cautivo L2 | Construido | `gateway/pool.py`, `fleet/` |
+| Tope de cautivos por origen, pausa y bajada a disco | No construido (solo tope global y vencimiento por inactividad) | `gateway/pool.py` |
+| Internet falso para el tráfico saliente de los clones (DNS, HTTP, metadata de nube) | No construido: los clones están en redes internas y el oráculo `net` dispara en el `connect` | `deploy/compose.yaml`, `shadow/instrument.py` |
+| Reglas acotadas a ruta + parámetro + gramática, con TTL, solo en el camino a prod | Construido | `gateway/classifier.py`, `patcher/rule.py` |
+| Regla probada contra un corpus legítimo antes de activarse; reversión automática; presupuesto de reglas | No construido: la regla se valida contra su esquema y debe rechazar el valor capturado | `patcher/rule.py`, `pipeline/rules.py` |
+| El agente propone, deciden validaciones mecánicas | Construido (cinco validaciones) | `pipeline/gates.py` |
+| Revisor independiente, un segundo modelo que solo ve el diff | No construido | — |
+| Repetición diferencial de tráfico legítimo | Construido (escenarios guionados; GET grabados como alternativa) | `pipeline/gates.py` |
+| Familia de variantes del PoC | Construido | `patcher/variants.py` |
+| Blue/green con rollback automático | Construido | `fleet/manager.py` |
+| Snapshot del clon antes del request como estado del PoC | Parcial: SQLite sí; nulo para Postgres | `contracts/product.md` |
+| Auditoría de clase después de un parche ("memoria inmunológica") | Construido (python-asgi) | `pipeline/audit.py` |
+| Muestreo de tráfico limpio, gramática aprendida por parámetro, huella de actor | No construido | — |
+| Bot atacante simulado, prueba de vulnerabilidad ciega, equipo rojo, suite de punta a punta | No construido | — |
+| Oráculos fuera del proceso con eBPF o seccomp-notify | No construido: implementado con `strace` y un proxy de Postgres | `sidecar/` |
+| `immune deploy` delante de un servicio existente | No construido (esbozo experimental) | `immune/deploycmd.py` |
+| `immune init` para apps que no son Python | No construido (perfil escrito a mano) | `examples/tareas-node/.immune/` |
+| Pull requests en GitHub | Implementado; verificado solo contra un `gh` simulado | `pipeline/repo.py` |
+| Firecracker, XDP, puntaje con GBDT, LLM dentro del señuelo, eBPF-LSM | Fuera de alcance por decisión | — |
+| Arranque al iniciar la máquina | No construido | — |

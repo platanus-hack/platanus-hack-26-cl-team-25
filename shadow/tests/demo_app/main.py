@@ -1,5 +1,5 @@
 import gzip, importlib, os, socket, sqlite3, subprocess, sys, traceback
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, Response
 from immune_contracts import authtoken
 
@@ -44,6 +44,11 @@ def item(item_id: int):
     if not row:
         raise HTTPException(404, "nf")
     return dict(row)
+
+
+@app.get("/tag/{tag}")
+def by_tag(tag: str):
+    return [dict(r) for r in db().execute("SELECT id, name FROM items WHERE name = '" + tag + "'").fetchall()]
 
 
 @app.get("/raw")

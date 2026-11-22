@@ -57,9 +57,13 @@ def test_sql_json_leaf_and_executescript(h):
 
 
 def test_sql_param_named_after_route(h):
-    # path params are typed int here, so use the query to check naming; path name mapping covered by negative case
     r = h.send("GET", "/raw", query="id=1%20OR%201%3D1")
     assert r.events[0]["detail"]["param"] == "id" and r.events[0]["detail"]["location"] == "query"
+    # a path parameter is reported under the name the router gave it, not as a positional segment
+    r = h.send("GET", "/tag/x%27%20OR%20%271%27%3D%271")
+    ev = next(e for e in r.events if e["oracle"] == "sql")
+    assert (ev["detail"]["location"], ev["detail"]["param"], ev["detail"]["input"]) == ("path", "tag", "x' OR '1'='1")
+    assert "sql" not in kinds(h.send("GET", "/tag/usb%20cable"))
 
 
 # ---------- file

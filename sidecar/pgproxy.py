@@ -122,7 +122,7 @@ class StatementTracker:
         self.stmts: dict[str, str] = {}    # prepared statement name -> text
         self.portals: dict[str, str] = {}  # portal name -> text
         self.queue: deque = deque()        # items: ["Q", sql, completes, error] | ["E", sql] | ["S"]
-        self.params: dict[str, list] = {}  # portal -> bound params (kept for debugging only)
+        self.params: dict[str, list] = {}  # portal -> bound params, kept only with on_bound (judge mode's x-imm-trace)
 
     # client -> server
     def frontend(self, t: str, p: bytes):

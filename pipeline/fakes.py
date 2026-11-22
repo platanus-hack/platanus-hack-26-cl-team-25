@@ -16,7 +16,7 @@ import uuid
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from immune_contracts import events as E
@@ -96,9 +96,6 @@ class FakeBus:
                     yield ": hb\n\n"
                     await asyncio.sleep(0.1)
         return StreamingResponse(gen(), media_type="text/event-stream")
-
-    def pipeline_events(self):
-        return [e for e in self.events if e.get("src") == "pipeline"]
 
     def stop(self):
         self.srv.stop()

@@ -12,15 +12,17 @@ Job kinds
   plain      requests against the plain app on a fresh PROD-like seed, recording
              executed SQL (text + bound params) and file opens per request
   pytest     the release's own test suite (tests.command; skipped when absent)
-  scenarios  the legit scenarios (sim.scenarios or the stand-in) on fresh PROD-like seeds
+  scenarios  the legit scenarios (the job's "module") on fresh PROD-like seeds; a module that
+             cannot be imported is an error, never replaced by another one
   replay     recorded clean GET requests (legit gate without scenarios) on fresh PROD-like seeds
 
-The last stdout line is  @@RESULT@@ <json>.
+The result is the stdout line  @@RESULT@@ <nonce> <json>, where <nonce> is the job's
+"result_nonce": it is taken out of the job before any application code is imported, so
+application code printing a result line of its own is ignored by the host (pipeline/runner.py).
 """
 from __future__ import annotations
 
 import base64
-import hashlib
 import importlib
 import json
 import os
@@ -33,6 +35,8 @@ import tempfile
 import threading
 import time
 import traceback
+
+from .jobshape import body_info, file_candidates, norm_body, short as _short
 
 MARK = "@@RESULT@@"
 MARKER_RE = re.compile(rb"MK[A-Z0-9]{10}")
@@ -104,19 +108,9 @@ def _copy_db(src: str, dst: str) -> None:
         b.close()
 
 
-def _short(v, n=400):
-    s = v if isinstance(v, str) else json.dumps(v, default=str)
-    return s if len(s) <= n else s[:n] + "..."
-
-
 def _body_info(body: bytes, markers: dict) -> dict:
     found = sorted({m.decode() for m in MARKER_RE.findall(body or b"")})
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        text = body.decode("latin-1")
-    return {"sha": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b""), "head": text[:300],
-            "marker_owners": sorted({markers[m] for m in found if m in markers})}
+    return {**body_info(body), "marker_owners": sorted({markers[m] for m in found if m in markers})}
 
 
 def _b(req) -> bytes:
@@ -282,29 +276,6 @@ def _roots():
     return [os.path.realpath(r) for r in _profile().allowed_file_roots(dict(os.environ)) if r]
 
 
-def _expand(spec: dict, base_req: dict) -> list:
-    """Candidate legit values for a file parameter: every file under the allowed roots, by every relative suffix."""
-    from pipeline import reqs as R
-    out, seen = [], set()
-    for root in _roots():
-        for d, _dirs, files in os.walk(root):
-            for fn in sorted(files):
-                full = os.path.join(d, fn)
-                rel = os.path.relpath(full, root).split(os.sep)
-                with open(full, "rb") as f:
-                    sha = hashlib.sha256(f.read()).hexdigest()
-                for i in range(len(rel)):
-                    val = "/".join(rel[i:])
-                    if val in seen:
-                        continue
-                    seen.add(val)
-                    rq = R.set_value(base_req, spec["param"], val, spec.get("template"))
-                    rq["name"] = "cand:" + val
-                    rq["expect_sha"] = sha
-                    out.append(rq)
-    return out
-
-
 def job_plain(job: dict) -> dict:
     seed = _seed(int(job.get("seed", 1)), job)
     work = os.path.join(tempfile.mkdtemp(prefix="runner-plain-"), "app.db")
@@ -312,7 +283,7 @@ def job_plain(job: dict) -> dict:
     _install_recorders()
     requests = list(job.get("requests") or [])
     if job.get("expand"):
-        requests = _expand(job["expand"], job["expand"]["base"]) + requests
+        requests = file_candidates(_roots(), job["expand"]) + requests
     client = _client(work)
     results = []
     warm = []
@@ -323,8 +294,7 @@ def job_plain(job: dict) -> dict:
     for rq in requests:
         _copy_db(seed["prod"], work)   # every request starts from the seed
         status, body, rec = _send_plain(client, rq)
-        info = _body_info(body, {})
-        info.pop("marker_owners", None)
+        info = body_info(body)
         results.append({"name": rq.get("name"), "status": status, "sql": rec["sql"][:50], "opens": sorted(set(rec["opens"])),
                         "expect_sha": rq.get("expect_sha"), "request": {k: rq.get(k) for k in ("method", "path", "query")},
                         **info})
@@ -371,16 +341,12 @@ def job_scenarios(job: dict) -> dict:
     seed = _seed(int(job.get("seed", 1)), job)
     _set_app_env(os.path.join(tempfile.mkdtemp(prefix="runner-scn-"), "app.db"), _secret("runner-prod-secret"))
     used = job.get("module") or "sim.scenarios"
-    note = ""
     try:
         mod = importlib.import_module(used)
     except Exception as e:  # noqa: BLE001
-        fb = job.get("fallback")
-        if not fb:
-            raise
-        note = "%s unavailable (%s); used %s" % (used, type(e).__name__, fb)
-        used = fb
-        mod = importlib.import_module(fb)
+        # fail closed: scenarios written for another app would compare nothing that matters
+        raise RuntimeError("the legit scenarios module %r cannot be imported (%s: %s); the legit gate cannot "
+                           "judge the patch" % (used, type(e).__name__, _short(str(e), 300))) from e
     out = []
     for i, fn in enumerate(getattr(mod, "SCENARIOS", [])):
         name = getattr(fn, "__name__", "scenario_%d" % i)
@@ -394,14 +360,7 @@ def job_scenarios(job: dict) -> dict:
             out.append({"name": name, "error": "%s: %s" % (type(e).__name__, _short(str(e), 300))})
         finally:
             shutil.rmtree(os.path.dirname(work), ignore_errors=True)
-    return {"module": used, "note": note, "scenarios": out, "partial": bool(getattr(mod, "PARTIAL_COVERAGE", False))}
-
-
-def _norm_body(body: bytes):
-    try:
-        return json.loads(body)
-    except (ValueError, UnicodeDecodeError):
-        return {"sha256": hashlib.sha256(body or b"").hexdigest(), "len": len(body or b"")}
+    return {"module": used, "note": "", "scenarios": out, "partial": bool(getattr(mod, "PARTIAL_COVERAGE", False))}
 
 
 def job_replay(job: dict) -> dict:
@@ -415,7 +374,7 @@ def job_replay(job: dict) -> dict:
         _copy_db(seed["prod"], work)
         status, body, _rec = _send_plain(client, rq)
         out.append({"name": rq.get("name"), "method": rq.get("method", "GET"), "path": rq.get("path"),
-                    "status": status, "body": _norm_body(body)})
+                    "status": status, "body": norm_body(body)})
     return {"results": out}
 
 
@@ -425,6 +384,7 @@ JOBS = {"harness": job_harness, "plain": job_plain, "pytest": job_pytest, "scena
 
 def main() -> int:
     job = json.loads(sys.stdin.read() or "{}")
+    nonce = str(job.pop("result_nonce", "") or "")     # never handed to a job: application code runs in them
     APP.clear()
     APP.update(job.get("app") or {})
     if job.get("app_now") and APP.get("frozen_time_env"):
@@ -436,7 +396,7 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         res = {"ok_run": False, "error": "%s: %s" % (type(e).__name__, e), "trace": traceback.format_exc()[-3000:]}
     res["seconds"] = res.get("seconds") or round(time.time() - t0, 2)
-    sys.stdout.write("\n" + MARK + " " + json.dumps(res, default=str) + "\n")
+    sys.stdout.write("\n" + " ".join(x for x in (MARK, nonce, json.dumps(res, default=str)) if x) + "\n")
     sys.stdout.flush()
     return 0
 

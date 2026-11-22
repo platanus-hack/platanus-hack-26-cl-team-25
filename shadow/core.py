@@ -81,7 +81,6 @@ class Lifespan:
             msg = getter.result()
             if msg["type"] == "lifespan.startup.failed":
                 raise RuntimeError(f"app startup failed: {msg.get('message')}")
-            self._sq = sq
         else:
             getter.cancel()
             self.task = None  # app does not support lifespan
@@ -126,11 +125,11 @@ class Engine:
         self._activate()
         self.reset()
         self.app = getattr(importlib.import_module(mod_name), attr or "app")
-        try:
-            self.markers = {str(k): int(v) for k, v in (self.profile.load_markers(dict(os.environ)) or {}).items()}
-        except Exception as e:
-            log.warning("load_markers failed (%r): owner oracle disabled", e)
-            self.markers = {}
+        # a profile whose markers cannot be loaded must not start: with no markers the owner oracle is off
+        # and every IDOR would be judged clean. "No markers" is only legitimate when load_markers returns none.
+        self.markers = {str(k): int(v) for k, v in (self.profile.load_markers(dict(os.environ)) or {}).items()}
+        if not self.markers:
+            log.warning("profile has no markers: owner oracle disabled")
         self.public = [p for p in self.profile.public_paths()]
         self.sharing = load_sharing(os.environ.get("SHADOW_SHARING_PATH")
                                     or (os.path.join(os.path.dirname(seed_db), "sharing.json") if seed_db else ""))
@@ -422,7 +421,7 @@ class Engine:
             return []
         if self.is_public(path) and not (other_fired or len(owners) >= 2):
             return []
-        return [{"oracle": "owner", "detail": {"marker_owner": o, "requester": uid}, "stack": list(stack)}
+        return [{"oracle": wire.ORACLE_OWNER, "detail": {"marker_owner": o, "requester": uid}, "stack": list(stack)}
                 for o in sorted(owners)[:MAX_OWNER_EVENTS]]
 
 

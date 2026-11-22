@@ -12,7 +12,7 @@ ADD = "import sqlite3;c=sqlite3.connect('/data/app.db');c.execute(\"insert into 
 
 
 def ctr(env, name):
-    return env.dk.containers.get(f"wp4-{name}")
+    return env.dk.containers.get(f"fleettest-{name}")
 
 
 def test_reset_layout_and_hardening(env):
@@ -31,7 +31,7 @@ def test_reset_layout_and_hardening(env):
     mounts = {m["Destination"]: m for m in prod.attrs["Mounts"]}
     assert mounts["/opt/immune"]["RW"] is False and mounts["/app"]["RW"] is False
     assert mounts["/app"]["Source"].endswith("releases/r1")
-    assert prod.attrs["Config"]["WorkingDir"] == "/app" and prod.labels["immune.project"] == "wp4"
+    assert prod.attrs["Config"]["WorkingDir"] == "/app" and prod.labels["immune.project"] == "fleettest"
     assert mounts["/data"]["RW"] is True and mounts["/data"]["Source"] == env.prod
     envs = dict(e.split("=", 1) for e in prod.attrs["Config"]["Env"])
     assert envs["APP_SECRET"] == "ps" and envs["APP_DB"] == "/data/app.db" and envs["APP_STATIC"] == "/app/fixture_app/static"
@@ -47,7 +47,7 @@ def test_reset_layout_and_hardening(env):
         m = {x["Destination"]: x for x in c.attrs["Mounts"]}
         assert m["/seed"]["RW"] is False and "/data" in c.attrs["HostConfig"]["Tmpfs"]
     gw = env.gw
-    assert sorted(c["addr"] for c in gw.puts[-1]) == ["wp4-clone-1:8000", "wp4-clone-2:8000"]
+    assert sorted(c["addr"] for c in gw.puts[-1]) == ["fleettest-clone-1:8000", "fleettest-clone-2:8000"]
     assert gw.upstream == {"addr": "prod-blue:8000", "release": "r1"} and gw.resets == 1
     assert env.fleet.state()["prod"] == {"active": "blue", "release": "r1"}
 
@@ -62,7 +62,7 @@ def test_deploy_switches_and_keeps_data(env):
     code, out = sh(ctr(env, "prod-green"), NOTES)
     assert code == 0 and out.strip() == "3"  # 2 seed + the one written before the deploy
     names = [c.name for c in env.dk.containers.list(all=True, filters={"label": f"immune.run={env.cfg.run_id}"})]
-    assert "wp4-prod-blue" not in names and "wp4-prod-green" in names
+    assert "fleettest-prod-blue" not in names and "fleettest-prod-green" in names
     assert {c["release"] for c in env.gw.puts[-1]} == {"r2"} and len(env.gw.puts[-1]) == 2
     clones = [c for c in env.fleet.state()["clones"]]
     assert len(clones) == 2 and all(c["release"] == "r2" for c in clones)
@@ -86,18 +86,18 @@ def test_unhealthy_release_never_becomes_upstream(env):
     assert not res["ok"] and not res["rolled_back"] and "health" in res["detail"]
     assert env.gw.upstreams == before
     assert env.fleet.state()["prod"] == {"active": "blue", "release": "r1"}
-    assert not [c for c in env.dk.containers.list(all=True) if c.name == "wp4-prod-green"]
+    assert not [c for c in env.dk.containers.list(all=True) if c.name == "fleettest-prod-green"]
     ctr(env, "prod-blue")
 
 
 def test_rising_5xx_rolls_back(env):
     env.fleet.reset("r1", 1)
-    env.gw.bump_after_switch = 5
+    env.gw.bump_after_switch, env.gw.prod_requests = 5, 50     # 10% of the requests since the switch
     res = env.fleet.deploy("r2")
     assert not res["ok"] and res["rolled_back"]
     assert env.gw.upstream == {"addr": "prod-blue:8000", "release": "r1"}
     assert env.fleet.state()["prod"] == {"active": "blue", "release": "r1"}
-    assert not [c for c in env.dk.containers.list(all=True) if c.name == "wp4-prod-green"]
+    assert not [c for c in env.dk.containers.list(all=True) if c.name == "fleettest-prod-green"]
     ctr(env, "prod-blue")
 
 
@@ -123,15 +123,15 @@ def test_retired_clone_replaced_via_api_loop(env):
 
 
 def test_never_removes_unlabelled(env):
-    other = env.dk.containers.create("immune-base:1", ["sleep", "300"], name="wp4-other")
-    clash = env.dk.containers.create("immune-base:1", ["sleep", "300"], name="wp4-prod-blue")
+    other = env.dk.containers.create("immune-base:1", ["sleep", "300"], name="fleettest-other")
+    clash = env.dk.containers.create("immune-base:1", ["sleep", "300"], name="fleettest-prod-blue")
     try:
         with pytest.raises(FleetError):
             env.fleet.reset("r1", 1)
-        env.dk.containers.get("wp4-prod-blue")  # untouched
+        env.dk.containers.get("fleettest-prod-blue")  # untouched
         clash.remove(force=True)
         env.fleet.reset("r1", 1)  # reset sweeps only labelled containers
-        env.dk.containers.get("wp4-other")
+        env.dk.containers.get("fleettest-other")
     finally:
         for c in (other, clash):
             try:
@@ -202,13 +202,13 @@ def test_restart_brings_back_a_missing_prod_and_drops_stale_clones(env):
     f = _restarted(env)
     assert f.adopt() is True
     assert ctr(env, "prod-blue").status == "running" and f.state()["prod"] == {"active": "blue", "release": "r1"}
-    assert [c["name"] for c in f.state()["clones"]] == ["wp4-clone-2"]   # the dead one was not adopted
+    assert [c["name"] for c in f.state()["clones"]] == ["fleettest-clone-2"]   # the dead one was not adopted
     f.reconcile_once()
     assert len(f.state()["clones"]) == 2
 
 
 def test_restart_between_switch_and_record_follows_the_gateway(env):
-    import json, os
+    import json
     env.fleet.reset("r1", 1)
     assert env.fleet.deploy("r2")["ok"]                 # green/r2 live, the gateway points at it
     path = env.fleet._state_path()
@@ -220,7 +220,7 @@ def test_restart_between_switch_and_record_follows_the_gateway(env):
     assert f.adopt() is True
     assert f.state()["prod"] == {"active": "green", "release": "r2"}
     names = [c.name for c in env.dk.containers.list(all=True, filters={"label": f"immune.run={env.cfg.run_id}"})]
-    assert "wp4-prod-blue" not in names
+    assert "fleettest-prod-blue" not in names
 
 
 def test_reconcile_recreates_a_removed_prod(env):
@@ -233,7 +233,7 @@ def test_reconcile_recreates_a_removed_prod(env):
 
 
 def test_old_release_dirs_are_pruned_but_never_a_mounted_one(env):
-    import os, shutil, time
+    import os, shutil
     from .conftest import make_release
     env.fleet.reset("r1", 1)
     for i in range(8):

@@ -19,7 +19,7 @@ from urllib.parse import quote
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from immune.auth import Authenticator, credential_key, prod_secret_for
@@ -27,7 +27,8 @@ from immune_contracts import authtoken, events, wire
 
 from . import l0
 from .classifier import (CAPTIVE, CLEAN, EVIDENCE, SUSPECT, EnumTracker, Manifest, Result, Rule, View, Who, is_builtin_rule,
-                         classify, redact_form, redact_json, redact_query, REDACTED)
+                         classify, redact_form, redact_json, redact_multipart, redact_path, redact_query,
+                         REDACTED)
 from .pool import Clone, Pool
 from .bus import Bus
 
@@ -41,6 +42,10 @@ SID_RE = re.compile(r"[A-Za-z0-9_\-]{16,64}")
 MAX_BODY = 10 * 1024 * 1024
 BODY_TIMEOUT_S = 30.0
 RETRY_SAFE = ("GET", "HEAD", "OPTIONS")
+
+
+class ClientGone(Exception):
+    """The client disconnected before its request was complete: nothing to forward, nobody to answer."""
 
 
 class BadRequest(Exception):
@@ -59,6 +64,7 @@ AFTER_SEEN = 4096         # identical requests (method, target, body, identity) 
 
 class _NoJar(http.cookiejar.CookieJar):
     """A proxy must never keep upstream cookies between clients."""
+    # not dead code: httpx calls both on every response to fill its client-wide jar; overriding them keeps it empty
     def set_cookie(self, cookie):  # noqa: D401
         return None
 
@@ -402,6 +408,8 @@ class Gateway:
             return
         try:
             ctx = await self._read(scope, receive)
+        except ClientGone:
+            return        # a truncated body is never forwarded as if it were the whole request
         except BadRequest as e:
             # refused before it reaches production or a clone: not a production error (never counted as one)
             await self._send(send, Upstream(e.status, [("content-type", "application/json"), ("connection", "close")],
@@ -437,7 +445,7 @@ class Gateway:
             except asyncio.TimeoutError:
                 raise BadRequest(408, "Request Timeout") from None
             if msg["type"] == "http.disconnect":
-                break
+                raise ClientGone()
             b = msg.get("body", b"")
             size += len(b)
             if size > MAX_BODY:
@@ -519,33 +527,14 @@ class Gateway:
         self._publish_classified(ctx)
         if ctx.res.cls == CLEAN:
             ctx.would = "prod"
-        elif ctx.res.cls == EVIDENCE and ctx.who.trusted:
-            ctx.would = "deny"
-        else:   # suspect, or evidence (enforce would capture and replay in L2): detonate in L1
-            fail_closed = bool(ctx.res.rule_hit) or _high_signal(ctx.res.reasons) or ctx.res.cls == EVIDENCE
-            clone = await self.pool.acquire(CLONE_WAIT_S)
-            if clone is None:
-                ctx.verdict = "no_clone"
-                ctx.would = "deny" if fail_closed else "prod"
-            else:
-                try:
-                    async with clone.lock:
-                        up = await self.to_clone(ctx, clone, "L1")
-                    ctx.verdict = up.verdict
-                    await self.pool.release(clone)
-                    if up.verdict == wire.VERDICT_ORACLE:
-                        ctx.would = "deny" if ctx.who.trusted else "shadow_l1"
-                    elif up.verdict == wire.VERDICT_CLEAN:
-                        ctx.would = "prod"
-                    else:
-                        ctx.would = "deny" if ctx.res.rule_hit else "prod"
-                    if ctx.res.cls == EVIDENCE:
-                        ctx.would = "shadow_l2"
-                except Exception as e:
-                    log.warning("clone %s failed: %s", clone.id, e)
-                    await self.pool.retire(clone)
-                    ctx.verdict = "no_clone"
-                    ctx.would = "deny" if fail_closed else "prod"
+        elif ctx.res.cls == EVIDENCE:
+            if ctx.who.trusted:
+                ctx.would = "deny"
+            else:   # enforce would capture and replay in L2 (deny without a clone); here: detonate in L1 for the evidence
+                await self._detonation(ctx, act=False)
+                ctx.would = "deny" if ctx.verdict == "no_clone" else "shadow_l2"
+        else:
+            ctx.would, _ = await self._detonation(ctx, act=False)
         return await self.to_prod(ctx)
 
     # -- after-check: the second net for what the classifier called clean
@@ -584,19 +573,10 @@ class Gateway:
         """Replay in an L1 clone. If an oracle fires there, the clone pushes the evidence as for any detonation
         (so the incident opens as usual) and the session is captive from its next request on."""
         st = self.stats["aftercheck"]
-        clone = await self.pool.acquire(AFTER_WAIT_S)
-        if clone is None:
+        up = await self._run_l1(ctx, AFTER_WAIT_S)
+        if up is None:
             st["no_clone"] += 1
             return
-        try:
-            async with clone.lock:
-                up = await self.to_clone(ctx, clone, "L1")
-        except Exception as e:
-            log.warning("after-check clone %s failed: %s", clone.id, e)
-            await self.pool.retire(clone)
-            st["no_clone"] += 1
-            return
-        await self.pool.release(clone)
         st["checked"] += 1
         if up.verdict != wire.VERDICT_ORACLE:
             return
@@ -606,42 +586,60 @@ class Gateway:
         self._prodlog(ctx.rid, {"forwarded": True, "status": ctx.status, "aftercheck": wire.VERDICT_ORACLE})
         # keeps the request out of the legitimate-traffic corpus (pipeline gate `legit`)
         self.recorder.write({"rid": ctx.rid, "ts": time.time(), "aftercheck": wire.VERDICT_ORACLE, "method": ctx.method,
-                             "path": ctx.raw_path, "query": redact_query(ctx.query, (ctx.res.sensitive or {}).get("query") or set()),
+                             "path": redact_path(ctx.raw_path, (ctx.res.sensitive or {}).get("path") or set()),
+                             "query": redact_query(ctx.query, (ctx.res.sensitive or {}).get("query") or set()),
                              "uid": ctx.who.uid, "session": ctx.session})
         if not ctx.who.trusted:   # a trusted identity is never diverted (contract §6); the rule covers it
             self._mark_captive(ctx, "aftercheck")
 
     # -- step 7
-    async def detonate(self, ctx: Ctx) -> Upstream:
-        builtin = is_builtin_rule(ctx.res.reasons)
-        fail_closed = bool(ctx.res.rule_hit) or builtin or _high_signal(ctx.res.reasons)
-        clone = await self.pool.acquire(CLONE_WAIT_S)
+    async def _run_l1(self, ctx: Ctx, wait_s: float, evict: bool = False) -> Upstream | None:
+        """One request in a free L1 clone (the wrapper resets it afterwards, whatever the verdict). None when no
+        clone could answer; `evict` then frees the oldest captive clone for the next detonation."""
+        clone = await self.pool.acquire(wait_s)
         if clone is None:
-            await self._evict_oldest(ctx)
-            ctx.verdict = "no_clone"
-            return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
+            if evict:
+                await self._evict_oldest(ctx)
+            return None
         try:
             async with clone.lock:
                 up = await self.to_clone(ctx, clone, "L1")
         except Exception as e:
-            log.warning("clone %s failed: %s", clone.id, e)
+            log.warning("clone %s failed (rid=%s): %s", clone.id, ctx.rid, e)
             await self.pool.retire(clone)
-            ctx.verdict = "no_clone"
-            return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
-        ctx.verdict = up.verdict
-        # L1: the wrapper already reset the clone, whatever the verdict
+            return None
         await self.pool.release(clone)
+        return up
+
+    async def _detonation(self, ctx: Ctx, act: bool) -> tuple[str, Upstream | None]:
+        """Detonate a suspect request in L1 and decide its route: "prod", "deny" or "shadow_l1" (answered by
+        the clone, whose response is returned). The one place where that is decided, for enforce and observe;
+        with act=False (observe) nothing is evicted or captured. Sets ctx.verdict."""
+        builtin = is_builtin_rule(ctx.res.reasons)
+        fail_closed = bool(ctx.res.rule_hit) or builtin or _high_signal(ctx.res.reasons)
+        up = await self._run_l1(ctx, CLONE_WAIT_S, evict=act)
+        if up is None:
+            ctx.verdict = "no_clone"
+            return ("deny" if fail_closed else "prod"), None
+        ctx.verdict = up.verdict
         if up.verdict == wire.VERDICT_ORACLE:
             if ctx.who.trusted:
-                return self.deny(ctx)
-            self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
+                return "deny", None
+            if act:
+                self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
+            return "shadow_l1", up
+        if builtin:   # a '..' path segment never reaches prod: no oracle sees every file, and browsers never send one
+            return "deny", None
+        if up.verdict == wire.VERDICT_CLEAN:
+            return "prod", None
+        return ("deny" if ctx.res.rule_hit else "prod"), None   # inconclusive / unknown
+
+    async def detonate(self, ctx: Ctx) -> Upstream:
+        decision, up = await self._detonation(ctx, act=True)
+        if decision == "shadow_l1":
             ctx.route = "shadow_l1"
             return up
-        if builtin:   # a '..' path segment never reaches prod: no oracle sees every file, and browsers never send one
-            return self.deny(ctx)
-        if up.verdict == wire.VERDICT_CLEAN:
-            return await self.to_prod(ctx)
-        return self.deny(ctx) if ctx.res.rule_hit else await self.to_prod(ctx)   # inconclusive / unknown
+        return self.deny(ctx) if decision == "deny" else await self.to_prod(ctx)
 
     # -- step 8, evidence without detonation: mark captive, bind now, replay in L2
     async def evidence(self, ctx: Ctx) -> Upstream:
@@ -712,7 +710,17 @@ class Gateway:
         return {"target": (ctx.raw_path + ("?" + ctx.query if ctx.query else "")).encode("latin-1")}
 
     def _out_headers(self, ctx: Ctx) -> list:
-        return [(k, v) for k, v in ctx.headers if k not in HOP]
+        """Client headers for prod or a clone: no hop-by-hop headers, and the Cookie header without `gwsid`."""
+        out = []
+        for k, v in ctx.headers:
+            if k in HOP:
+                continue
+            if k == "cookie":
+                v = _strip_cookie(v, "gwsid")
+                if not v:
+                    continue
+            out.append((k, v))
+        return out
 
     async def to_prod(self, ctx: Ctx) -> Upstream:
         ctx.route = "prod"
@@ -817,15 +825,19 @@ class Gateway:
         sens = ctx.res.sensitive or {}
         headers = {}
         for k, v in ctx.headers:
-            headers[k] = REDACTED if k in ("authorization", "cookie", "proxy-authorization") else v
+            headers[k] = REDACTED if k in ("authorization", "cookie", "proxy-authorization") \
+                or k in (sens.get("header") or ()) else v
         body = ctx.body
         ctype = (ctx.hmap.get("content-type") or "").lower()
         if body and sens.get("json"):
             body = redact_json(body, sens["json"])
         elif body and sens.get("form") and "x-www-form-urlencoded" in ctype:
             body = redact_form(body, sens["form"])
+        elif body and sens.get("form") and ctype.startswith("multipart/form-data"):
+            body = redact_multipart(body, ctx.hmap.get("content-type") or "", sens["form"])
         return {"rid": ctx.rid, "ts": time.time(), "session": ctx.session, "uid": ctx.who.uid,
-                "trusted": ctx.who.trusted, "method": ctx.method, "path": ctx.raw_path,
+                "trusted": ctx.who.trusted, "method": ctx.method,
+                "path": redact_path(ctx.raw_path, sens.get("path") or set()),
                 "query": redact_query(ctx.query, sens.get("query") or set()), "headers": headers,
                 "body_b64": base64.b64encode(body).decode(), "class": ctx.res.cls, "reasons": list(ctx.res.reasons),
                 "route": ctx.route, "verdict": ctx.verdict, "status": ctx.status, "ms": ms,
@@ -1030,7 +1042,8 @@ def _cookie(header: str, name: str) -> str | None:
 
 
 def _strip_cookie(header: str, name: str) -> str:
-    """The Cookie header without `name` (the gateway's own session cookie never reaches the app)."""
+    """The Cookie header without `name`: the gateway's own session cookie never reaches the app, neither on
+    forwarded requests (_out_headers) nor on introspection (resolve)."""
     parts = [p.strip() for p in (header or "").split(";") if p.strip()]
     return "; ".join(p for p in parts if p.partition("=")[0].strip() != name)
 

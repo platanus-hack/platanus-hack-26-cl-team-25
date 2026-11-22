@@ -36,7 +36,8 @@ def default_rule(inc: dict, spec: dict, ttl_s: int = 3600) -> dict:
 
 
 def finalize(rule: dict, inc: dict, spec: dict, ttl_s: int) -> tuple:
-    """-> (rule, note). Forces id/incident, validates against rule.schema.json, falls back if invalid."""
+    """-> (rule, note). Forces `incident`, defaults `id` and `ttl_s`, requires the incident's method and route,
+    validates against rule.schema.json, falls back to default_rule if invalid."""
     note = ""
     try:
         if not isinstance(rule, dict):

@@ -7,9 +7,11 @@ import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 _ROOT = str(Path(__file__).resolve().parent.parent)
 if _ROOT not in sys.path:
@@ -26,9 +28,7 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
        "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 HEARTBEAT_S = 15.0
 POLL_S = 1.0   # how often an idle stream checks for shutdown and for a client that went away
-# pipeline audit.* events (pipeline/bus.py), accepted until immune_contracts/events.py lists them
-EXTRA_TYPES = ("audit.started", "audit.finding", "audit.done")
-TYPES = frozenset(ev_contract.TYPES) | frozenset(EXTRA_TYPES)
+TYPES = frozenset(ev_contract.TYPES)
 FILES = {"app.js": "text/javascript; charset=utf-8", "state.js": "text/javascript; charset=utf-8",
          "style.css": "text/css; charset=utf-8", "inter.woff2": "font/woff2", "mono.woff2": "font/woff2"}
 # sent on every response: the page is public and read-only
@@ -38,10 +38,23 @@ SECURITY_HEADERS = {
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
 }
 # Readers without the bus token (the public page) never get credentials that travel inside events:
-# evidence carries the attacker's request headers verbatim, PR urls of the local repo carry a host path.
+# evidence carries the attacker's request verbatim (headers, query string, body), the statement an oracle saw,
+# a snapshot of the clone's database and the gateway session cookie; PR urls of the local repo carry a host path.
 SENSITIVE_HEADER = re.compile(r"authorization|cookie|token|secret|api[-_]?key|passw|session|credential|signature", re.I)
 REDACTED = "[redacted]"
+HIDDEN_KEYS = frozenset({"body_b64", "pre_state_b64", "statement"})   # replaced by a marker that only says how long it was
+QUERY_KEYS = frozenset({"query"})                                     # a raw query string: a=1&token=x
+URL_KEYS = frozenset({"path", "url", "target"})                       # may carry ?query
+SESSION_PREFIX = "gwsid:"                                             # gateway/core.py: the session key is the raw cookie
+_SESSION_KEY = secrets.token_bytes(32)                                # per process: public session names are not reversible
 MAX_STREAMS = 200
+# Bounds (each one can be changed with the env var of the same name with DASH_ in front, see create_app and Bus)
+EVENTS_LIMIT = 1000          # DASH_EVENTS_LIMIT: events per GET /events page when the client sends no limit
+EVENTS_LIMIT_MAX = 5000      # DASH_EVENTS_LIMIT_MAX: largest page a client may ask for
+MAX_BODY_MB = 32             # DASH_MAX_BODY_MB: largest POST /events body (evidence carries a request body and a db snapshot)
+MAX_EVENTS = 50000           # DASH_MAX_EVENTS: events kept in memory (the JSONL store stays the durable record)
+STORE_MAX_MB = 256           # DASH_STORE_MAX_MB: past this size the JSONL store becomes <store>.1 (one generation kept); 0 = never
+TRAFFIC_TYPES = frozenset({ev_contract.REQ_CLASSIFIED, ev_contract.REQ_ROUTED})
 
 
 def _mask(value) -> str:
@@ -55,16 +68,54 @@ def _public_path(url: str) -> str:
     return f"file:///{REDACTED}/{tail}"
 
 
+def _hidden(v):
+    """Marker for a value that is not published: says that there was one and how long, nothing else."""
+    if v is None or v == "":
+        return v
+    return f"[redacted: {len(v)} chars]" if isinstance(v, str) else REDACTED
+
+
+def _public_query(q: str) -> str:
+    """a=1&token=abc -> a=1&token=[redacted] (same key pattern as the headers)"""
+    parts = []
+    for p in q.split("&"):
+        k, eq, _ = p.partition("=")
+        parts.append(f"{k}={REDACTED}" if eq and SENSITIVE_HEADER.search(unquote_plus(k)) else p)
+    return "&".join(parts)
+
+
+def _public_url(u: str) -> str:
+    head, mark, rest = u.partition("?")
+    if not mark:
+        return u
+    q, hash_, frag = rest.partition("#")
+    return head + "?" + _public_query(q) + hash_ + frag
+
+
+def public_session(s: str) -> str:
+    """gwsid:<cookie> -> gwsid:~<12 hex>. Keyed and stable inside one process, so the page still tells sessions apart."""
+    return SESSION_PREFIX + "~" + hmac.new(_SESSION_KEY, s.encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:12]
+
+
 def redact(v, key: str = ""):
     """Copy of an event (or any part of it) that is safe to show to anyone."""
+    if key in HIDDEN_KEYS:
+        return _hidden(v)
     if isinstance(v, dict):
         if key == "headers":
             return {k: (_mask(x) if SENSITIVE_HEADER.search(str(k)) else redact(x)) for k, x in v.items()}
         return {k: redact(x, str(k)) for k, x in v.items()}
     if isinstance(v, list):
         return [redact(x) for x in v]
-    if isinstance(v, str) and v.startswith("file:///"):
-        return _public_path(v)
+    if isinstance(v, str):
+        if v.startswith("file:///"):
+            return _public_path(v)
+        if v.startswith(SESSION_PREFIX):
+            return public_session(v)
+        if key in QUERY_KEYS:
+            return _public_query(v)
+        if key in URL_KEYS:
+            return _public_url(v)
     return v
 
 
@@ -88,11 +139,27 @@ class SecurityHeaders:
         await self.app(scope, receive, send_with_headers)
 
 
+def _env_int(name: str, default: int) -> int:
+    """Non-negative int from the environment; anything else is the default."""
+    try:
+        v = int(float(os.environ.get(name) or default))
+    except ValueError:
+        return default
+    return v if v >= 0 else default
+
+
+def _gen_of(first: dict) -> str:
+    return hashlib.sha256(f"{first.get('seq')}:{first.get('ts')}:{first.get('type')}".encode()).hexdigest()[:16]
+
+
 class Bus:
     def __init__(self, store: str | None, token: str):
         self.store = Path(store) if store else None
         self.token = token
         self.events: list[dict] = []
+        self.max_events = _env_int("DASH_MAX_EVENTS", MAX_EVENTS) or MAX_EVENTS
+        self.store_max = _env_int("DASH_STORE_MAX_MB", STORE_MAX_MB) * 1024 * 1024
+        self._gen = "empty"
         self.seq = 0
         self.epoch = 0
         self.streams = 0
@@ -106,10 +173,7 @@ class Bus:
     def gen(self) -> str:
         """Identity of the stored history: survives a restart, changes when the store is cleared or replaced.
         A page that reconnects and sees another gen drops its state and replays from the start."""
-        if not self.events:
-            return "empty"
-        first = self.events[0]
-        return hashlib.sha256(f"{first.get('seq')}:{first.get('ts')}:{first.get('type')}".encode()).hexdigest()[:16]
+        return self._gen     # fixed by the first event of the store: evicting old events from memory must not change it
 
     def dumps(self, e: dict, raw: bool) -> str:
         if raw or not self.redact:
@@ -119,27 +183,66 @@ class Bus:
             s = self._public[e["seq"]] = json.dumps(redact(e), separators=(",", ":"))
         return s
 
+    @property
+    def rotated(self) -> Path | None:
+        return self.store.with_name(self.store.name + ".1") if self.store else None
+
     def _load(self) -> None:
-        if not self.store or not self.store.exists():
+        if not self.store:
             return
-        with self.store.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue  # torn last line after a crash
-                if isinstance(e, dict) and isinstance(e.get("seq"), int) and not isinstance(e["seq"], bool):
-                    self.events.append(e)
-                    self.seq = max(self.seq, e["seq"])
+        for path in (self.rotated, self.store):      # the previous generation first: together they are the history
+            if not path.exists():
+                continue
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue  # torn last line after a crash
+                    if isinstance(e, dict) and isinstance(e.get("seq"), int) and not isinstance(e["seq"], bool):
+                        self.events.append(e)
+                        self.seq = max(self.seq, e["seq"])
         self.events.sort(key=lambda e: e["seq"])
+        if self.events:
+            self._gen = _gen_of(self.events[0])
+        self._evict()
+
+    def _evict(self) -> None:
+        """Keep at most max_events in memory; the JSONL store keeps everything.
+
+        A page rebuilds its state by replaying what is in memory (static/app.js opens /events/stream?since=0), so
+        what goes first is what the page needs least: events of earlier runs, then the request.* traffic of the
+        current run (the page loses request counts and nothing else: incidents are rebuilt from the other
+        events), and only then the oldest events of the current run."""
+        over = len(self.events) - self.max_events
+        if over <= 0:
+            return
+        over += self.max_events // 10                # make room for a while: this walks the whole list
+        run = self.events[-1].get("run")
+        for unwanted in (lambda e: e.get("run") != run, lambda e: e.get("type") in TRAFFIC_TYPES, lambda e: True):
+            keep = []
+            for e in self.events:
+                if over > 0 and unwanted(e):
+                    over -= 1
+                    self._public.pop(e["seq"], None)
+                else:
+                    keep.append(e)
+            self.events = keep
+            if over <= 0:
+                return
 
     def _persist(self, batch: list[dict]) -> None:
         if not self.store:
             return
         self.store.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if self.store_max and self.store.stat().st_size >= self.store_max:
+                os.replace(self.store, self.rotated)
+        except OSError:
+            pass                                     # no store yet, or it cannot be moved: keep appending
         with self.store.open("a", encoding="utf-8") as f:
             for e in batch:
                 f.write(json.dumps(e, separators=(",", ":")) + "\n")
@@ -157,8 +260,11 @@ class Bus:
                 e = dict(it)
                 e["seq"] = self.seq
                 batch.append(e)
+            if batch and not self.events:
+                self._gen = _gen_of(batch[0])
             self.events.extend(batch)
             self._persist(batch)
+            self._evict()
             self.cond.notify_all()
         return [e["seq"] for e in batch]
 
@@ -166,10 +272,12 @@ class Bus:
         async with self.cond:
             self.events = []
             self._public = {}
+            self._gen = "empty"
             self.epoch += 1  # seq keeps counting so Last-Event-ID stays monotonic
             if self.store:
                 self.store.parent.mkdir(parents=True, exist_ok=True)
                 self.store.write_text("")
+                self.rotated.unlink(missing_ok=True)
             self.cond.notify_all()
 
     def after(self, since: int, type_prefix: str | None = None, limit: int | None = None) -> list[dict]:
@@ -221,13 +329,30 @@ def create_app(store: str | None = None, token: str | None = None) -> Starlette:
     bus = Bus(store if store is not None else os.environ.get("BUS_STORE") or None,
               token if token is not None else os.environ.get("BUS_TOKEN", ""))
     max_streams = _int(os.environ.get("DASH_MAX_STREAMS"), MAX_STREAMS) or MAX_STREAMS
+    page_max = _env_int("DASH_EVENTS_LIMIT_MAX", EVENTS_LIMIT_MAX) or EVENTS_LIMIT_MAX
+    page = min(_env_int("DASH_EVENTS_LIMIT", EVENTS_LIMIT) or EVENTS_LIMIT, page_max)
+    max_body = (_env_int("DASH_MAX_BODY_MB", MAX_BODY_MB) or MAX_BODY_MB) * 1024 * 1024
     no_store = {"Cache-Control": "no-store"}
+
+    async def read_body(request: Request) -> bytes | None:
+        """The request body, or None when it is larger than max_body (checked while reading, not after)."""
+        if _int(request.headers.get("content-length")) > max_body:
+            return None
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > max_body:
+                return None
+        return bytes(buf)
 
     async def post_events(request: Request):
         if not bus.authorized(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+        raw = await read_body(request)
+        if raw is None:
+            return JSONResponse({"error": "body too large", "max_bytes": max_body}, status_code=413)
         try:
-            body = json.loads(await request.body())
+            body = json.loads(raw)
         except ValueError:
             return JSONResponse({"error": "invalid json"}, status_code=400)
         items = body if isinstance(body, list) else [body]
@@ -241,7 +366,9 @@ def create_app(store: str | None = None, token: str | None = None) -> Starlette:
     async def get_events(request: Request):
         q = request.query_params
         since = _int(q.get("since"))
-        limit = _int(q.get("limit")) or None
+        # always a page: a reader follows `next` (since=<next>) until it gets no events, as immune/metrics.py does
+        limit = _int(q.get("limit"))
+        limit = min(limit, page_max) if limit > 0 else page
         evs = bus.after(since, q.get("type") or None, limit)
         raw = bus.authorized(request)
         body = '{"events":[%s],"next":%d}' % (",".join(bus.dumps(e, raw) for e in evs), evs[-1]["seq"] if evs else bus.seq)

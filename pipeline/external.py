@@ -60,8 +60,7 @@ class ExternalPipeline(Pipeline):
         if not self.repro_url:
             return super()._flow(inc)      # judge mode: the whole flow, judged on clone triples
         iid = inc["incident"]
-        self.publish(E.INCIDENT_OPENED, {k: inc[k] for k in ("incident", "vuln_class", "method", "route", "param",
-                                                            "sink", "evidence_rid", "request")}, inc)
+        self.publish(E.INCIDENT_OPENED, self.opened_data(inc), inc)
         release = self.current_release()
         inc["base_release"] = release
         self.note(inc, "opened (external app, release %s)" % release)
@@ -88,7 +87,7 @@ class ExternalPipeline(Pipeline):
                          % (p["expect"]["oracle"], hits, self.runs))
         self.note(inc, "PoC reproduces %d/%d on the shadow clone" % (hits, self.runs))
 
-        # 2. containment rule (built-in derivation; the LLM patcher is Python-only for now)
+        # 2. containment rule (built-in derivation: this mode loads no patch generator)
         rule, why = rules.finalize(None, inc, self.spec, self.cfg.rule_ttl_s)
         self.gw.post_rule(rule)
         inc["rule"] = rule
@@ -96,7 +95,8 @@ class ExternalPipeline(Pipeline):
         self.note(inc, "rule %s posted (%s %s)" % (rule["id"], rule["scope"], rule.get("param")))
         self.state.save()
 
-        # 3. patch stage for this runtime: not built yet
-        raise Closed("rule_only", "contained by rule %s; the patch stage for this runtime is not built yet"
+        # 3. reproduction-only mode stops here: REPRO_URL names one running clone, not a release the gates
+        #    could patch and judge (judge mode, without REPRO_URL, runs the whole flow)
+        raise Closed("rule_only", "contained by rule %s; reproduction-only mode (REPRO_URL) has no patch stage"
                      % rule["id"])
 

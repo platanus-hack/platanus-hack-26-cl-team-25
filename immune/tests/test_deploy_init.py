@@ -56,10 +56,32 @@ def test_compose_override_puts_gateway_in_front(tmp_path):
     assert gw["container_name"] == "immune-demoapp-front"
     assert doc["networks"]["immune_prodnet"] == {"name": "immune-demoapp-front_prodnet", "internal": True}
     assert "immune_prodnet" in doc["services"]["web"]["networks"]
-    assert res["command"][-2:] == ["up", "-d"] and res["ready_command"].startswith("immune deploy --project")
+    # the working path is `immune up`, also for a compose project: `immune deploy` is experimental
+    assert res["command"][-2:] == ["up", "-d"] and res["ready_command"].startswith("immune up --project")
     md = open(os.path.join(cfg.project_dir, ".immune", "DEPLOY.md")).read()
     assert "immune deploy --project" in md and "no longer published" in md and "webdata:/data" in md
+    assert "--experimental" in md and "no clone pool" in md and "no event bus" in md
+    assert "run first on a shadow clone" not in md             # the front gateway detonates nothing
     assert oct(os.stat(os.path.join(cfg.project_dir, ".immune", "deploy", "immune.env")).st_mode)[-3:] == "600"
+
+
+def test_deploy_refuses_to_start_the_front_gateway_unless_experimental(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path)
+    deploycmd.generate(cfg, _det())
+    os.makedirs(os.path.join(cfg.project_dir, ".immune", "shadow"), exist_ok=True)
+    with open(os.path.join(cfg.project_dir, ".immune", "shadow", "detect.yaml"), "w") as f:
+        yaml.safe_dump(_det(), f)
+    ran = []
+    monkeypatch.setattr(deploycmd.subprocess, "call", lambda cmd: ran.append(cmd) or 0)
+    assert deploycmd.main(["--project", cfg.project_dir]) == 2
+    out = capsys.readouterr().out
+    assert ran == []
+    assert "docker compose" in out and "no clone pool" in out and "no event bus" in out
+    assert "immune up --project" in out and "--experimental" in out
+    assert deploycmd.main(["--project", cfg.project_dir, "--dry-run"]) == 0 and ran == []
+    assert deploycmd.main(["--project", cfg.project_dir, "--experimental"]) == 0
+    assert len(ran) == 1 and ran[0][:2] == ["docker", "compose"] and ran[0][-2:] == ["up", "-d"]
+    assert "no clone pool" in capsys.readouterr().out          # the limits are printed when it does run, too
 
 
 @pytest.mark.docker

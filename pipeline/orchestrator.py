@@ -4,6 +4,10 @@ merge -> release -> blue/green deploy -> verify -> closed.
 One incident at a time; the rest wait in a persistent queue. Dedupe key: oracle kind + method +
 route template + parameter. Patched / rule_only incidents are never reopened; not_reproducible ones
 may reopen after PIPELINE_REOPEN_COOLDOWN_S.
+
+Outcomes: `patched`; `rule_only` (a containment rule was posted and stays active); `not_reproducible`;
+`error` (the flow failed before any rule was posted: nothing contains the incident; it is retried like
+any transient close).
 """
 from __future__ import annotations
 
@@ -21,12 +25,20 @@ from immune_contracts import events as E
 from . import audit as auditmod, bus as busmod, incident as incmod, openapi, poc as pocmod, reqs, rules, verify
 from .corpus import Corpus
 from .gates import GATES, Validator
-from .repo import RepoError
 
 log = logging.getLogger("pipeline")
 
 
 TRANSIENT = "transient"     # outcome_detail: closed for a reason that may not hold later (see retry_transient)
+SOURCES = {"llm": "written by the LLM", "fallback": "pre-written fallback diff (the LLM was unavailable or "
+           "produced no diff)", "unknown": "unknown (the patch generator did not say)"}
+
+
+def patch_source(out: dict) -> str:
+    """`source` of a patcher.propose result; anything but the two defined values is reported as unknown,
+    never as the LLM's work."""
+    src = out.get("source") if isinstance(out, dict) else None
+    return src if src in ("llm", "fallback") else "unknown"
 
 
 class Closed(Exception):
@@ -131,7 +143,10 @@ class Pipeline:
                 old = d["incidents"].get(existing)
                 if old is not None:
                     old["hits"] = old.get("hits", 1) + 1
-                    reopen = (old.get("status") == "closed" and old.get("outcome") == "not_reproducible"
+                    # an `error` close left nothing in place: once its own retries are spent, a new hit reopens it
+                    again = old.get("outcome") == "not_reproducible" or (
+                        old.get("outcome") == "error" and int(old.get("retries") or 0) >= self.cfg.max_retries)
+                    reopen = (old.get("status") == "closed" and again
                               and time.time() - (old.get("closed_at") or 0) > self.cfg.reopen_cooldown_s)
                     if not reopen:
                         self.state.save()
@@ -279,7 +294,11 @@ class Pipeline:
             self.close(inc, c.outcome, c.reason, c.detail)
         except Exception as e:  # noqa: BLE001
             log.error("[%s] failed: %s\n%s", iid, e, traceback.format_exc())
-            self.close(inc, "rule_only", "pipeline error: %s: %s" % (type(e).__name__, e), TRANSIENT)
+            why = "pipeline error: %s: %s" % (type(e).__name__, e)
+            if inc.get("rule_posted"):
+                self.close(inc, "rule_only", why + "; the rule stays active", TRANSIENT)
+            else:       # nothing contains this incident: do not report it as contained
+                self.close(inc, "error", why + "; no containment rule was posted", TRANSIENT)
         finally:
             for d in inc.pop("_tmp", []):
                 shutil.rmtree(d, ignore_errors=True)
@@ -330,8 +349,9 @@ class Pipeline:
         self.publish(E.POC_READY, {"incident": iid, "reproducible": rep["reproducible"], "runs": rep["runs"], "poc": p}, inc)
         self.state.save()
         if not rep["reproducible"]:
-            raise Closed("not_reproducible", "the PoC triggered the %s oracle in %d/3 runs on release %s"
-                         % (p["expect"]["oracle"], rep["runs"], release))
+            where = "" if rep.get("sink_match", True) else " at the incident's sink %s" % p["expect"]["sink"].get("file")
+            raise Closed("not_reproducible", "the PoC triggered the %s oracle%s in %d/3 runs on release %s"
+                         % (p["expect"]["oracle"], where, rep["runs"], release))
         self.note(inc, "PoC reproduces 3/3; %d variants counted" % len(rep["counted"]))
         self._corpus_add(inc, p, rep)
 
@@ -371,8 +391,10 @@ class Pipeline:
                 out = _call_with_timeout(pm.propose, cfg.patcher_timeout_s, base_dir, incmod.public(inc), list(feedback),
                                          attempt) or {}
             except Exception as e:  # noqa: BLE001
-                out = {"diff": "", "source": "llm", "notes": "patch generator failed: %s" % e, "_failed": True}
-            src = out.get("source") if out.get("source") in ("llm", "fallback") else "llm"
+                out = {"diff": "", "notes": "patch generator failed: %s" % e, "_failed": True}
+            if not isinstance(out, dict):
+                out = {"notes": "patch generator returned %s, not a result object" % type(out).__name__, "_failed": True}
+            src = patch_source(out)
             diff = out.get("diff") if isinstance(out.get("diff"), str) else ""
             rec = {"attempt": attempt, "source": src, "notes": str(out.get("notes") or "")[:2000],
                    "propose_s": round(time.time() - t, 1), "gates": []}
@@ -491,7 +513,7 @@ class Pipeline:
         self._safe(self.repo.comment, change, self._timings_comment(inc))
         raise Closed("patched", "release %s deployed and verified" % new_rel)
 
-    # ------------------------------------------------------------ corpus (docs/plan-construccion.md §9d)
+    # ------------------------------------------------------------ corpus
     def _corpus_variants(self, inc, p) -> list:
         """Corpus values of the incident's class, set into its parameter: extra variants for the reproduction
         (counted only if they fire on the unpatched release, then judged by the poc gate and verification)."""
@@ -680,19 +702,23 @@ class Pipeline:
     def _open_change(self, inc, attempt, diff, patched_dir, previous):
         title = "fix(%s): %s %s param %s" % (inc["vuln_class"], inc["method"], inc["route"],
                                               (inc.get("param") or {}).get("name", "-"))
+        src = next((a["source"] for a in inc.get("attempts") or [] if a.get("attempt") == attempt), "unknown")
+        note = "Patch source: %s" % SOURCES.get(src, SOURCES["unknown"])     # in every attempt's commit message
         try:
-            change = self.repo.open_change(inc["incident"], attempt, diff, patched_dir, title, self._pr_body(inc))
+            change = self.repo.open_change(inc["incident"], attempt, diff, patched_dir, title,
+                                           self._pr_body(inc, attempt, src), note)
         except Exception as e:  # noqa: BLE001
             if not self._use_local("opening the pull request failed: %s" % e, inc):
                 raise RuntimeError("could not open the pull request: %s" % e)
             previous = None
-            change = self.repo.open_change(inc["incident"], attempt, diff, patched_dir, title, self._pr_body(inc))
+            change = self.repo.open_change(inc["incident"], attempt, diff, patched_dir, title,
+                                           self._pr_body(inc, attempt, src), note)
         if previous is None or previous.url != change.url:
             self.publish(E.PR_OPENED, {"incident": inc["incident"], "url": change.url, "branch": change.branch}, inc)
         inc["pr"] = change.to_dict()
         return change
 
-    def _pr_body(self, inc) -> str:
+    def _pr_body(self, inc, attempt: int = 1, source: str = "unknown") -> str:
         ev = inc["evidence"]
         prim = incmod.primary_event(ev) or {}
         poc_view = dict(inc.get("poc") or {})
@@ -708,12 +734,14 @@ class Pipeline:
             "| sink | `%s:%s` |" % (inc["sink"]["file"], inc["sink"]["line"]),
             "| evidence rid | `%s` |" % inc.get("evidence_rid"),
             "| release | `%s` |" % inc.get("base_release"),
+            "| patch source (attempt %d) | %s |" % (attempt, SOURCES.get(source, SOURCES["unknown"])),
             "", "**Captured request**", _fence(json.dumps(ev.get("request"), indent=1)[:4000]),
             "", "**Oracle detail**", _fence(json.dumps(prim.get("detail"), indent=1)[:3000]),
             "", "**Stack** (outermost first)", _fence("\n".join("%s:%s %s" % (f.get("file"), f.get("line"), f.get("func"))
                                                               for f in prim.get("stack") or [])),
             "", "**Regression case (PoC)**", _fence(json.dumps(poc_view, indent=1)[:6000]),
-            "", "Each validation gate is reported as a commit status `immune/<gate>`: %s." % ", ".join(GATES),
+            "", "Each validation gate is reported as a commit status `immune/<gate>`: %s. Later attempts are "
+                "further commits on this branch; each commit message states its own patch source." % ", ".join(GATES),
         ]
         return "\n".join(lines)
 

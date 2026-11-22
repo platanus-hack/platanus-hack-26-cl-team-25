@@ -5,7 +5,7 @@ Two modes:
   and attaches with ``strace -p`` to every process of the app's mount namespace (so the sidecar's own
   processes - uvicorn, the pg proxy, the evidence push - are never traced). Needs CAP_SYS_PTRACE.
 - launch: the sidecar starts the app itself as a traced child (``strace -f --seccomp-bpf -- cmd``),
-  for when both run in one container (contracts/product.md §6). No extra capability needed; with
+  for when both run in one container (sidecar/README.md, "Tracer"). No extra capability needed; with
   seccomp-bpf only the traced syscalls stop the tracee.
 """
 from __future__ import annotations
@@ -68,6 +68,7 @@ class Tracer:
         self.thread: threading.Thread | None = None
         self.pids: list[int] = []
         self.lines = 0
+        self.dropped = 0  # strace lines that produced no Syscall: unparsable, or failed in observe (logged per request)
         self.root_pid: int | None = None
 
     def cwd_of(self, pid: int) -> str | None:
@@ -133,14 +134,19 @@ class Tracer:
         with os.fdopen(rfd, "r", encoding="utf-8", errors="surrogateescape", buffering=1) as f:
             for line in f:
                 self.lines += 1
+                seen = parser.dropped
                 try:
                     sc = parser.feed(line)
                     if sc is None:
+                        if parser.dropped != seen:
+                            self.dropped += 1
+                            log.debug("strace line dropped: %r", line[:300])
                         continue
                     obs = strace.observe(sc, self.cwd_of)
                     if obs is not None:
                         self.on_obs(obs)
                 except Exception:  # never let one odd line kill the reader
+                    self.dropped += 1
                     log.exception("unparsable strace line: %r", line[:300])
         log.warning("strace output closed")
 

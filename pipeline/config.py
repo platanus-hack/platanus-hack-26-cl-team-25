@@ -57,8 +57,7 @@ class Config:
     scenarios_module: str = "sim.scenarios"
     repo_target: str = "local"
     github_repo: str = ""
-    # runner
-    runner_mode: str = "docker"        # docker | local (local = host subprocess, tests only)
+    # runner (always a docker container: pipeline/runner.py)
     runner_image: str = "immune-base:1"
     runner_prefix: str = "immune-runner"
     runner_timeout_s: float = 240.0
@@ -140,7 +139,6 @@ class Config:
             scenarios_module=env.get("SCENARIOS_MODULE", app.scenarios),
             repo_target=target,
             github_repo=env.get("GITHUB_REPO", app.repo.github),
-            runner_mode=env.get("RUNNER_MODE", "docker"),
             runner_image=env.get("RUNNER_IMAGE", "immune-base:1"),
             runner_prefix=env.get("RUNNER_PREFIX", app.prefix + "-runner"),
             runner_timeout_s=_f(env, "RUNNER_TIMEOUT_S", 240),

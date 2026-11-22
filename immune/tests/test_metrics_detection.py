@@ -45,3 +45,24 @@ def test_detection_counts_detonations_and_clean_share_from_bus_and_recording():
     lines = metrics.detection_lines(d)
     assert "50%" in lines[1] and "live 0, audit 0" in lines[2]
     assert metrics.detection([], [])["clean_share"] is None
+
+
+def test_reopened_incident_keeps_the_rule_of_its_first_run_and_a_missing_rule_does_not_crash():
+    opened = {"vuln_class": "sqli", "route": "/p", "evidence_rid": "r1", "method": "GET"}
+    evs = [
+        ev("oracle.fired", {"rid": "r1"}, 1.0, rid="r1"),
+        ev("incident.opened", dict(opened, incident="i1"), 2.0, "i1"), ev("rule.active", {"id": "x"}, 3.0, "i1"),
+        # the pipeline restarted: the incident is opened again and the rule, already active, is not announced again
+        ev("incident.opened", dict(opened, incident="i1"), 10.0, "i1"),
+        ev("patch.diff", {}, 12.0, "i1"), ev("pr.merged", {}, 13.0, "i1"), ev("upstream.switched", {}, 14.0),
+        ev("incident.closed", {"outcome": "patched"}, 15.0, "i1"),
+        # patched without any rule.active on the bus
+        ev("incident.opened", dict(opened, incident="i2"), 20.0, "i2"),
+        ev("patch.diff", {}, 21.0, "i2"), ev("pr.merged", {}, 22.0, "i2"), ev("upstream.switched", {}, 23.0),
+        ev("incident.closed", {"outcome": "patched"}, 24.0, "i2"),
+    ]
+    rows = {r["incident"]: r for r in metrics.incidents(evs)}
+    assert rows["i1"]["runs"] == 2 and rows["i1"]["to_rule"] == 0.0 and rows["i1"]["to_prod"] == 4.0
+    assert rows["i2"]["outcome"] == "patched" and rows["i2"]["to_rule"] is None and rows["i2"]["to_prod"] == 3.0
+    s = metrics.summary(list(rows.values()))
+    assert s["patched"] == 2 and s["to_rule"]["n"] == 1 and s["to_prod"]["n"] == 2

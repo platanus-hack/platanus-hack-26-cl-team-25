@@ -1,7 +1,9 @@
 """Mechanical validation of the LLM-owned artefacts. Each function returns a list of error strings ([] = valid).
 
 columns.yaml  YAML; every table classified; referenced tables/columns exist; keys never rewritten
-profile.py    static AST policy (imports, no exec/eval/subprocess/network/writes) + import in a clean subprocess:
+profile.py    static AST policy (import allow-list; no eval/exec/getattr/__import__, no aliasing of open or of
+              the os module, no process/file-changing os calls; a deny-list over the syntax tree, not a sandbox)
+              + import in a clean subprocess on the host (immune/initsteps/hostrun.py):
               APP importable and callable, the five functions exist with the right arity,
               public_paths() a list of '/...' prefixes (not '/'), allowed_file_roots(env) absolute dirs, not system dirs
 auth.yaml     auth.kind and its fields; introspect path is a parameter-free GET of the OpenAPI
@@ -16,16 +18,25 @@ import yaml
 
 from immune import shadowdata
 from . import openapi as oa
-from . import sandbox
+from . import hostrun
 
 AUTH_KINDS = ("immune-token", "jwt-hs256", "introspect", "none")
 ALLOWED_IMPORTS = {"json", "os", "os.path", "sqlite3", "secrets", "hashlib", "hmac", "base64", "time", "datetime",
                    "uuid", "string", "random", "re", "binascii", "typing", "__future__", "immune_contracts",
                    "immune_contracts.authtoken", "functools", "math"}
-FORBIDDEN_CALLS = {"eval", "exec", "compile", "__import__", "breakpoint", "input"}
-FORBIDDEN_ATTRS = {"system", "popen", "spawnl", "spawnv", "execv", "execl", "fork", "remove", "unlink", "rmdir",
-                   "removedirs", "rename", "replace", "chmod", "chown", "kill", "putenv", "symlink", "link",
-                   "truncate", "makedirs", "mkdir"}
+# names that may not appear at all (called, aliased or passed around): they reach anything by name
+FORBIDDEN_NAMES = {"eval", "exec", "compile", "__import__", "breakpoint", "input", "getattr", "setattr", "delattr",
+                   "globals", "locals", "vars", "__builtins__"}
+# attributes rejected on a module-like target (os.remove, shutil.rmtree); str.replace / list.remove are fine
+FORBIDDEN_ATTRS = {"system", "popen", "spawnl", "spawnv", "spawnlp", "spawnvp", "posix_spawn", "posix_spawnp",
+                   "execv", "execl", "execve", "execvp", "execlp", "fork", "forkpty", "kill", "killpg",
+                   "remove", "unlink", "rmdir", "removedirs", "rmtree", "rename", "renames", "replace", "move",
+                   "copy", "copy2", "copyfile", "copytree", "chmod", "chown", "lchown", "putenv", "unsetenv",
+                   "symlink", "link", "truncate", "makedirs", "mkdir", "mkfifo", "mknod", "open", "fdopen", "write",
+                   "chdir", "chroot", "startfile", "write_text", "write_bytes", "touch"}
+MODULE_TARGETS = {"os", "shutil", "pathlib", "sys", "subprocess"}
+# modules other modules keep as attributes (uuid.os, random._os): never reached through another object
+MODULE_ATTRS = {"os", "_os", "sys", "_sys", "subprocess", "shutil", "pathlib", "builtins", "importlib", "posix"}
 SYSTEM_DIRS = {"/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/root", "/home",
                "/var", "/tmp", "/opt", "/srv", "/boot", "/run"}
 REQUIRED = {"allowed_file_roots": 1, "ensure_user": 3, "mint_token": 3, "load_markers": 1, "public_paths": 0}
@@ -51,6 +62,13 @@ def columns(path: str, schema: dict) -> list[str]:
     return errs
 
 
+def _root(node):
+    """The name an attribute chain starts from (os.path.x -> 'os'); None when it starts from a call or a literal."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def profile_static(source: str, app_package: str) -> list[str]:
     try:
         tree = ast.parse(source)
@@ -58,6 +76,15 @@ def profile_static(source: str, app_package: str) -> list[str]:
         return ["profile.py: syntax error line %s: %s" % (e.lineno, e.msg)]
     errs = []
     allowed = ALLOWED_IMPORTS | {app_package}
+    modules = set(MODULE_TARGETS)                # plus the aliases this file gives them (import os as o)
+    called, dotted = set(), set()                # Name nodes used as f(...) / as the target of f.attr
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules |= {a.asname for a in node.names if a.asname and a.name.split(".")[0] in MODULE_TARGETS}
+        elif isinstance(node, ast.Call):
+            called.add(id(node.func))
+        elif isinstance(node, ast.Attribute):
+            dotted.add(id(node.value))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
@@ -70,12 +97,29 @@ def profile_static(source: str, app_package: str) -> list[str]:
                 errs.append("profile.py line %d: relative imports are not allowed" % node.lineno)
             elif mod not in allowed and mod.split(".")[0] != app_package:
                 errs.append("profile.py line %d: from %s import ... is not allowed" % (node.lineno, mod))
+            elif mod.split(".")[0] in MODULE_TARGETS:
+                for a in node.names:
+                    if a.name == "*" or a.name in FORBIDDEN_ATTRS:
+                        errs.append("profile.py line %d: from %s import %s is not allowed" % (node.lineno, mod, a.name))
+        elif isinstance(node, ast.Name):
+            if node.id in FORBIDDEN_NAMES:
+                errs.append("profile.py line %d: %s() is not allowed%s" % (
+                    node.lineno, node.id, "" if id(node) in called else " (nor a reference to it)"))
+            elif node.id == "open" and id(node) not in called:
+                errs.append("profile.py line %d: open may only be called as open(path) to read, not aliased" % node.lineno)
+            elif node.id in modules and id(node) not in dotted:
+                errs.append("profile.py line %d: module %s may only be used as %s.<name>, not aliased or passed"
+                            % (node.lineno, node.id, node.id))
+        elif isinstance(node, ast.Attribute):
+            if node.attr in MODULE_ATTRS:
+                errs.append("profile.py line %d: reaching module %s through another object is not allowed"
+                            % (node.lineno, node.attr))
+            elif node.attr.startswith("__") and node.attr.endswith("__"):
+                errs.append("profile.py line %d: .%s is not allowed" % (node.lineno, node.attr))
+            elif node.attr in FORBIDDEN_ATTRS and _root(node.value) in modules:
+                errs.append("profile.py line %d: .%s() is not allowed" % (node.lineno, node.attr))
         elif isinstance(node, ast.Call):
             f = node.func
-            if isinstance(f, ast.Name) and f.id in FORBIDDEN_CALLS:
-                errs.append("profile.py line %d: %s() is not allowed" % (node.lineno, f.id))
-            if isinstance(f, ast.Attribute) and f.attr in FORBIDDEN_ATTRS:
-                errs.append("profile.py line %d: .%s() is not allowed" % (node.lineno, f.attr))
             if isinstance(f, ast.Name) and f.id == "open":
                 mode = node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "mode"), None)
                 if mode is not None and not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
@@ -96,7 +140,7 @@ def profile(cfg, root: str | None = None) -> tuple[list[str], dict]:
     errs = profile_static(src, cfg.app.package)
     if errs:
         return errs, {}
-    info = sandbox.profile_job(cfg, "inspect", root=root)
+    info = hostrun.profile_job(cfg, "inspect", root=root)
     if not info.get("ok"):
         return ["profile.py does not import: %s" % info.get("error")], info
     if info.get("file") and os.path.realpath(info["file"]) != os.path.realpath(path):

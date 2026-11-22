@@ -49,10 +49,6 @@ def _json_path(path: str) -> list:
     return keys
 
 
-def _ctype(req: dict) -> str:
-    return {k.lower(): v for k, v in (req.get("headers") or {}).items()}.get("content-type", "").lower()
-
-
 def get_value(req: dict, param: dict | None, template: str | None = None):
     if not param:
         return None
@@ -130,14 +126,3 @@ def set_value(req: dict, param: dict, value, template: str | None = None) -> dic
     else:
         raise ValueError("unsupported parameter location %r" % loc)
     return r
-
-
-def describe(req: dict, limit: int = 160) -> str:
-    q = ("?" + req["query"]) if req.get("query") else ""
-    s = "%s %s%s" % (req.get("method", "GET"), req.get("path", ""), q)
-    b = body_of(req)
-    if b:
-        s += " body=" + b[:80].decode("utf-8", "replace")
-    if req.get("uid") is not None:
-        s += " as uid %s" % req["uid"]
-    return s if len(s) <= limit else s[:limit] + "..."

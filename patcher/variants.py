@@ -3,7 +3,9 @@
 Each variant exercises the SAME parameter as the PoC with another payload, encoding or
 form typical of the class, so a fix that only handles the exact captured value is caught.
 Validation counts only the variants that fire the oracle on the unpatched code, so
-including a few that do not is harmless.
+including a few that do not is harmless. Every variant differs from the captured request and
+from every other variant; a request with no parameter to mutate yields no variants (there is
+no minimum: copies of the PoC would be counted as if they were distinct cases).
 """
 from __future__ import annotations
 
@@ -13,9 +15,7 @@ import json
 import re
 from urllib.parse import parse_qsl, quote, unquote
 
-MIN_VARIANTS, MAX_VARIANTS = 15, 40
-
-_ORACLE_CLASS = {"sql": "sqli", "file": "traversal", "owner": "idor"}
+MAX_VARIANTS = 40
 
 
 # ---------------------------------------------------------------- locating the parameter
@@ -242,13 +242,17 @@ def _sqli_encodings(v: str) -> list[str]:
     ]
 
 
-def _dedupe(reqs: list[dict]) -> list[dict]:
-    seen, out = set(), []
+def _key(r: dict) -> str:
+    return json.dumps([r.get("method"), r.get("path"), r.get("query"), r.get("body_b64"), r.get("uid"), r.get("role")],
+                      sort_keys=True)
+
+
+def _dedupe(reqs: list[dict], seen: set | None = None) -> list[dict]:
+    """Distinct requests, in order; `seen`: keys that are already taken (the captured request)."""
+    seen, out = set(seen or ()), []
     for r in reqs:
-        key = json.dumps([r.get("method"), r.get("path"), r.get("query"), r.get("body_b64"),
-                          r.get("uid"), r.get("role")], sort_keys=True)
-        if key not in seen:
-            seen.add(key)
+        if _key(r) not in seen:
+            seen.add(_key(r))
             out.append(r)
     return out
 
@@ -260,8 +264,6 @@ def variants(poc: dict, evidence: dict) -> list[dict]:
     base.setdefault("query", "")
     oracle = _oracle(poc, evidence)
     loc, name, value = locate(poc, evidence)
-    original_key = json.dumps([base.get("method"), base.get("path"), base.get("query"), base.get("body_b64"),
-                               base.get("uid"), base.get("role")], sort_keys=True)
     out: list[dict] = []
 
     if oracle in ("sql", "file") and name and loc in ("query", "json"):
@@ -295,11 +297,4 @@ def variants(poc: dict, evidence: dict) -> list[dict]:
                         del r["headers"][h]  # the runner mints a token for `uid`
                 out.append(r)
 
-    out = [r for r in _dedupe(out) if json.dumps([r.get("method"), r.get("path"), r.get("query"),
-                                                    r.get("body_b64"), r.get("uid"), r.get("role")],
-                                                   sort_keys=True) != original_key]
-    # Only reached for classes/requests without a mutable parameter ("other", no id in the path):
-    # pad with replays of the captured request so callers always get the documented minimum.
-    while len(out) < MIN_VARIANTS:
-        out.append(copy.deepcopy(base))
-    return out[:MAX_VARIANTS]
+    return _dedupe(out, {_key(base)})[:MAX_VARIANTS]

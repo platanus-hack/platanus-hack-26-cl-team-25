@@ -1,4 +1,5 @@
-"""Plan B: hand-written root-cause fixes, one per entry of victim/VULNS.md.
+"""Plan B: hand-written root-cause fixes, one per entry of the demo answer key
+(docs/demo/respuestas/tienda.md, outside every release path).
 
 Used only when the LLM is unavailable (timeout, CLI failure, empty diff, or
 PATCHER_FORCE_FALLBACK=1). Always reported with source "fallback".

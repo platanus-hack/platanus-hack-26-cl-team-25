@@ -44,7 +44,8 @@ def extract(path: str, query: str, headers: dict, body: bytes, path_params: dict
         if isinstance(val, str):
             out.append(("path", name, val))
     lower = {k.lower(): v for k, v in (headers or {}).items()}
-    ctype = lower.get("content-type", "").lower()
+    ctype_raw = lower.get("content-type", "")   # as sent: the multipart boundary is case-sensitive
+    ctype = ctype_raw.lower()                   # for the type tests only
     if body:
         if "json" in ctype or (not ctype and body[:1] in (b"{", b"[")):
             try:
@@ -56,7 +57,7 @@ def extract(path: str, query: str, headers: dict, body: bytes, path_params: dict
                 out.append(("form", k, v))
         elif "multipart/form-data" in ctype:
             try:
-                msg = BytesParser(policy=HTTP).parsebytes(b"content-type: " + ctype.encode() + b"\r\n\r\n" + body)
+                msg = BytesParser(policy=HTTP).parsebytes(b"content-type: " + ctype_raw.encode() + b"\r\n\r\n" + body)
                 for part in msg.iter_parts():
                     name = part.get_param("name", header="content-disposition") or "part"
                     if part.get_filename():

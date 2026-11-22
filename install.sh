@@ -43,7 +43,7 @@ say "python ok ($("$PY" -c 'import sys; print(sys.version.split()[0])'))"
 STAMP="$VENV/.immune-requirements"
 want=$(cksum < "$REQ")
 if [ -x "$VENV/bin/python" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] \
-   && "$VENV/bin/python" -c 'import sys, fastapi, uvicorn, httpx, yaml, sqlglot, sqlparse, jsonschema, docker, pydantic, pytest; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
+   && "$VENV/bin/python" -c 'import sys, fastapi, uvicorn, httpx, yaml, sqlparse, jsonschema, docker, pydantic, pytest; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
   say "venv ok ($VENV)"
 else
   # a venv without a working python >= 3.12 and pip (e.g. left by a run without python3-venv) is rebuilt
@@ -67,7 +67,10 @@ else
   say "venv ready ($VENV)"
 fi
 
-# 4. images (built locally from deploy/; nothing is pulled from a registry we do not control)
+# 4. images, built locally from deploy/. The builds pull the base image python:3.12-slim from Docker Hub and
+#    packages from PyPI and the Debian mirrors; no immune image is pulled from a registry.
+#    Each image carries the label immune.build = checksum of requirements.txt + its Dockerfile: a changed
+#    file rebuilds the image, like the venv stamp above.
 if [ "${IMMUNE_SKIP_IMAGES:-}" = "1" ]; then
   say "images skipped (IMMUNE_SKIP_IMAGES=1)"
 else
@@ -77,11 +80,14 @@ else
   [ "${IMMUNE_WITH_ANTICIPATE:-}" = "1" ] && specs="$specs immune-cbuild:1=Dockerfile.cbuild"
   for spec in $specs; do
     img=${spec%=*}; df=${spec#*=}
-    if docker image inspect "$img" >/dev/null 2>&1; then
+    [ -f "$HOME_DIR/deploy/$df" ] && stamp=$(cat "$REQ" "$HOME_DIR/deploy/$df" | cksum | tr ' ' '-') || stamp=
+    have=$(docker image inspect --format '{{ index .Config.Labels "immune.build" }}' "$img" 2>/dev/null) || have=missing
+    if [ "$have" != missing ] && { [ -z "$stamp" ] || [ "$have" = "$stamp" ]; }; then
       say "image $img ok"
-    elif [ -f "$HOME_DIR/deploy/$df" ]; then
+    elif [ -n "$stamp" ]; then
+      [ "$have" = missing ] || say "image $img was built from other requirements or Dockerfile: rebuilding"
       say "building $img from deploy/$df (pulls python:3.12-slim the first time; a few minutes)"
-      docker build -q -f "$HOME_DIR/deploy/$df" -t "$img" "$HOME_DIR/deploy" >/dev/null \
+      docker build -q -f "$HOME_DIR/deploy/$df" --label "immune.build=$stamp" -t "$img" "$HOME_DIR/deploy" >/dev/null \
         || die "docker build of $img failed (see the error above; network access to Docker Hub, PyPI and the Debian mirrors is needed)"
     else
       die "image $img is missing and deploy/$df does not exist (incomplete checkout)"
@@ -95,6 +101,9 @@ chmod +x "$HOME_DIR/bin/immune" 2>/dev/null || true
 mkdir -p "$BIN_DIR"
 if [ -L "$BIN_DIR/immune" ] && [ "$(readlink "$BIN_DIR/immune")" = "$HOME_DIR/bin/immune" ]; then
   say "link ok ($BIN_DIR/immune)"
+elif [ -L "$BIN_DIR/immune" ] && case "$(readlink "$BIN_DIR/immune")" in "$HOME_DIR"/*) false ;; *) true ;; esac; then
+  # a link to another checkout (or to something else) is somebody's choice: never replaced silently
+  say "note: $BIN_DIR/immune already links to $(readlink "$BIN_DIR/immune"), not to this checkout; left as it is. Remove it or set IMMUNE_BIN_DIR to link $HOME_DIR/bin/immune, or run that path directly."
 elif [ -e "$BIN_DIR/immune" ] && [ ! -L "$BIN_DIR/immune" ]; then
   die "$BIN_DIR/immune exists and is not a link to this checkout; remove it or set IMMUNE_BIN_DIR"
 else

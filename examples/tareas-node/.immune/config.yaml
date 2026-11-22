@@ -2,7 +2,7 @@ version: 1
 name: tareas
 app:
   runtime: generic
-  release_paths: [server.js, package.json, package-lock.json, node_modules, src, db, files, test, Dockerfile, .dockerignore]
+  release_paths: [server.js, package.json, package-lock.json, src, db, files, test, Dockerfile, .dockerignore]
   source_dirs: [src]
   build: {context: ., dockerfile: Dockerfile}   # built by `immune up` (t0) and by fleet on deploy: immune-tareas-app:<release>
   command: [node, server.js]

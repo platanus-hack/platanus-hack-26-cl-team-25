@@ -1,5 +1,5 @@
 """Real runner containers (docker --network none, immune-base:1) with the real shadow harness.
-Skipped when Docker or the image is unavailable. Containers are named wp5-runner-*."""
+Skipped when Docker or the image is unavailable. Containers are named pipetest-runner-*."""
 import os
 import shutil
 import subprocess
@@ -26,8 +26,7 @@ pytestmark = [pytest.mark.skipif(not _docker_ok(), reason="docker / immune-base:
 
 @pytest.fixture()
 def docker_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("RUNNER_MODE", "docker")
-    monkeypatch.setenv("RUNNER_PREFIX", "wp5-runner")
+    monkeypatch.setenv("RUNNER_PREFIX", "pipetest-runner")
     monkeypatch.setenv("PIPELINE_STATE_DIR", str(tmp_path / "state"))
 
 
@@ -57,5 +56,5 @@ def test_dry_run_end_to_end(docker_env, tmp_path):
     rel = os.path.join(res["runtime"], "releases", inc["release"], "victim", "app", "products.py")
     assert "LIKE ? OR category" in open(rel).read()
     assert res["rules_deleted"] == [inc["rule"]["id"]] and res["deploys"] == [inc["release"]]
-    assert subprocess.run(["docker", "ps", "-aq", "--filter", "name=wp5-runner"], capture_output=True,
+    assert subprocess.run(["docker", "ps", "-aq", "--filter", "name=pipetest-runner"], capture_output=True,
                           text=True).stdout.strip() == ""

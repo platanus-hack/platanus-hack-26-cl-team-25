@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import threading
-import time
 
 import httpx
 
@@ -14,13 +13,12 @@ from immune_contracts import events as E
 
 log = logging.getLogger("pipeline.bus")
 
-# class self-audit (pipeline/audit.py). Not yet in immune_contracts/events.py: the pipeline builds their
-# envelope itself, and the dashboard bus accepts them (dashboard/server.py EXTRA_TYPES).
-AUDIT_STARTED = "audit.started"     # data: {incident, vuln_class, candidates}   incident = the closed one audited from
-AUDIT_FINDING = "audit.finding"     # data: {incident, parent, route, param}     incident = the new one (origin audit)
-AUDIT_DONE = "audit.done"           # data: {incident, checked, findings, seconds}
-EXTRA_TYPES = (AUDIT_STARTED, AUDIT_FINDING, AUDIT_DONE)
-TYPES = tuple(E.TYPES) + tuple(t for t in EXTRA_TYPES if t not in E.TYPES)
+# class self-audit (pipeline/audit.py); the types are defined in immune_contracts/events.py
+AUDIT_STARTED = E.AUDIT_STARTED     # data: {incident, vuln_class, candidates}   incident = the closed one audited from
+AUDIT_FINDING = E.AUDIT_FINDING     # data: {incident, parent, route, param}     incident = the new one (origin audit)
+AUDIT_DONE = E.AUDIT_DONE           # data: {incident, checked, findings, seconds}
+AUDIT_TYPES = (AUDIT_STARTED, AUDIT_FINDING, AUDIT_DONE)
+TYPES = tuple(E.TYPES)
 
 # data fields of every event the pipeline publishes (immune_contracts/events.py, verbatim)
 FIELDS = {
@@ -37,7 +35,7 @@ FIELDS = {
     E.INCIDENT_CLOSED: {"incident", "outcome", "seconds_to_rule", "seconds_to_patch"},
     E.VERIFY_RESULT: {"incident", "exploit_blocked_on_prod"},
 }
-# optional fields added by contracts/product.md §3 (pr_open / autopatch_off, a skipped tests gate)
+# optional fields (contracts/README.md section 10.3): audit origin/parent, outcome_detail, a skipped gate
 OPTIONAL = {
     E.INCIDENT_OPENED: {"origin", "parent"},      # origin: live | audit; parent: the incident whose audit found it
     E.INCIDENT_CLOSED: {"outcome_detail"},
@@ -46,17 +44,16 @@ OPTIONAL = {
 
 
 def make(type_: str, data: dict, *, run: str = "", rid: str | None = None, incident: str | None = None) -> dict:
-    """Event envelope (immune_contracts/events.py), also for the pipeline's audit.* types."""
-    if type_ in E.TYPES:
-        return E.make(type_, "pipeline", data, run=run, rid=rid, incident=incident)
-    if type_ not in EXTRA_TYPES:
+    """Event envelope (immune_contracts/events.py)."""
+    if type_ not in E.TYPES:
         raise ValueError("unknown event type %r" % type_)
-    return {"type": type_, "ts": time.time(), "run": run, "src": "pipeline", "rid": rid, "incident": incident,
-            "data": data}
+    return E.make(type_, "pipeline", data, run=run, rid=rid, incident=incident)
 
 
 class Publisher:
-    """Publishes to the bus (2 s timeout, drop on failure) and appends every event to a local log."""
+    """Publishes to the bus (2 s timeout) and appends every event to a local log. An event the bus could not
+    take stays pending (up to 2000) and is sent again before the next one; only an event the bus refuses as
+    invalid (4xx) is dropped."""
 
     def __init__(self, url: str, token: str, run: str, log_path: str | None = None, timeout: float = 2.0,
                  client: httpx.Client | None = None):

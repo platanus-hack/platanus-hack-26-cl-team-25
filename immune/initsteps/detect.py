@@ -114,7 +114,7 @@ def find_env(project: str, dirs: list[str]) -> dict:
 
 
 def classify_env(env: dict) -> dict:
-    db = secret = now = None
+    db = now = None
     secrets, files = [], []
     for name, info in sorted(env.items()):
         u = name.upper()
@@ -188,7 +188,7 @@ def _dockerfile_facts(text: str) -> dict:
     return out
 
 
-def find_deploy(project: str, port_hint: int | None = None) -> dict:
+def find_deploy(project: str) -> dict:
     out = {"style": "unknown", "files": []}
     for name in ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"):
         p = os.path.join(project, name)

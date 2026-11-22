@@ -1,4 +1,4 @@
-<title>Sistema Inmunológico Autónomo</title>
+<title>Inmune</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
@@ -157,7 +157,7 @@ footer li{overflow-wrap:anywhere}
 </style>
 
 <header class="top"><div class="in">
-  <span class="brand">Sistema Inmunológico Autónomo</span>
+  <span class="brand">Inmune</span>
   <nav id="nav">
     <a href="#problema">Problema</a>
     <a href="#arquitectura">Arquitectura</a>
@@ -199,7 +199,7 @@ footer li{overflow-wrap:anywhere}
   <div class="stage">
     <div class="screen">
     <div class="cap"><span class="mono" id="cap-n">4 casos</span><strong id="cap-t">Un caso tras otro</strong><span class="segs" id="segs"><i></i><i></i><i></i><i></i></span></div>
-    <div class="canvas"><svg id="flow" viewBox="0 0 1060 640" role="img" aria-label="Flujo de un request: reverse proxy, decisión de sospecha, honeypot, decisión de ataque, fix proxy, replay, validador, parche y despliegue blue/green. Una línea punteada lleva una copia de cada request limpio desde producción al honeypot después de responder">
+    <div class="canvas"><svg id="flow" viewBox="0 0 1060 640" role="img" aria-label="Flujo de un request: reverse proxy, decisión de sospecha, honeypot, decisión de ataque, replay, validador, fix proxy, parche y despliegue blue/green. Una línea punteada lleva una copia de cada request limpio desde producción al honeypot después de responder">
       <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow"/></marker></defs>
       <g id="edges"></g><g id="nodes"></g>
       <g id="captive" hidden><circle cx="368" cy="182" r="8"/><text x="356" y="186" text-anchor="end">atacante retenido</text></g>
@@ -229,11 +229,11 @@ footer li{overflow-wrap:anywhere}
     <div><span class="k">paso 1</span>Explotan una vulnerabilidad web sin parchar en el portal de pago (SQL injection, según The Register).</div>
     <div><span class="k">paso 1</span>El request tiene forma de payload: se ejecuta primero en el honeypot. La consulta SQL cambia de estructura y el oráculo dispara. Producción nunca lo recibe.</div>
     <div><span class="k">paso 2</span>En el servidor web encuentran un archivo .ini con el usuario administrador y la IP del sistema interno (AS400), sin cifrar.</div>
-    <div><span class="k">paso 2</span>El atacante sigue dentro del clon. Lo que encuentra ahí son datos sintéticos y credenciales señuelo; si las usa, lo identifican desde cualquier IP.</div>
+    <div><span class="k">paso 2</span>El atacante sigue dentro del clon. Lo que encuentra ahí son datos sintéticos. Un token de sesión emitido por el clon no vale en producción: si lo presenta desde fuera, es evidencia directa, desde cualquier IP.</div>
     <div><span class="k">paso 3</span>Con esas credenciales entran a la aplicación de válvulas y caudal, que vivía en el mismo AS400.</div>
-    <div><span class="k">paso 3</span>En segundos, una regla en el proxy cierra ese punto de entrada en el camino a producción. El ataque capturado se repite contra la versión actual y confirma que es vulnerable.</div>
+    <div><span class="k">paso 3</span>El ataque capturado se repite contra la versión actual y confirma que es vulnerable. En segundos, una regla en el proxy cierra ese punto de entrada en el camino a producción.</div>
     <div><span class="k">paso 4</span>Alteran químicos y caudal cuatro veces. También se llevan datos personales y de pago de clientes.</div>
-    <div><span class="k">paso 4</span>Un parche de código pasa cinco validaciones mecánicas y se despliega en blue/green. El bug deja de existir, también para la próxima variante.</div>
+    <div><span class="k">paso 4</span>Un parche de código pasa cinco validaciones mecánicas y se despliega en blue/green. El defecto se corrige en el código; el ataque y sus variantes probadas dejan de disparar.</div>
   </div>
   <p class="note">Por qué no usamos Oldsmar (Florida, 2021), el caso más citado: fue acceso remoto por TeamViewer, no un bug web, y el propio relato del hackeo está hoy en duda. Este sistema protege la capa HTTP. No cubre contraseñas por defecto en un PLC ni escritorios remotos expuestos. [4]</p>
 </div></section>
@@ -259,9 +259,9 @@ footer li{overflow-wrap:anywhere}
       <h3>Cuánto tiempo queda abierta la puerta</h3>
       <div class="bar"><div class="cap"><span>Hoy: hasta que alguien lo note y parche a mano</span><span class="mono">días a semanas</span></div><div class="track"><div class="fill" style="width:100%;background:var(--danger)"></div></div></div>
       <div class="bar"><div class="cap"><span>Plazo legal solo para avisar a la ANCI</span><span class="mono">3 h</span></div><div class="track"><div class="fill" style="width:34%;background:var(--warn)"></div></div></div>
-      <div class="bar"><div class="cap"><span>Con el sistema: regla en el proxy</span><span class="mono">~15 s</span></div><div class="track"><div class="fill" style="width:2.2%;background:var(--ok)"></div></div></div>
-      <div class="bar"><div class="cap"><span>Con el sistema: parche validado y desplegado</span><span class="mono">~60 s</span></div><div class="track"><div class="fill" style="width:4%;background:var(--ok)"></div></div></div>
-      <p class="src">Barras ilustrativas, sin escala. Los 15 s y 60 s se midieron una vez, en nuestra demo, para un SQL injection. "Días a semanas" es una descripción cualitativa, no una cifra medida.</p>
+      <div class="bar"><div class="cap"><span>Con el sistema: regla en el proxy</span><span class="mono">1.9 s</span></div><div class="track"><div class="fill" style="width:2.2%;background:var(--ok)"></div></div></div>
+      <div class="bar"><div class="cap"><span>Con el sistema: parche validado y desplegado</span><span class="mono">24.9 s</span></div><div class="track"><div class="fill" style="width:4%;background:var(--ok)"></div></div></div>
+      <p class="src">Barras ilustrativas, sin escala. 1.9 s y 24.9 s son medianas desde que se abre el incidente, sobre 21 incidentes (7 defectos plantados × 3 rondas) de nuestra demo, el 2026-11-21, antes de las correcciones del 2026-11-22 y sin volver a medir; la lista de defectos estaba entonces al alcance del generador de parches. "Días a semanas" es una descripción cualitativa, no una cifra medida.</p>
     </div>
   </div>
 </div></section>
@@ -273,24 +273,24 @@ footer li{overflow-wrap:anywhere}
   </div>
   <div class="cols">
     <div><h3>Verificado</h3><ul>
-      <li>Ciclo completo en vivo para SQL injection: regla a los 15 s; parche, validación y despliegue en 60 s.</li>
+      <li>Ciclo completo sobre los 7 defectos plantados de la demo, 3 rondas (2026-11-21): 21 de 21 parchados. Medianas: regla a los 1.9 s, parche en producción a los 24.9 s, verificado a los 51.3 s.</li>
       <li>Detección y desvío al señuelo de tres clases: SQL injection, path traversal e IDOR.</li>
-      <li>Segunda red: un IDOR desde una cuenta confiable, que el filtro deja pasar, dispara el oráculo en el señuelo después de la respuesta. Probado con la app real hasta ese disparo.</li>
-      <li>Las validaciones rechazan 15 parches inadecuados y aceptan 7 correctos en el autotest.</li>
-      <li>Sobre Apache 2.4.49 real: el parche propuesto cumple 21 de 21 propiedades, igual que el oficial de la 2.4.50.</li>
+      <li>Segunda red (opcional, desactivada por defecto): un request que el filtro deja pasar se repite en el señuelo después de la respuesta y puede disparar un oráculo.</li>
+      <li>Las validaciones rechazan 15 parches inadecuados y aceptan 7 correctos en el autotest (parches escritos a mano).</li>
+      <li>Sobre el código de Apache 2.4.49: el parche propuesto cumple 21 de 21 propiedades, igual que el oficial de la 2.4.50, sobre la función extraída y no sobre un servidor en marcha.</li>
     </ul></div>
     <div><h3>Límites</h3><ul>
       <li>El sistema aprende solo de lo que sus oráculos ven. Fallas de lógica de negocio y ataques de segundo orden no disparan ninguno.</li>
       <li>La detonación agrega latencia a los requests dudosos.</li>
       <li>La segunda red no frena la primera respuesta: corta la campaña, no la primera fuga.</li>
-      <li>Los tiempos se midieron una sola vez, en una máquina sin otra carga.</li>
+      <li>Los tiempos son de una sola serie de 21 incidentes, en una máquina compartida, anteriores a las correcciones del 2026-11-22 y sin volver a medir; la lista de defectos estaba entonces al alcance del generador de parches.</li>
       <li>El caso de Apache es un defecto público: demuestra el mecanismo, no un descubrimiento a ciegas.</li>
     </ul></div>
     <div><h3>Principios</h3><ul>
-      <li>El veredicto lo da la ejecución, no un puntaje. Un falso positivo cuesta milisegundos, no datos falsos.</li>
+      <li>El veredicto lo da la ejecución, no un puntaje. Un falso positivo cuesta latencia, no datos falsos.</li>
       <li>El modelo solo propone un diff. Deciden validaciones mecánicas.</li>
       <li>Nunca se bloquea por IP ni por huella.</li>
-      <li>Si algo nuestro falla, el tráfico sigue a producción.</li>
+      <li>Si la detonación falla, el tráfico sin señal sigue a producción; lo que coincide con una regla activa no.</li>
     </ul></div>
   </div>
 </div></section>
@@ -323,25 +323,25 @@ var N={
  req:{x:90,y:80,w:130,h:56,t:"Request",u:"cliente o atacante",
   d:"Cualquier request HTTP que llega desde internet. El sistema no sabe de antemano si viene de un cliente o de un atacante."},
  proxy:{x:270,y:80,w:150,h:56,t:"Reverse proxy",u:"todo pasa por acá",
-  d:"El único punto de entrada. Ve el request en texto plano, lo graba y aplica las reglas vigentes. Si algún componente nuestro falla, reenvía a producción."},
+  d:"El único punto de entrada. Ve el request en texto plano, lo graba y aplica las reglas vigentes. Si no hay clon disponible, reenvía a producción lo que no tiene señal fuerte ni coincide con una regla."},
  sus:{x:460,y:80,q:1,t:"¿Sospechoso?",
-  d:"Mira la forma del request, no el historial de quien lo manda: payload con metacaracteres, ruta que la app no tiene, parámetro fuera de su gramática. Funciona desde el primer request. No decide quién es atacante, solo a quién se prueba en el señuelo."},
+  d:"Mira la forma del request, no el historial de quien lo manda: payload con metacaracteres, ruta de escáner conocida, parámetro fuera de su gramática. Funciona desde el primer request. No decide quién es atacante, solo a quién se prueba en el señuelo."},
  prod:{x:915,y:80,w:190,h:64,t:"App de producción",u:"datos reales",cls:"prod",
   d:"La aplicación real con los datos reales. Solo recibe lo que salió limpio o lo que se probó en el señuelo sin disparar nada."},
  hp:{x:460,y:225,w:180,h:60,t:"Honeypot",u:"misma app, datos sintéticos",cls:"hp",
-  d:"Un clon de la app real, con el mismo código y datos sintéticos, instrumentado con oráculos. El request dudoso se ejecuta acá primero. Los clones están precalentados: nada arranca en el camino crítico. También es la segunda red: lo que el filtro dejó pasar a producción se repite acá después de responder (línea punteada)."},
+  d:"Un clon de la app real, con el mismo código y datos sintéticos, instrumentado con oráculos. El request dudoso se ejecuta acá primero. Los clones están precalentados: nada arranca en el camino crítico. También es la segunda red, opcional y desactivada por defecto: lo que el filtro dejó pasar a producción se repite acá después de responder (línea punteada)."},
  atk:{x:460,y:370,q:1,t:"¿Es un ataque?",
-  d:"Lo responden oráculos mecánicos con sí o no: la consulta SQL cambió de estructura, se abrió un archivo fuera de la raíz, apareció un proceso hijo, hubo una conexión saliente no declarada, o alguien leyó una fila canario que no es suya."},
- fix:{x:460,y:515,w:160,h:56,t:"Fix proxy",u:"regla en segundos",
-  d:"Una regla en el proxy que cierra el punto confirmado: ruta, parámetro y gramática. Nunca por IP ni por huella. Antes de activarse se prueba contra tráfico legítimo grabado, y caduca cuando el parche está desplegado."},
- rep:{x:655,y:515,w:130,h:56,t:"Replay",u:"estado + request",
+  d:"Lo responden oráculos mecánicos con sí o no: la consulta SQL cambió de estructura, se abrió un archivo fuera de la raíz, apareció un proceso hijo, hubo una conexión saliente, o la respuesta trae datos marcados de otro dueño."},
+ fix:{x:820,y:515,w:130,h:56,t:"Fix proxy",u:"regla en segundos",
+  d:"Una regla en el proxy que cierra el punto confirmado: ruta, parámetro y gramática. Nunca por IP ni por huella. Se activa después de reproducir el ataque tres veces de tres y de comprobar que rechaza el valor capturado; tiene vencimiento y se retira cuando el parche está desplegado."},
+ rep:{x:460,y:515,w:160,h:56,t:"Replay",u:"estado + request",
   d:"El ataque capturado (el estado previo del clon más el request) se vuelve a ejecutar contra una copia de la versión actual de producción. Así también se reproducen ataques de varios pasos."},
- vul:{x:820,y:515,q:1,t:"¿Vulnerable?",
-  d:"El validador. Si el replay dispara el oráculo en la versión actual, el bug existe en producción y hay que curarlo en el código. Si no dispara, la regla alcanza y el caso se archiva."},
+ vul:{x:655,y:515,q:1,t:"¿Vulnerable?",
+  d:"El validador. Si el replay dispara el oráculo tres veces de tres en la versión actual, el bug existe en producción: se activa la regla en el proxy y se cura en el código. Si no, el caso se cierra como no reproducible."},
  patch:{x:965,y:370,w:160,h:70,t:"Parche de código",u:"5 validaciones · blue/green",
-  d:"Un modelo sin red ni credenciales propone un diff. Se despliega solo si pasa cinco validaciones mecánicas: política sobre el diff, propiedades por clase de bug, el ataque y sus variantes fallan, pasa la suite de tests y el tráfico legítimo responde igual. Despliegue blue/green con rollback."},
+  d:"Un modelo confinado (solo lee una copia del código y edita una lista de archivos; sin herramientas de red) propone un diff. Se despliega solo si pasa cinco validaciones mecánicas: política sobre el diff, propiedades por clase de bug, el ataque y sus variantes fallan, pasa la suite de tests y el tráfico legítimo responde igual. Despliegue blue/green con rollback."},
  closed:{x:820,y:608,w:170,h:40,t:"Caso archivado",u:"",
-  d:"La versión actual ya no es vulnerable. La regla queda hasta su vencimiento y el caso se guarda como test de regresión."}
+  d:"El ataque no se reproduce en la versión actual. El caso se cierra como no reproducible, sin regla ni parche."}
 };
 var E={
  e1:{p:[[155,80],[193,80]]},
@@ -352,10 +352,10 @@ var E={
  e6:{p:[[524,370],[850,370],[850,114]],l:"No · se reenvía",lx:545,ly:360},
  e7:{p:[[460,412],[460,485]],l:"Sí",lx:470,ly:452},
  e8:{p:[[540,515],[588,515]]},
- e9:{p:[[720,515],[754,515]]},
- e10:{p:[[884,515],[965,515],[965,407]],l:"Sí",lx:896,ly:505},
+ e9:{p:[[720,515],[754,515]],l:"Sí",lx:727,ly:505},
+ e10:{p:[[886,515],[965,515],[965,407]]},
  e11:{p:[[965,335],[965,114]],l:"deploy",lx:975,ly:230},
- e12:{p:[[820,557],[820,586]],l:"No",lx:830,ly:576},
+ e12:{p:[[655,557],[655,608],[733,608]],l:"No",lx:665,ly:590},
  e13:{p:[[832,112],[832,225],[552,225]],l:"copia, después de responder",lx:566,ly:215,a:1}
 };
 var gE=$("edges"),gN=$("nodes");
@@ -383,7 +383,7 @@ var SC={
  legit:{cls:"pk-ok",req:"GET /cuenta/boleta?mes=10",steps:[
   {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
   {e:"e2",n:"sus",log:"Forma normal: ruta conocida, parámetro dentro de su gramática."},
-  {e:"e3",n:"prod",log:"Directo a producción. Sin latencia extra."}],
+  {e:"e3",n:"prod",log:"Directo a producción, sin detonación."}],
   out:"El cliente no nota que el sistema existe.",ok:1},
  odd:{cls:"pk-warn",req:"GET /buscar?q=O'Brien",steps:[
   {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
@@ -391,27 +391,27 @@ var SC={
   {e:"e4",n:"hp",log:"Se ejecuta primero en el honeypot."},
   {e:"e5",n:"atk",log:"Ningún oráculo dispara: era un apellido."},
   {e:"e6",n:"prod",log:"Se reenvía a producción. El cliente recibe la respuesta real."}],
-  out:"Falso positivo: cuesta unas decenas de milisegundos, no datos falsos.",ok:1},
+  out:"Falso positivo: cuesta la latencia de una detonación (no medida), no datos falsos.",ok:1},
  atk:{cls:"pk-bad",req:"GET /buscar?q=' UNION SELECT …",steps:[
   {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
   {e:"e2",n:"sus",log:"Forma de payload: dudoso."},
   {e:"e4",n:"hp",log:"Se ejecuta en el honeypot. El exploit \"funciona\" sobre datos sintéticos."},
   {e:"e5",n:"atk",log:"Oráculo SQL: la consulta cambió de estructura. Ataque confirmado. El atacante queda en su clon.",captive:1,cls:"pk-inc"},
-  {e:"e7",n:"fix",log:"Regla en el proxy para esa ruta y parámetro. Medido: ~15 s."},
-  {e:"e8",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
-  {e:"e9",n:"vul",log:"El oráculo dispara de nuevo: producción es vulnerable."},
+  {e:"e7",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
+  {e:"e8",n:"vul",log:"El oráculo dispara de nuevo, tres veces de tres: producción es vulnerable."},
+  {e:"e9",n:"fix",log:"Regla en el proxy para esa ruta y parámetro. Mediana medida: 1.9 s."},
   {e:"e10",n:"patch",log:"El modelo propone un diff. Pasa las cinco validaciones."},
-  {e:"e11",n:"prod",log:"Despliegue blue/green. Medido de punta a punta: ~60 s."}],
+  {e:"e11",n:"prod",log:"Despliegue blue/green. Mediana medida hasta producción: 24.9 s."}],
   out:"Producción nunca recibió el ataque y ya no tiene el bug.",ok:1},
- late:{cls:"pk-bad",req:"GET /api/orders/1 (cuenta real, pedido ajeno)",steps:[
+ late:{cls:"pk-bad",req:"GET /api/reportes/1 (cuenta real, ruta sin marca de dueño)",steps:[
   {e:"e1",n:"proxy",log:"Llega al reverse proxy."},
-  {e:"e2",n:"sus",log:"Cuenta confiable, ruta conocida, id válido: nada raro en la forma."},
+  {e:"e2",n:"sus",log:"Cuenta confiable y ruta que el OpenAPI no marca como de dueño: nada raro en la forma."},
   {e:"e3",n:"prod",log:"Producción responde con datos reales. Esta primera respuesta no se frena.",cls:"pk-inc"},
-  {e:"e13",n:"hp",log:"Segunda red: después de responder, una copia del request se ejecuta en el honeypot."},
-  {e:"e5",n:"atk",log:"Oráculo de dueño: leyó un pedido que no es suyo. Ataque confirmado."},
-  {e:"e7",n:"fix",log:"Regla en el proxy para esa ruta y parámetro."},
-  {e:"e8",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
-  {e:"e9",n:"vul",log:"El oráculo dispara de nuevo: producción es vulnerable."},
+  {e:"e13",n:"hp",log:"Segunda red (opcional, desactivada por defecto): después de responder, una copia del request se ejecuta en el honeypot."},
+  {e:"e5",n:"atk",log:"Oráculo de dueño: la respuesta trae datos de otro dueño. Ataque confirmado."},
+  {e:"e7",n:"rep",log:"El ataque capturado se repite contra la versión actual."},
+  {e:"e8",n:"vul",log:"El oráculo dispara de nuevo, tres veces de tres: producción es vulnerable."},
+  {e:"e9",n:"fix",log:"Regla en el proxy para toda esa ruta."},
   {e:"e10",n:"patch",log:"El modelo propone un diff. Pasa las cinco validaciones."},
   {e:"e11",n:"prod",log:"Despliegue blue/green."}],
   out:"El primer request pasó; el segundo ya no. El bug se cura igual.",ok:1}

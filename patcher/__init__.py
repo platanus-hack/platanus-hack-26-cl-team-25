@@ -1,4 +1,4 @@
-"""WP6 patcher: LLM fix author (confined Claude Code), plan-B fixes, variants, rules.
+"""Patcher: LLM fix author (confined Claude Code), plan-B fixes, variants, rules.
 
 Interface: contracts/interfaces.md.
 """

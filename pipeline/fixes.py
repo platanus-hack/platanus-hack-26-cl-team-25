@@ -1,8 +1,9 @@
 """Catalogue of hand-written fixes for the t0 victim app.
 
-Used by the gate self-test (`python -m pipeline.selftest`: deliberately inadequate fixes
-that the gates must reject, one adequate fix per class that must pass all five) and by
-`pipeline.stub_patcher` (pre-recorded adequate fixes; "plan B" in the demo).
+Used by the gate self-test (`python -m pipeline.selftest`: the 15 deliberately inadequate fixes,
+each of which the stated gate must reject; the self-test's known-good set is patcher/fallbacks/*.diff,
+not the adequate fixes below) and by `pipeline.stub_patcher`, the patcher stand-in of the tests and
+the dry run (the three adequate fixes, one per class).
 
 Each fix is a list of exact-text edits applied to the release; the diff is generated
 with difflib against whatever release it is applied to. A fix whose anchor text is not

@@ -76,10 +76,11 @@ class Sidecar:
                                                  int(cfg.scan_executable_max_mb) << 20)
         if cfg.postgres:
             await self.reset_db()
-        log.info("ready: tracer=%s pids=%s allowlist=%d files, %d net; %d markers; %d constants; reset %.1f ms",
+        log.info("ready: tracer=%s pids=%s allowlist=%d files, %d net; %d markers; %d constants; reset %.1f ms; "
+                 "%d strace line(s) dropped",
                  cfg.mode if self.tracer else "off", self.tracer.pids if self.tracer else [],
                  len(self.obs.file_allow), len(self.obs.net_allow), len(self.markers),
-                 len(self.constants.strings), self.last_reset_ms or 0)
+                 len(self.constants.strings), self.last_reset_ms or 0, self.tracer.dropped if self.tracer else 0)
 
     async def stop(self):
         if self.proxy:
@@ -186,9 +187,10 @@ class Sidecar:
         t0 = time.perf_counter()
         if self.tracer and not self.tracer.alive():
             # fail closed: without the tracer we cannot judge
-            status, rheaders, rbody, rec = 503, [(b"content-type", b"text/plain")], b"sidecar tracer is not running", None
+            status, rheaders, rbody = 503, [(b"content-type", b"text/plain")], b"sidecar tracer is not running"
             self.obs.begin(); rec = self.obs.end()
             tracer_dead = True
+            t_app = t0
         else:
             tracer_dead = False
             self.obs.begin()
@@ -202,6 +204,11 @@ class Sidecar:
             t_app = time.perf_counter()
             await asyncio.sleep(cfg.grace_ms / 1000)
             rec = self.obs.end()
+            if self.tracer and not self.tracer.alive():
+                # the tracer died while the request was in flight: whatever the app did after that was not seen,
+                # so the absence of events proves nothing (never `clean`)
+                log.error("rid=%s tracer died during the request: verdict cannot be clean", rid)
+                tracer_dead = True
         t1 = time.perf_counter()
 
         query = query_string.decode("latin-1")
@@ -232,12 +239,13 @@ class Sidecar:
                 (wire.H_VERDICT.encode(), verdict.encode()), (wire.H_EVENTS.encode(), str(len(events)).encode())]
         if self.judge:
             out.append((b"x-imm-trace", base64.b64encode(wire.dumps(self._trace(rec, events, rbody, uid)))))
-        t_resp = t0 if tracer_dead else t_app
         # latest observation relative to the moment the app's response was complete (grace-period evidence)
-        late = max(((t - t_resp) * 1000 for t in rec.times), default=float("nan"))
-        log.info("rid=%s %s %s mode=%s uid=%s -> %s %s %s app_ms=%.1f window_ms=%.1f stmts=%d obs=%d late_ms=%.2f",
+        late = max(((t - t_app) * 1000 for t in rec.times), default=float("nan"))
+        log.info("rid=%s %s %s mode=%s uid=%s -> %s %s %s app_ms=%.1f window_ms=%.1f stmts=%d obs=%d late_ms=%.2f "
+                 "strace_dropped=%d",
                  rid, method, path, mode, uid, status, verdict, [e["oracle"] for e in events],
-                 (t_resp - t0) * 1000, (t1 - t0) * 1000, len(rec.statements), len(rec.obs), late)
+                 (t_app - t0) * 1000, (t1 - t0) * 1000, len(rec.statements), len(rec.obs), late,
+                 self.tracer.dropped if self.tracer else 0)
         return status, out, rbody, mode
 
     def _trace(self, rec, events, rbody, uid) -> dict:

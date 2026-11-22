@@ -1,5 +1,5 @@
-"""Real-Docker tests for fleet. Everything lives in a temp dir; containers are named wp4-* and labelled with a
-test-specific immune.run value; networks are wp4-*. The real runtime/ and the compose stack are never touched."""
+"""Real-Docker tests for fleet. Everything lives in a temp dir; containers are named fleettest-* and labelled with a
+test-specific immune.run value; networks are fleettest-*. The real runtime/ and the compose stack are never touched."""
 import os, shutil, sys, tempfile, threading, time, uuid
 
 import docker
@@ -16,7 +16,7 @@ from fleet.config import Config  # noqa: E402
 from fleet.manager import Fleet  # noqa: E402
 
 FIXTURE = os.path.join(ROOT, "acceptance", "fixture", "fixture_app")
-TOKEN = "wp4-token"
+TOKEN = "fleettest-token"
 
 
 class FakeGateway:
@@ -27,6 +27,7 @@ class FakeGateway:
         self.puts = []
         self.resets = 0
         self.prod_5xx = 0
+        self.prod_requests = 0
         self.bump_after_switch = 0
         app = FastAPI()
         me = self
@@ -62,8 +63,6 @@ class FakeGateway:
             chk(r)
             me.upstream = await r.json()
             me.upstreams.append(me.upstream)
-            if me.bump_after_switch and len(me.upstreams) == 1 + 0:
-                pass
             if me.bump_after_switch:
                 threading.Timer(0.7, lambda: setattr(me, "prod_5xx", me.prod_5xx + me.bump_after_switch)).start()
             else:
@@ -73,7 +72,7 @@ class FakeGateway:
         @app.get("/_admin/stats")
         def st(r: Request):
             chk(r)
-            return {"prod_requests": 0, "prod_5xx": me.prod_5xx}
+            return {"prod_requests": me.prod_requests, "prod_5xx": me.prod_5xx}
 
         @app.post("/_admin/reset")
         def rs(r: Request):
@@ -131,7 +130,7 @@ def make_release(runtime, name, bad=False):
 
 @pytest.fixture()
 def env(dk, gw):
-    tmp = tempfile.mkdtemp(prefix="wp4-")
+    tmp = tempfile.mkdtemp(prefix="fleettest-")
     repo = os.path.join(tmp, "repo")
     runtime = os.path.join(tmp, "runtime")
     os.makedirs(repo)
@@ -146,13 +145,13 @@ def env(dk, gw):
     from acceptance.fixture.fixture_app import seed
     seed.make(os.path.join(prod, "app.db"), shadow=False)
     sfx = uuid.uuid4().hex[:6]
-    nets = [dk.networks.create(f"wp4-prodnet-{sfx}", internal=True), dk.networks.create(f"wp4-clonenet-{sfx}", internal=True)]
+    nets = [dk.networks.create(f"fleettest-prodnet-{sfx}", internal=True), dk.networks.create(f"fleettest-clonenet-{sfx}", internal=True)]
     cfg = Config(
-        repo_dir=repo, runtime_dir=runtime, run_id=f"wp4-test-{sfx}", admin_token=TOKEN, gateway_url=gw.url,
-        bus_url="http://127.0.0.1:1", name_prefix="wp4", prodnet=nets[0].name, clonenet=nets[1].name,
+        repo_dir=repo, runtime_dir=runtime, run_id=f"fleettest-test-{sfx}", admin_token=TOKEN, gateway_url=gw.url,
+        bus_url="http://127.0.0.1:1", name_prefix="fleettest", prodnet=nets[0].name, clonenet=nets[1].name,
         release_paths=["fixture_app"], asgi="fixture_app.main:app", shadow_profile="fixture_app.shadow_profile",
         app_env={"APP_DB": "{db}", "APP_STATIC": "{static}", "APP_SECRET": "{secret}"}, static="fixture_app/static",
-        smoke_path="/openapi.json", project="wp4", clone_cmd="python /opt/immune/stubclone.py", prod_secret="ps", shadow_secret="ss",
+        smoke_path="/openapi.json", project="fleettest", clone_cmd="python /opt/immune/stubclone.py", prod_secret="ps", shadow_secret="ss",
         deploy_watch_s=1.5, watch_poll_s=0.3, health_timeout_s=30, reconcile_s=0.3)
     fleet = Fleet(cfg, dk)
     yield type("Env", (), dict(cfg=cfg, fleet=fleet, gw=gw, dk=dk, runtime=runtime, prod=prod, nets=nets))

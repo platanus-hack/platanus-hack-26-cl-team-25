@@ -1,5 +1,5 @@
-"""Helpers for acceptance tests. Owned by the orchestrator."""
-import asyncio, json, os, socket, subprocess, sys, threading, time
+"""Helpers shared by the acceptance tests (victim, shadow, gateway)."""
+import os, socket, subprocess, threading, time
 import httpx, uvicorn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

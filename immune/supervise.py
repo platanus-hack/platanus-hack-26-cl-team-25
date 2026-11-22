@@ -2,7 +2,7 @@
 
 `immune up` writes the spec (0600: it carries the stack secrets) and starts this supervisor outside the caller's
 session: as a transient systemd user unit when there is a user manager, detached otherwise. A process started
-from a terminal, an SSH session or an agent session is killed with it; the stack must not be.
+from a terminal or an SSH session is killed with that session; the stack must not be.
 
 spec: {"name", "argv", "cwd", "env", "log", "pidfile"}
 

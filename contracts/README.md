@@ -1,255 +1,788 @@
-# System contract (v1)
+# System contract
 
-Owned by the orchestrator. Work packages read it; they never edit `contracts/` or `immune_contracts/`.
-If something you need is missing or contradictory, **stop and report `CONTRACT_GAP: <what>`** in your final message instead of inventing it.
+Reference for the running system of Inmune: which processes exist, where they listen, how they talk to each
+other, and the exact shape of every message between them. Every entry describes the code as it is; the file
+that implements it is named next to it.
 
-Design background: `docs/arquitectura.md`, `docs/plan-construccion.md` (Spanish). This file wins on any conflict.
+| Document | Covers |
+|---|---|
+| `contracts/README.md` (this file) | Processes, ports, networks, environment, clone protocol, gateway decisions and admin API, recording format, fleet API, pipeline flow, event bus |
+| `contracts/product.md` | The `.immune/` directory of a project, `config.yaml`, the CLI, the generic runtime, behaviour under failure |
+| `contracts/interfaces.md` | Python interfaces between `pipeline/`, `patcher/` and scenario modules; the runner |
+| `contracts/openapi.yaml` | API of the built-in demo app (Tienda), with the `x-owner-scoped` and `x-sensitive` marks |
+| `contracts/schemas/evidence.schema.json` | Evidence a clone pushes to the gateway; also the data of `oracle.fired` |
+| `contracts/schemas/poc.schema.json` | Regression case (PoC) of an incident |
+| `contracts/schemas/rule.schema.json` | Gateway rule |
+| `immune_contracts/` | The same contracts as code: `authtoken.py`, `grammar.py`, `wire.py`, `events.py` |
+
+Terms used throughout: **clone** (a copy of the app running on synthetic data), **oracle** (a mechanical
+observation that proves an attack worked), **detonation** (running a request in a clone to read its verdict),
+**captive** (a session served only by a clone), **rule** (a gateway containment rule), **gate** (one of the five
+validations of a patch). Design reasons are in `docs/arquitectura.md`; limits are in `docs/limites.md`.
+
+`<name>` is the `name` of `.immune/config.yaml`; `<runtime>` is its `runtime_dir` (`contracts/product.md` section 1).
 
 ## 1. Processes, ports, networks
 
-| Component | Package | Runs as | Listens | Notes |
+| Component | Package | Runs as | Listens | Entry point |
 |---|---|---|---|---|
-| victim (prod) | `victim/` | containers `prod-blue` / `prod-green` | 8000 | unmodified app |
-| shadow clone | `shadow/` wrapping `victim` | containers `clone-<id>` | 8000 | same code + oracles |
-| gateway | `gateway/` | container `gateway` | 8080 data, 8081 admin, 9000 clone ingest | only entry point |
-| bus + dashboard | `dashboard/` | container `dashboard` | 8090 | event bus (POST/SSE) + UI |
-| fleet | `fleet/` | **host process** | 127.0.0.1:8070 | only component with the Docker socket |
-| pipeline | `pipeline/` | **host process** | — | drives incident → patch → deploy |
-| patcher | `patcher/` | library called by pipeline | — | runs `claude -p` |
-| sim | `sim/` | host process | — | attacker bot + legit traffic |
+| gateway | `gateway/` | container `immune-<name>-gateway` | 8080 data, 8081 admin, 9000 clone ingest | `python -m gateway` |
+| event bus and dashboard | `dashboard/` | container `immune-<name>-dashboard` | 8090 | `python -m dashboard` |
+| production app (`python-asgi`) | the project's code | container `immune-<name>-prod-<blue\|green>` | `app.port` (default 8000) | `uvicorn <app.asgi> --host 0.0.0.0 --port <app.port>` |
+| clone (`python-asgi`) | `shadow/` wrapping the project's code | container `immune-<name>-clone-<n>` | 8000 | `python -m shadow.run --profile <shadow.profile> --port 8000` |
+| clone (`generic`) | project image + `sidecar/` + Postgres | three containers per clone (`contracts/product.md` section 10) | 8000 (observer) | `python -m sidecar --config /cfg/sidecar.json` |
+| fleet | `fleet/` | supervised host process (`contracts/product.md` section 11), unit `immune-<name>-fleet` | `127.0.0.1:8070` | `python -m fleet` |
+| pipeline | `pipeline/` | supervised host process, unit `immune-<name>-pipeline` | none | `python -m pipeline` |
+| runner | `pipeline/runner.py` | one container per job, `immune-<name>-runner-<pid>-<n>` | none (`--network none`) | `python -m pipeline.runner_entry` |
+| patch generator | `patcher/` | library inside the pipeline process; spawns the `claude` CLI | none | `patcher.propose` |
+| legitimate traffic generator (demo) | `sim/` | host process, started by hand | none | `python -m sim.legit` |
 
-Docker networks (all created by `deploy/compose.yaml`):
+Host ports. `deploy/compose.yaml` publishes three container ports, each on `127.0.0.1` only; the fleet binds
+`127.0.0.1` itself (`fleet/__main__.py`). The numbers come from `ports:` in `config.yaml`.
 
-- `prodnet` (internal): gateway, prod-blue, prod-green.
-- `clonenet` (internal): gateway, clones. **Clones can reach nothing but the gateway.**
-- `ctrlnet` (internal): gateway, dashboard.
-- `edge` (bridge): gateway, dashboard. Published only on `127.0.0.1`: 8080, 8081, 8090.
+| Key in `ports:` | Default | Container port | Serves |
+|---|---|---|---|
+| `gateway` | 8080 | gateway 8080 | client traffic |
+| `admin` | 8081 | gateway 8081 | gateway admin API (section 6.6) |
+| `dashboard` | 8090 | dashboard 8090 | event bus and panel (section 10) |
+| `fleet` | 8070 | host process | fleet API (section 8) |
 
-Containers cannot reach the host (host firewall rejects it). So: **nothing in a container calls fleet/pipeline**; host processes call containers through the published ports.
+The clone ingest port 9000 is not published; clones reach it as `http://gateway:9000` on the clone network.
 
-All containers use image `immune-base:1` with the repo bind-mounted read-only at `/srv` (`PYTHONPATH=/srv`). No `docker build`, no `pip install` anywhere. Host processes use `/home/ubuntu/platanus-hack-26-cl-team-25/.venv`.
+Docker networks, created by `deploy/compose.yaml` under the compose project `immune-<name>` (so their Docker
+names are `immune-<name>_prodnet` and so on):
 
-Entry points (must exist exactly like this):
+| Network | Internal | Members |
+|---|---|---|
+| `prodnet` | yes | gateway (alias `gateway`), production containers (alias `prod-<colour>`), demo Postgres of the generic runtime (alias `proddb`) |
+| `clonenet` | yes | gateway (alias `gateway`), clones |
+| `ctrlnet` | yes | gateway (alias `gateway`), dashboard |
+| `edge` | no | gateway, dashboard; carries the published ports |
 
-```
-uvicorn victim.app.main:app --host 0.0.0.0 --port 8000
-python -m shadow.run --profile victim.shadow_profile --port 8000
-python -m gateway
-python -m dashboard
-python -m fleet
-python -m pipeline
-python -m sim.attacker   /   python -m sim.legit
-```
+A clone is attached to `clonenet` only: the gateway is the only other member it can address. Nothing in a
+container calls the fleet or the pipeline; host processes call the containers through the published ports.
 
-## 2. Runtime directory (`runtime/`, git-ignored)
+Images:
 
-```
-runtime/run_id                         current run id (string)
-runtime/releases/<release>/victim/...  immutable code of one release (t0 = "t0")
-runtime/data/prod/app.db               prod database (directory is bind-mounted, never the file)
-runtime/data/shadow/seed.db            shadow seed database (read-only for clones)
-runtime/data/manifest.json             see §4
-runtime/data/markers.json              shadow only, see §4
-runtime/recordings/requests.jsonl      gateway request log (§7)
-runtime/bus/events.jsonl               bus persistence
-runtime/repo/                          local git repo used by RepoTarget "local"
-```
+| Image | Built from | Used by |
+|---|---|---|
+| `immune-base:1` | `deploy/Dockerfile.base` | gateway, dashboard, production and clones of `python-asgi`, runner |
+| `immune-sidecar:1` | `deploy/Dockerfile.sidecar` | observer of generic clones and of the generic judge |
+| `immune-cbuild:1` | `deploy/Dockerfile.cbuild` | `immune anticipate` |
+| `immune-<name>-app:<release>` | the project's Dockerfile (`fleet/generic.py`, `build_image`) | production and clones of the generic runtime |
+| `postgres:16-alpine` | Docker Hub | per-clone database and demo database of the generic runtime |
 
-A release is mounted so that `/srv/victim` inside prod/clone containers is `runtime/releases/<release>/victim`.
+Mounts inside containers:
 
-## 3. Shared secrets / env
+| Path in the container | Content | Where |
+|---|---|---|
+| `/opt/immune` (read-only) | this repository | every container that runs Inmune code; `PYTHONPATH` includes it |
+| `/app` (read-only) | one release (`<runtime>/releases/<id>`); working directory | production, clones, runner (`python-asgi`) |
+| `/app/.immune` (read-only) | the project's `.immune/` directory, when it exists | production, clones, runner |
+| `/runtime` | `<runtime>` | gateway, dashboard |
+| `/config/openapi.yaml` (read-only) | the project's OpenAPI document | gateway |
+| `/data` | production: the directory of `data.prod_db` (read-write); clone: a tmpfs | production, clones |
+| `/seed` (read-only) | `<runtime>/data/shadow` | clones; runner when the project has no `data.seed_command` |
+| `/markers/markers.json` (read-only) | `<runtime>/data/markers.json` | clones |
+
+Inside `/opt/immune` and `/app/.immune`, the runtime directory and `.git` are covered by an empty tmpfs
+(`fleet/manager.py`, `_masks`; `pipeline/runner.py`, `docker_cmd`), and the runner also masks `.env`.
+
+Container hardening applied by the code:
+
+| Container | Settings | Source |
+|---|---|---|
+| gateway, dashboard | read-only root, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp`, runs as the host user, restart `unless-stopped` | `deploy/compose.yaml` |
+| production | read-only root, `cap_drop ALL`, `no-new-privileges`, 256 pids, 512 MB, restart `unless-stopped` | `fleet/manager.py`, `start_prod` |
+| clone (`python-asgi`) | read-only root, `cap_drop ALL`, `no-new-privileges`, 128 pids, 256 MB, tmpfs `/tmp` and `/data`, no restart policy | `fleet/manager.py`, `start_clone` |
+| runner | `--network none`, read-only root, `--cap-drop ALL`, `no-new-privileges`, tmpfs `/tmp`, pids, memory and CPU limits (256, 1 GB, 2 by default) | `pipeline/runner.py`, `docker_cmd` |
+
+Every container the fleet creates carries the labels `immune.run=<run id>`, `immune.role`, `immune.release` and
+`immune.project=<name>`. The fleet removes a container only if it carries `immune.run` of its own run
+(`fleet/manager.py`, `destroy`).
+
+## 2. Runtime directory
+
+All state of a stack lives under `<runtime>`. For the built-in demo that is `runtime/` at the repository root;
+for any other project the default is `.immune/runtime/` inside the project.
+
+| Path under `<runtime>` | Content | Written by |
+|---|---|---|
+| `run_id` | id of the current run (`MMDD-HHMMSS`) | `immune up` / `immune reset` |
+| `secrets.env` | the four stack secrets, mode 0600 (section 3) | `immune/__main__.py`, `stack_secrets` |
+| `stack/containers.env` | env file of the compose services | `immune/__main__.py`, `write_stack_env` |
+| `stack/gateway-state.json` | upstream, mode, rules with absolute expiry | gateway |
+| `stack/fleet-state.json` | live colour, release, pool size, clone counter | fleet |
+| `stack/fleet.supervise.json`, `stack/pipeline.supervise.json` | supervisor spec of each host process, mode 0600 (holds the secrets) | `immune up` |
+| `stack/clones/<clone>.json` | generic runtime: observer configuration of one clone, including that clone's database passwords | fleet (`fleet/generic.py`) |
+| `stack/demo-db.env` | generic runtime: password and URL of the demo Postgres, mode 0600 | `immune up` |
+| `releases/<release>/` | immutable copy of `app.release_paths` for one release; `t0` is the first | `immune up`, pipeline |
+| `data/` | production database (when `data.prod_db` is under it), `manifest.json`, `markers.json` | seed |
+| `data/shadow/` | `seed.db`, `markers.json`, optional `sharing.json`; for Postgres `seed.sql` and `pginit/` (`seed.dump`, `01-seed.sh`) | seed |
+| `recordings/requests.jsonl` | gateway request log (section 7); rotated to `requests.jsonl.1` | gateway |
+| `bus/events.jsonl` | event bus store; rotated to `events.jsonl.1` | dashboard |
+| `pipeline/state.json` | incidents, queue, last bus sequence number | pipeline |
+| `pipeline/events.jsonl` | copy of every event the pipeline published | pipeline |
+| `pipeline/PAUSE` | while this file exists the pipeline starts no new incident | operator |
+| `corpus/<class>.jsonl` | confirmed parameter values per class, at most 500 per class | pipeline |
+| `repo/` | local git repository used when `repo.target` is `local` | pipeline |
+| `logs/fleet.log`, `logs/fleet.pid`, `logs/fleet.pid.child` and the same for `pipeline` | log and pid files of the two host processes | supervisor |
+
+`immune anticipate` is not tied to a project: it keeps its cache and reports under `anticipate/` in the directory
+named by the environment variable `RUNTIME_DIR`, by default `runtime/` at the repository root (`anticipate/core.py`).
+
+`immune reset` deletes `data/`, `recordings/`, `bus/`, `releases/`, `pipeline/` and `logs/*.log`; it keeps `corpus/`,
+`secrets.env` and, in the case described in `contracts/product.md` section 5, the production database. The two
+runtimes differ in one point: `python-asgi` keeps `repo/` (`immune/__main__.py`, `seed`) and `generic` deletes
+it (`immune/generic.py`, `cmd_up`).
+
+## 3. Environment variables
+
+Secrets. `immune up` generates four random values (`secrets.token_hex(16)`) into `<runtime>/secrets.env` and
+passes them to every component. A variable of the same name in the environment of `immune` overrides the file.
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `APP_SECRET` | victim | token secret (prod value in prod, shadow value in clones) |
-| `APP_DB` | victim | sqlite path |
-| `APP_STATIC` | victim | read-only static dir |
-| `APP_NOW` | victim | optional frozen unix time (tests / differential replay) |
-| `PROD_APP_SECRET`, `SHADOW_APP_SECRET` | gateway | to verify prod tokens and to recognise shadow tokens |
-| `ADMIN_TOKEN` | gateway admin, fleet, pipeline | header `x-admin-token` |
-| `BUS_URL`, `BUS_TOKEN` | all publishers | see `immune_contracts/events.py` |
-| `RUN_ID` | all | stamped on events |
-| `CLONE_ID`, `CLONE_KEY`, `COLLECTOR_URL`, `SHADOW_SEED_DB`, `RELEASE`, `MARKERS_PATH` | shadow | per-clone identity, HMAC key, `http://gateway:9000`, seed path, release id, markers file |
-| `GW_HOST`, `GW_DATA_PORT`, `GW_ADMIN_PORT`, `GW_INGEST_PORT` | gateway | bind address and the three ports (defaults `0.0.0.0`, 8080, 8081, 9000) |
-| `PROD_ADDR`, `PROD_RELEASE`, `OPENAPI_PATH`, `MANIFEST_PATH`, `RECORD_PATH` | gateway | initial upstream `host:port`, its release id, and file paths |
-| `DASH_HOST`, `DASH_PORT`, `BUS_STORE` | dashboard | bind (default `0.0.0.0:8090`) and the events JSONL path |
-| `FLEET_PORT`, `GATEWAY_ADMIN_URL`, `RUNTIME_DIR`, `REPO_DIR` | fleet, pipeline | 8070, `http://127.0.0.1:8081`, absolute `runtime/`, absolute repo root |
+| `PROD_APP_SECRET` | production, gateway, pipeline | secret of production tokens (`{secret}` in `app.env` of production) |
+| `SHADOW_APP_SECRET` | clones, gateway | secret of tokens minted inside clones; a token signed with it that arrives from outside is a honeytoken |
+| `ADMIN_TOKEN` | gateway admin API, fleet API, pipeline | value of the header `x-admin-token` |
+| `BUS_TOKEN` | dashboard, every publisher | value of the header `x-bus-token` |
 
-Demo values live in `deploy/demo.env`. `python -m shadow.run` also accepts `--host` (default `0.0.0.0`).
+`deploy/demo.env` holds placeholder values. No stack started by `immune up` uses them. They are read in two
+cases: as the env file of `docker compose down` when no stack was ever started, and as the fallback of a
+hand-run `python -m pipeline` for unset secrets (`pipeline/config.py`, `_demo_env`) and of a hand-run
+`python -m fleet` for every secret except `ADMIN_TOKEN` (`fleet/config.py`, `Config.from_env`).
 
-## 4. Victim contract
+Per-component variables. Each component's own variables, with their defaults, are listed once, in the
+component's README, next to the code that reads them:
 
-API: `contracts/openapi.yaml`. Extensions used by the gateway and pipeline:
+| Component | Read by | Reference |
+|---|---|---|
+| gateway | `gateway/core.py`, `Config.from_env` | `gateway/README.md`, "Configuration" |
+| dashboard and bus | `dashboard/__main__.py`, `dashboard/server.py` | `dashboard/README.md`, "Configuration" |
+| fleet | `fleet/config.py`, `Config.from_env` | `fleet/README.md`, "Configuration" |
+| pipeline | `pipeline/config.py`, `Config.from_env` | `pipeline/README.md`, "Configuration" |
+| patch generator | `patcher/claude_cli.py`, `patcher/core.py` | `patcher/README.md`, "Configuration" |
 
-- `x-owner-scoped: true` on an operation: the resource belongs to one user.
-- `x-sensitive: true` on a parameter/property: never grammar-checked, redacted in recordings.
+The variables an operator is expected to change are summarised in `docs/operacion.md`.
 
-Rules for the victim code:
+Clone (`fleet/manager.py`, `start_clone`; read by `shadow/run.py` and `shadow/core.py`):
 
-- FastAPI, raw **synchronous** `sqlite3` (stdlib), no ORM, no threads/executors of its own, no background tasks.
-- All mutable state in SQLite (`APP_DB`). Filesystem is read-only; files are served only from `APP_STATIC`.
-- Auth: `immune_contracts.authtoken` with `APP_SECRET`.
-- Time comes from `APP_NOW` when set. Ids are autoincrement integers.
-- Each planted vulnerability has a comment-free, realistic implementation (no `# VULN` markers) and is listed in `victim/VULNS.md` (class, route, param, file:line, example exploit).
-- `victim/tests/` is a pytest suite that passes on t0 and exercises every route with legitimate inputs (including a name with an apostrophe and file names with dots).
+| Variable | Meaning |
+|---|---|
+| `CLONE_ID`, `CLONE_KEY` | clone id (`clone-<n>`) and the HMAC key of its evidence pushes (random per clone) |
+| `COLLECTOR_URL` | base URL of the gateway ingest listener |
+| `SHADOW_SEED_DB` | seed database the clone restores from (`/seed/seed.db`) |
+| `SHADOW_DB_ENV` | name of the variable through which the app receives its database path (`database.path_env`) |
+| `SHADOW_RELEASE_ROOT`, `SHADOW_RELEASE_PATHS` | release root (`/app`) and `app.release_paths`, used to select stack frames |
+| `MARKERS_PATH` | markers file, set only when `<runtime>/data/markers.json` exists |
+| `RELEASE` | release id, copied into evidence |
+| the `app.env` entries | with `{db}` = `/data/app.db`, `{secret}` = `SHADOW_APP_SECRET`, `{static}` = `/app/<app.static>` |
 
-Seeding: `python -m victim.seed --out-prod <db> --out-shadow <db> --manifest <json> --markers <json> [--seed 1]`
 
-- Prod and shadow have the **same key skeleton**: same ids, same owner relations, same public data (products, static files). Private fields (names, emails, addresses, phone, order notes, invoice text) are different in shadow.
-- Every private field value in shadow embeds that owner's **marker**: a token `MK` + 10 chars `[A-Z0-9]`, unique per owner, placed so the value still looks plausible (e.g. `Apt MK4F7Q2ZP0XA`). Prod data contains no string matching `MK[A-Z0-9]{10}`.
-- `manifest.json`:
-  ```json
-  {"seed_max_uid": 60, "seed_max_order_id": 240,
-   "legit_users": [{"id": 3, "email": "...", "password": "...", "role": "user"}],
-   "admin": {"id": 1, "email": "...", "password": "..."},
-   "canaries": {"user_id": [7, 19], "order_id": [12, 31]},
-   "ownership": {"orders": {"1": 3, "2": 5}}}
-  ```
-  `canaries` is keyed by **OpenAPI path-parameter name**. Canary users/orders exist in both databases; nobody ever logs in as a canary user and no legit user owns a canary order. Any non-admin request whose path parameter hits a canary value is evidence.
-- Required tables/columns (others are free): `users(id, email, role, ...)`, `orders(id, user_id, ...)`, `products(id, ...)`.
-- `victim/static/manuals/` and `victim/static/images/` hold the public files; at least one manual has two dots in its name.
-- `markers.json`: `{"MK4F7Q2ZP0XA": 3, ...}` (marker → owner uid).
+## 4. Application contract
 
-Shadow profile `victim/shadow_profile.py` (the only victim-specific knowledge the wrapper gets):
+What Inmune needs from the protected application. The built-in demo, Tienda (`victim/`), is the reference
+instance; a project's own values live in its `config.yaml` (`contracts/product.md` section 2).
 
-```python
-APP = "victim.app.main:app"
-def allowed_file_roots(env: dict) -> list[str]: ...      # static dir etc.
-def ensure_user(conn, uid: int, role: str) -> None: ...  # insert a synthetic user row if uid is missing
-def mint_token(env: dict, uid: int, role: str) -> str: ...
-def load_markers(env: dict) -> dict[str, int]: ...      # reads env["MARKERS_PATH"]
-def public_paths() -> list[str]: ...                      # path prefixes whose responses are never owner-checked
+### 4.1 OpenAPI extensions
+
+Read by `gateway/spec.py` from the project's OpenAPI document:
+
+| Extension | Where | Effect |
+|---|---|---|
+| `x-owner-scoped: true` | operation | the resource belongs to one user; see the `owner_scoped:*` reasons in section 6.2 |
+| `x-sensitive: true` | parameter, or schema of a parameter or JSON property | the value is never schema- or grammar-checked and is replaced by `<redacted>` in the recording |
+
+The gateway reads this subset of OpenAPI 3.0: local `$ref`, path templates (including catch-all `{name*}`),
+query, path and header parameters, JSON and form request bodies.
+
+### 4.2 Demo app
+
+| Fact | Value | Source |
+|---|---|---|
+| Framework and storage | FastAPI, synchronous `sqlite3`, all mutable state in one SQLite file | `victim/app/db.py` |
+| Environment | `APP_DB` (database path), `APP_SECRET` (token secret), `APP_STATIC` (static directory), `APP_NOW` (optional frozen unix time) | `victim/app/db.py`, `victim/app/auth.py`, `victim/app/files.py` |
+| Authentication | `immune_contracts/authtoken.py`: `Authorization: Bearer <token>` | `victim/app/auth.py` |
+| API | `contracts/openapi.yaml` | |
+| Tests | `victim/tests/`, run with `python -m pytest victim/tests -q -p no:cacheprovider` | `.immune/config.yaml` |
+| Planted defects | seven; the list is kept outside every release path, in `docs/demo/respuestas/` | |
+
+Token format (`immune_contracts/authtoken.py`):
+`base64url(json({"uid": int, "role": "user"|"admin", "exp": int})) + "." + hex(hmac_sha256(secret, payload))`.
+
+Seed command of the demo:
+
+```
+python -m victim.seed --out-prod <db> --out-shadow <db> --manifest <json> --markers <json> [--seed 1]
 ```
 
-## 5. Shadow wrapper contract
+Production and shadow databases share the key skeleton (same ids, same owner relations, same public data).
+Every private value in the shadow database embeds its owner's marker: `MK` followed by 10 characters of
+`[A-Z0-9]`, unique per owner.
 
-One request at a time per clone (the wrapper holds a lock). For each request:
+### 4.3 `manifest.json` and `markers.json`
 
-1. Read and remove the `x-imm-*` request headers (`immune_contracts/wire.py`).
-2. If `x-imm-uid` is present: `ensure_user`, then replace `Authorization` with `mint_token(uid, role)`.
-3. If mode is `L2`: take the pre-request state with the sqlite **backup API** (never copy the file).
-4. Run the app; **buffer the whole response** until the ASGI app callable has returned.
-5. Evaluate oracles → `events`.
-6. Verdict: `oracle` if any event; else `inconclusive` if status is 401, 404 or ≥ 500; else `clean`.
-7. If verdict is `oracle`: POST the evidence (schema `contracts/schemas/evidence.schema.json`) to `{COLLECTOR_URL}/_clone/evidence`, signed (`wire.sign`), **before** releasing the response. Collector failure must not break the response.
-8. Release the response with `x-imm-verdict` and `x-imm-events`.
-9. If mode is `L1`: restore the database from `SHADOW_SEED_DB` with the backup API.
+`<runtime>/data/manifest.json`, read by the gateway (`gateway/classifier.py`, `Manifest`) and by the pipeline:
 
-Oracles (kinds in `wire.ORACLES`):
-
-| Kind | Fires when | Must not fire when |
+| Key | Type | Used for |
 |---|---|---|
-| `sql` | a request input value (query/path/json/form/header, length ≥ 2) appears in an **executed** statement and is not contained in a single literal token, or touches a comment | the statement fails to parse/execute; a parameterised query receives `O'Brien` |
-| `file` | a file is opened whose realpath is outside the allowed roots and outside the warm-up allowlist | interpreter/library files learned during warm-up (e.g. `/etc/mime.types`) |
-| `proc` | a child process is spawned during a request | — |
-| `net` | an outbound connection is made during a request | the wrapper's own evidence push |
-| `owner` | the response body contains a marker of an owner ≠ requester, requester is not admin, path not in `public_paths()` | login/register, public data |
+| `seed_max_uid` | integer | identity trust: `uid <= seed_max_uid` is trusted (section 6.1) |
+| `canaries` | `{path parameter name: [values]}` | a non-admin, non-owner request addressing a canary value is evidence |
+| `ownership` | `{table: {object id: owner uid}}` | `owner_scoped:mismatch` and canary ownership; the table for parameter `<x>_id` is `<x>s` |
+| `groups` | `{group table: {group id: [member uids]}}` | group-shared access (`contracts/product.md` section 9) |
+| `group_routes` | `{path parameter name: group table}` | same |
+| `legit_users`, `admin` | credentials of seeded users | scenarios, `sim/legit.py`, class audit |
+| `seed_max_<table>_id` | integer | scenarios (for the demo: `seed_max_order_id`) |
 
-Each event: `{"oracle": kind, "detail": {...}, "stack": [{"file": "<path relative to the release>", "line": n, "func": "..."}]}` with only frames inside the victim package. `detail` for `sql`: `{statement, input, param}`; `file`: `{path, realpath}`; `owner`: `{marker_owner, requester}`.
+`<runtime>/data/markers.json` maps each marker to its owner uid: `{"MK4F7Q2ZP0XA": 3, ...}`.
+The gateway reloads the manifest when the file's modification time changes.
 
-In-process harness (used by the pipeline runner as the judge):
+### 4.4 Shadow profile
+
+A Python module named by `shadow.profile`, importable inside the clone from `/app` or `/app/.immune`. It is
+the only application-specific code the wrapper runs. For the demo: `victim/shadow_profile.py`.
+
+```python
+APP = "victim.app.main:app"                               # ASGI entry, "module:attribute"
+def allowed_file_roots(env: dict) -> list[str]: ...        # directories the app may open files in
+def ensure_user(conn, uid: int, role: str) -> None: ...    # insert a synthetic user row if uid is missing
+def mint_token(env: dict, uid: int, role: str) -> str: ... # a credential the app accepts for uid
+def load_markers(env: dict) -> dict[str, int]: ...         # marker -> owner uid
+def public_paths() -> list[str]: ...                       # path prefixes exempt from the owner oracle
+def identify(env: dict, headers: dict): ...                # optional: (uid, role) or None from client headers
+```
+
+`load_markers` raising stops the clone from starting. Returning an empty mapping turns the owner oracle off
+and logs a warning (`shadow/core.py`, `Engine.__init__`).
+
+## 5. Clone protocol
+
+How the gateway talks to a clone. Implemented for Python ASGI apps by `shadow/core.py` (`Engine.handle`,
+`Engine.finish`), for any other app by `sidecar/server.py`, and for the Grafana lab by `sidecar/marker/`.
+The gateway cannot tell them apart.
+
+### 5.1 Headers (`immune_contracts/wire.py`)
+
+| Header | Direction | Value |
+|---|---|---|
+| `x-imm-rid` | gateway to clone | request id minted by the gateway |
+| `x-imm-mode` | gateway to clone | `L1`: reset to the seed after the request. `L2`: captive, keep state |
+| `x-imm-uid` | gateway to clone | user id resolved from the production credential; absent means "use the client's own headers" |
+| `x-imm-role` | gateway to clone | `user` or `admin`; only with `x-imm-uid` |
+| `x-imm-verdict` | clone to gateway | `clean`, `oracle` or `inconclusive` |
+| `x-imm-events` | clone to gateway | number of oracle events of this request |
+| `x-imm-clone` | clone to gateway ingest | clone id of an evidence push |
+| `x-imm-signature` | clone to gateway ingest | `hex(hmac_sha256(clone key, raw body bytes))` |
+
+The gateway removes every header starting with `x-imm-` from client requests (`gateway/core.py`, `_read`) and
+from responses sent to clients (`_clean_resp_headers`). A response without a valid `x-imm-verdict` is treated
+as `inconclusive`.
+
+### 5.2 One request in a clone
+
+A clone handles one request at a time (a lock in `shadow/run.py`). For each request:
+
+1. Read and remove the `x-imm-*` request headers.
+2. If `x-imm-uid` is present: call `ensure_user`, then replace `Authorization` with `mint_token(uid, role)`.
+   Otherwise the identity is what the profile's `identify` returns or, by default, what the bearer token
+   verifies to with the clone's `APP_SECRET`.
+3. In mode `L2`: snapshot the database before the request.
+4. Run the app and buffer the whole response.
+5. Evaluate the oracles (section 5.3).
+6. Verdict: `oracle` if any oracle fired; else `inconclusive` if the status is 401, 404 or 500 and above;
+   else `clean`.
+7. If the verdict is `oracle`: POST the evidence to `<COLLECTOR_URL>/_clone/evidence`, signed, before the
+   response is released (2 s timeout). A failed push is logged and does not change the response.
+8. Send the response with `x-imm-verdict` and `x-imm-events`.
+9. In mode `L1`: restore the database from the seed.
+
+Evidence body: `contracts/schemas/evidence.schema.json`. `pre_state_b64` carries the SQLite snapshot of step 3
+in `L2` and is `null` in `L1` and for Postgres. The body is serialised with `wire.dumps` (sorted keys, compact
+separators) and signed over those bytes.
+
+### 5.3 Oracles
+
+Kinds are the constants `wire.ORACLE_SQL`, `wire.ORACLE_FILE`, `wire.ORACLE_PROC`, `wire.ORACLE_NET` and
+`wire.ORACLE_OWNER`. In-process implementation (`shadow/`):
+
+| Kind | Fires when | Does not fire when | Source |
+|---|---|---|---|
+| `sql` | a request input of length 2 or more appears in a statement executed through `sqlite3` and is not exactly inside one literal token, or touches a comment | the statement failed; the value arrived as a bound parameter; the occurrence is a verbatim part of a string constant of the app's own code | `shadow/sqltaint.py` |
+| `file` | the app opens or lists a path whose real path is outside the profile's allowed roots and outside the warm-up allowlist | the file was opened during warm-up (interpreter and library files) | `shadow/instrument.py` |
+| `proc` | a process is spawned during the request | | `shadow/instrument.py` |
+| `net` | an outbound connection or name resolution happens during the request | the wrapper's own evidence push | `shadow/instrument.py` |
+| `owner` | the response body carries the marker of an owner other than the requester, and the requester is not admin | the path is under `public_paths()`, unless markers of two or more foreign owners appear or another oracle fired in the same request; the marker owner shares a group with the requester on a members-scoped route | `shadow/core.py`, `owner_events` |
+
+Each event is `{"oracle": kind, "detail": {...}, "stack": [{"file", "line", "func"}]}`. `stack` holds only
+frames inside `app.release_paths`, with paths relative to the release root, outermost first and the sink last.
+`detail` is `{statement, input, param, location, reason}` for `sql` (`reason` is `comment`, `token` or
+`structure`), `{path, realpath}` for `file` (plus `op` for a directory listing), `{event, args}` for `proc`,
+`{event, address}` for `net` and `{marker_owner, requester}` for `owner`. The sidecar implementation and what it observes are described in
+`contracts/product.md` section 6; its events have an empty `stack`.
+
+Limits of each oracle are listed in `shadow/README.md` and `docs/limites.md`.
+
+### 5.4 In-process harness
+
+The runner judges patches with the same engine, without a network (`shadow/harness.py`):
 
 ```python
 from shadow.harness import Harness
-h = Harness(profile="victim.shadow_profile", seed_db="/path/seed.db", state=None)   # state: sqlite bytes or None (= seed)
+h = Harness(profile="victim.shadow_profile", seed_db="/path/seed.db", state=None)  # state: SQLite bytes, or None for the seed
 r = h.send("GET", "/api/products", query="q=x", headers={}, body=b"", uid=None, role="user", mode="L1")
-r.status, r.headers, r.body, r.verdict, r.events
-h.snapshot() -> bytes ; h.close()
+r.status, r.headers, r.body, r.verdict, r.events, r.evidence
+h.snapshot()   # -> bytes
+h.close()
 ```
 
-`victim` is imported from `sys.path`, so the caller chooses the release.
+The app is imported from `sys.path`, so the caller chooses the release. Evidence is built but never pushed.
 
-## 6. Gateway contract
+## 6. Gateway
 
-Decision per request (enforce mode):
+`gateway/core.py` (`Gateway`), `gateway/classifier.py` (`classify`), `gateway/spec.py`, `gateway/pool.py`,
+`gateway/l0.py`.
 
-1. Strip `x-imm-*` request headers. Mint `rid`. Resolve identity: prod token → uid/role; shadow-secret token → **evidence** (honeytoken).
-2. Session key: `uid:<n>` if identified, else cookie `gwsid` (the gateway sets it on every response that lacks it). Never the IP.
-3. If the session is captive → its L2 clone (`x-imm-mode: L2`, client headers untouched). Serialise per clone.
-4. Known scanner path (fixed list) → L0 procedural response. Any other unknown path → forwarded normally.
-5. Classify. **suspect** if any: a parameter (query, path, JSON string leaf, form) violates the OpenAPI schema or `grammar.is_safe_default` (skip `x-sensitive`), duplicated query parameter, operation is `x-owner-scoped` and uid is untrusted (`uid > seed_max_uid`) or anonymous, an active rule matches, enumeration heuristic. **evidence** if: canary order/user id requested by a non-owner, honeytoken.
-6. `clean` → prod.
-7. `suspect` → acquire a free L1 clone (wait ≤ 300 ms), send with `x-imm-rid`, `x-imm-mode: L1`, and `x-imm-uid`/`x-imm-role` if identified. Read the full response, then the verdict:
-   - `clean` → forward the **same bytes** to prod, return prod's response.
-   - `oracle` → attack confirmed (see 8).
-   - `inconclusive` → if an active rule matched: generic deny; else forward to prod.
-   - no clone available → evict the oldest clone-bound captive (its clone becomes `retired`, so fleet replaces it), then: if an active rule matched **or the request is high-signal** (a reason of kind schema/grammar violation or duplicated parameter) → generic deny; else forward to prod.
-8. Confirmed attack (`oracle` verdict, or `evidence`):
-   - trusted identity (`uid ≤ seed_max_uid`): never serve synthetic data → generic deny, publish `oracle.fired`.
-   - otherwise: return the clone's response and mark the session **captive**. Captivity is bound to a clone **lazily**: after an L1 detonation the clone goes back to `free` (the wrapper already reset it to the seed) and the session holds no clone. On the captive session's **next** request the gateway acquires a clone (evicting the oldest clone-bound captive if none is free), binds it and uses `L2` from then on. A captive session that never comes back costs nothing.
-   - `evidence` without a detonation (canary, honeytoken): mark captive, acquire and bind a clone now, replay the request there in `L2`.
-   - a captive request that cannot get a clone → generic deny, never prod.
-9. Generic deny = `404 {"detail":"Not Found"}`.
+### 6.1 Reading a request
 
-Rules (`contracts/schemas/rule.schema.json`): a rule marks a confirmed-vulnerable point. Effects: values on that route+param not matching `grammar` are suspect **for every identity, trusted included**; `scope: "all"` makes every request on that route suspect; fail-closed as in step 7. Rules expire by TTL or `DELETE`.
+| Step | Behaviour | Function |
+|---|---|---|
+| Target | a target that does not start with `/` is answered 400 | `_read` |
+| Body | `Content-Length` above 10 MiB, or a body growing past it: 413. Body not complete within 30 s: 408. Invalid `Content-Length`: 400 | `_read` |
+| Client disconnect | a request whose client disconnects before its body is complete is dropped: not forwarded, not answered, not recorded | `data_app` |
+| Internal headers | every `x-imm-*` request header is removed | `_read` |
+| Session cookie | cookie `gwsid`, accepted if it matches `[A-Za-z0-9_-]{16,64}`; otherwise a new one is issued with `Set-Cookie: gwsid=<value>; Path=/; HttpOnly; SameSite=Lax` | `_read`, `_send` |
+| Identity | per `auth.kind` (`immune/auth.py`): `immune-token` and `jwt-hs256` are verified locally; `introspect` asks production `auth.path` with the client's `Authorization` and `Cookie` (without `gwsid`) and caches the answer by credential hash for `auth.cache_s` (5 s at most for an anonymous answer); `none` makes every client anonymous | `resolve`, `identify` |
+| Trust | `trusted` is `uid <= seed_max_uid`. Anonymous clients and newer uids are untrusted | `identify` |
+| Honeytoken | a bearer token that verifies with `SHADOW_APP_SECRET` and not with the production secret | `immune/auth.py`, `Authenticator.from_token` |
+| Session key | `uid:<n>` when identified, else `gwsid:<cookie value>`. Never the IP address | `_read` |
 
-Captivity: TTL 15 min idle; when no clone is free and a new capture is needed, evict the oldest captive (its clone becomes `retired`).
+The `gwsid` cookie is supplied by the client and is not signed.
 
-Passthrough mode: everything goes to prod (negative control).
+Requests the gateway refuses in this step are answered by the gateway, never forwarded and never counted as
+production errors.
 
-Admin API on 8081, header `x-admin-token`:
+### 6.2 Classification
 
-```
-GET  /_admin/health
-PUT  /_admin/pool        {"clones":[{"id","addr","key","release"}]}   full set of registered clones
-GET  /_admin/pool        {"clones":[{"id","state":"free|busy|captive|retired","session","release"}]}
-GET|POST /_admin/rules ; DELETE /_admin/rules/{id}
-GET|POST /_admin/upstream   {"addr":"prod-green:8000","release":"..."}   POST drains in-flight requests, then switches
-GET  /_admin/sessions       {"captive":[{"session","clone","since"}]}   clone is null until bound
-POST /_admin/mode           {"mode":"enforce|passthrough"}
-GET  /_admin/prodlog?rid=   {"forwarded": bool, "status": n}
-GET  /_admin/stats          {"prod_requests", "prod_5xx", ...} since last upstream switch
-POST /_admin/reset          clear sessions, rules, stats, logs
-```
+`classify` returns a class and a list of reasons. The class is `evidence` if any reason is `honeytoken` or
+`canary:*`, else `suspect` if there is any reason, else `clean`.
 
-Clone ingest on 9000: `POST /_clone/evidence` (headers `x-imm-clone`, `x-imm-signature`). The gateway verifies the signature with that clone's key, attaches `session`/`uid`, and publishes `oracle.fired`.
+Path matching. Routes and rules are matched on two readings of the raw path (`gateway/spec.py`,
+`path_readings`): decoded once and then split on `/` (how uvicorn and Starlette route), and split first with
+each segment decoded afterwards (how servers that route on the raw path behave). A route or a rule applies if
+either reading matches; the first reading wins when both match. The readings differ only when the path carries
+an encoded slash (`%2F`). `%252F` decodes to the text `%2F` and `%5C` to a backslash: neither is a separator.
 
-Responses to clients never contain `x-imm-*` headers.
+| Reason | Condition | Applies off-spec |
+|---|---|---|
+| `path:encoded_slash` | the two readings route to different operations (or only one of them routes) | needs at least one reading to match an operation |
+| `honeytoken` | the credential is a honeytoken | yes |
+| `dup_query:<name>` | a query parameter appears more than once | yes |
+| `traversal:path` | a path segment equals `..` under any of up to four rounds of percent-decoding, with overlong UTF-8 forms and backslashes folded | yes |
+| `traversal:query.<name>` | a query value contains `../`, ends in `/..` or equals `..` under the same decodings (`<name>` is `?` when the key is not `[A-Za-z0-9_-]{1,64}`) | yes |
+| `grammar:query.key` | a query key is not `[A-Za-z0-9_-]{1,64}` | no |
+| `schema:<where>.<name>:<kind>` | a query, path, declared header or form value violates its schema; `<kind>` is `type`, `enum`, `bounds`, `length` or `pattern` | no |
+| `grammar:<where>.<name>` | the value does not match `grammar.SAFE_DEFAULT` (`grammar.PATH_SAFE` for a catch-all path parameter) | no |
+| `schema:json:invalid`, `schema:form:invalid` | the body cannot be parsed | no |
+| `schema:json.<path>:<kind>`, `grammar:json.<path>`, `grammar:json.key` | a JSON leaf violates its schema, a JSON string is outside `SAFE_DEFAULT`, a JSON key is not `[A-Za-z0-9_-]{1,64}` | no |
+| `owner_scoped:anonymous`, `owner_scoped:untrusted` | the operation is `x-owner-scoped` and the client is anonymous, or identified with `uid > seed_max_uid` | no |
+| `owner_scoped:mismatch:<param>` | the operation is `x-owner-scoped`, the identity is trusted and not admin, and the manifest attributes the object addressed by path parameter `<param>` to someone else | no |
+| `canary:<param>` | a path parameter equals a canary value, the role is not admin and the requester is not its owner | no |
+| `enumeration` | more than 8 distinct parameter sets on one owner-scoped route from one session within 30 s (`EnumTracker`) | no |
+| `rule:<id>` | an active rule matches (section 6.4) | yes |
+| `scanner` | the path is in the fixed scanner list and no operation matches it (section 6.3 step 4) | only off-spec |
+| `captive` | the session is captive; prefixed to the other reasons, class `captive` | yes |
+
+Ownership lookup for `owner_scoped:mismatch` and canaries (`_owns`): a parameter in `group_routes` is owned by
+every member of the addressed group; `user_id` is owned by the uid equal to its value; `<x>_id` is owned by
+`ownership["<x>s"][value]`. When the manifest has no entry (another parameter name, or an object created
+after the seed) the lookup is undetermined and the request is not flagged.
+
+Not inspected: values marked `x-sensitive`, headers the operation does not declare, cookies. A route missing
+from the OpenAPI document is `clean` unless one of the "applies off-spec" reasons fires.
+
+`grammar.SAFE_DEFAULT` is `[A-Za-z0-9 _.,@:+\-]{0,128}`; `grammar.PATH_SAFE` adds `/` and allows 512
+characters; a value containing `..` never matches any grammar (`immune_contracts/grammar.py`, `matches`).
+
+### 6.3 Decision in `enforce` mode
+
+`Gateway.handle`. The step numbers are stable: code comments refer to them.
+
+1. **Read** the request (section 6.1).
+2. **Session key** (section 6.1).
+3. **Captive session.** If the identity is not trusted and the session (or, for an identified client, its
+   cookie session) is captive: serve it from its clone in mode `L2` (step 8). Route `shadow_l2`.
+4. **Scanner path.** If the path is in `SCANNER_PATHS` or under `/wp-admin/` or `/phpmyadmin/`
+   (`gateway/l0.py`, `is_scanner_path`) and no operation of the OpenAPI
+   matches: answer with a deterministic decoy generated from a hash of path and session. Route `l0`.
+5. **Classify** (section 6.2).
+6. `clean`: forward to production. Route `prod`.
+7. `suspect`: **detonate** (`_detonation`). The gateway takes a free clone, waiting at most 0.3 s, sends the
+   request with `x-imm-mode: L1` (and `x-imm-uid`, `x-imm-role` when identified), reads the whole response
+   and its verdict. The first matching row applies:
+
+   | Outcome of the detonation | Decision |
+   |---|---|
+   | verdict `oracle`, trusted identity | deny |
+   | verdict `oracle`, any other identity | return the clone's response (route `shadow_l1`) and mark the session captive |
+   | reason `traversal:path` present, verdict not `oracle` | deny, whatever the verdict |
+   | verdict `clean` | forward the same bytes to production |
+   | verdict `inconclusive` | deny if an active rule matched; else forward to production |
+   | no clone available, or the clone failed (verdict recorded as `no_clone`) | deny if the request fails closed; else forward to production |
+
+   A request **fails closed** when an active rule matched, or a reason starts with `schema:`, `grammar:`,
+   `dup_query:` or `traversal:`. When no clone is free the gateway also retires the clone of the oldest
+   clone-bound captive session, so the fleet replaces it.
+8. **Confirmed attack and captivity** (`gateway/pool.py`).
+   - Class `evidence` (honeytoken, canary): a trusted identity is denied. Any other session is marked
+     captive, a clone is bound to it now and the request is replayed there in `L2`. Without a clone: deny.
+   - A session marked captive after an `L1` detonation holds no clone; the clone returns to the pool. On the
+     session's next request the gateway binds a clone to it (retiring the oldest bound one if none is free)
+     and uses `L2` from then on.
+   - A captive request that cannot get a clone is denied; it never reaches production.
+   - A captive session is released after `GW_CAPTIVE_TTL_S` (900 s) without requests; its clone is retired.
+   - At most 50000 captive sessions are tracked (`max_sessions`); beyond that the oldest unbound one is
+     dropped. There is no per-origin limit.
+   - A trusted identity is never captive and is never served synthetic data.
+9. **Deny** is `404` with body `{"detail":"Not Found"}`. A handler error is also answered with a deny.
+
+Consequences that follow from the table: a rule is as strong as the oracle behind it, because a rule hit
+whose detonation is `clean` goes to production; and an `inconclusive` verdict without a rule goes to
+production.
+
+Forwarding (`to_prod`, `to_clone`, `_out_headers`): the request target is sent byte for byte. Hop-by-hop
+headers (`connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`, `trailers`,
+`transfer-encoding`, `upgrade`, `host`, `content-length`, `proxy-connection`) are not forwarded, and `gwsid`
+is removed from the forwarded `Cookie` header, to production and to clones. From upstream responses the same
+headers plus `content-encoding`, `date`, `server` and every `x-imm-*` header are dropped. A refused connection
+to production is retried once for any method; a pooled connection the upstream had closed is retried once for
+`GET`, `HEAD` and `OPTIONS`. A production timeout (30 s) is answered 504, any other failure 502; both count
+as production 5xx. A request that cannot be put on the wire as sent is answered 400 and is not counted.
+
+### 6.4 Rules
+
+A rule (`contracts/schemas/rule.schema.json`) marks a point confirmed vulnerable. Its scope is a route, a
+parameter and a grammar; it never refers to an IP address, a fingerprint or a user agent.
+
+| Field | Meaning |
+|---|---|
+| `id` | unique id; posting an existing id replaces the rule |
+| `incident` | incident it belongs to, or `null` |
+| `method` | HTTP method; `*` or `ANY` match every method; a `GET` rule also matches `HEAD` |
+| `route` | OpenAPI path template, matched on both path readings; it may be a route that is not in the OpenAPI |
+| `scope` | `param`: only values of `param` outside `grammar`. `all`: every request on the route |
+| `param` | `{"in": "query"\|"path"\|"json"\|"form"\|"header", "name": ...}`; for `json` a dotted path |
+| `grammar` | full-match regular expression over the decoded value; `null` with scope `param` means `SAFE_DEFAULT` |
+| `ttl_s` | lifetime in seconds, at least 1 |
+| `created`, `expires_in` | set by the gateway; `expires_in` appears in responses |
+
+A matching rule adds the reason `rule:<id>` for every identity, trusted included, which forces a detonation
+and makes the request fail closed (section 6.3). A rule ends by TTL (`rule.expired`, reason `ttl`), by
+`DELETE` (reason `deleted`) or by a gateway reset (reason `reset`). Rules survive a gateway restart within
+the same run (`<runtime>/stack/gateway-state.json`).
+
+### 6.5 Modes
+
+| Mode | Behaviour |
+|---|---|
+| `enforce` | section 6.3 |
+| `observe` | classifies and detonates as `enforce`, but every response comes from production. Nothing is denied, diverted, evicted or captured. `request.classified`, `request.routed` and `oracle.fired` carry `"observe": true`, and `request.routed` carries `would_route`: the route `enforce` would have taken (`prod`, `deny`, `shadow_l1`, `shadow_l2` or `l0`), computed by the same function |
+| `passthrough` | classifies for the record and forwards everything to production; no detonation |
+
+The initial mode comes from `GW_MODE`; `POST /_admin/mode` changes it and the change is persisted.
+
+### 6.6 Admin API
+
+Port 8081, header `x-admin-token`. A missing or wrong token, or a gateway started without `ADMIN_TOKEN`, is
+answered `403 {"detail":"forbidden"}`.
+
+| Method and path | Request body | Response |
+|---|---|---|
+| `GET /_admin/health` | | `{"ok", "mode", "upstream": {"addr", "release"}, "pool": {"free", "busy", "captive", "retired", "sessions"}}` |
+| `GET /_admin/pool` | | `{"clones": [{"id", "state": "free"\|"busy"\|"captive"\|"retired", "session", "release", "addr", "since"}]}` |
+| `PUT /_admin/pool` | `{"clones": [{"id", "addr", "key", "release"}]}`, the full set | same as `GET`; 422 on a malformed body. Clones missing from the set are forgotten and their sessions released |
+| `GET /_admin/rules` | | `{"rules": [rule + "expires_in"]}` |
+| `POST /_admin/rules` | one rule or a list | 201 with the rule or the list; 422 `{"detail": "invalid rule: ..."}` |
+| `DELETE /_admin/rules/{id}` | | `{"ok": true, "id"}`; 404 if unknown |
+| `GET /_admin/upstream` | | `{"addr", "release"}` |
+| `POST /_admin/upstream` | `{"addr": "prod-green:8000", "release": "..."}` | waits up to 30 s for in-flight production requests, switches, zeroes the statistics; returns the new upstream |
+| `GET /_admin/sessions` | | `{"captive": [{"session", "clone", "since"}]}`; `clone` is `null` until bound |
+| `POST /_admin/mode` | `{"mode": "enforce"\|"observe"\|"passthrough"}` | `{"mode"}`; 422 otherwise |
+| `GET /_admin/prodlog?rid=<rid>` | | `{"forwarded": bool, "status": int\|null}`, plus `"aftercheck": "oracle"` when the after-check fired; the last 50000 requests are kept |
+| `GET /_admin/stats` | | counters since the last upstream switch: `prod_requests`, `prod_5xx`, `prod_conn_errors`, `requests`, `by_class`, `by_route`, `since`, `release`, `addr`, `aftercheck`, plus `pool`, `captive`, `rules`, `mode`, `bus_dropped` |
+| `POST /_admin/reset` | | clears captive sessions, rules, enumeration counters, the in-memory production log, after-check memory and statistics, and reloads the manifest; the recording file is not truncated; `{"ok": true}` |
+
+### 6.7 Clone ingest
+
+Port 9000, `POST /_clone/evidence` with headers `x-imm-clone` and `x-imm-signature`. The gateway verifies the
+signature with the key registered for that clone (403 otherwise; 400 for a body that is not a JSON object),
+adds `session` and `uid` of the request it minted that `rid` for, and publishes `oracle.fired`.
 
 ## 7. Recording format
 
-`runtime/recordings/requests.jsonl`, one line per client request:
+`<runtime>/recordings/requests.jsonl`, one JSON line per client request (`gateway/core.py`, `_record`):
 
 ```json
-{"rid":"...","ts":1.0,"session":"uid:3","uid":3,"trusted":true,"method":"GET","path":"/api/products","query":"q=usb",
- "headers":{"content-type":"..."},"body_b64":"","class":"clean","reasons":[],"route":"prod","verdict":null,"status":200}
+{"rid": "...", "ts": 1.0, "session": "uid:3", "uid": 3, "trusted": true, "method": "GET",
+ "path": "/api/products", "query": "q=usb", "headers": {"content-type": "..."}, "body_b64": "",
+ "class": "clean", "reasons": [], "route": "prod", "verdict": null, "status": 200, "ms": 4.2,
+ "release": "t0", "mode": "enforce"}
 ```
 
-`x-sensitive` values and `Authorization` are replaced by `"<redacted>"`.
+| Field | Values |
+|---|---|
+| `class` | `clean`, `suspect`, `evidence`, `captive` |
+| `route` | `prod`, `shadow_l1`, `shadow_l2`, `l0`, `deny` |
+| `verdict` | `clean`, `oracle`, `inconclusive`, `no_clone`, or `null` when there was no detonation |
+| `observe`, `would_route` | present in observe mode |
 
-## 8. Fleet contract (127.0.0.1:8070, header `x-admin-token`)
+Redaction: the values of `authorization`, `cookie` and `proxy-authorization`, and every value marked
+`x-sensitive` (path and header parameters, query, JSON, URL-encoded and multipart form fields), are replaced by
+`<redacted>`.
 
+The after-check appends a second line for a request it found to be an attack:
+`{"rid", "ts", "aftercheck": "oracle", "method", "path", "query", "uid", "session"}`.
+
+The file rotates to `requests.jsonl.1` when it reaches `RECORD_MAX_MB` (256); one old generation is kept.
+
+## 8. Fleet API
+
+`fleet/app.py`, `fleet/manager.py`. Bound to `127.0.0.1:<ports.fleet>`. Every route requires the header
+`x-admin-token`, compared in constant time; otherwise `401`. The fleet does not start without `ADMIN_TOKEN` in
+its own environment. No container has the Docker socket. Three host processes use Docker: the fleet, which is
+the only one that creates and removes production and clone containers; the pipeline, which starts runner
+containers (`pipeline/runner.py`); and the `immune` CLI (`docker compose`, and the containers of `init` and
+`doctor`).
+
+| Method and path | Body | Behaviour |
+|---|---|---|
+| `POST /reset` | `{"release": "t0", "pool_size": 4}` | removes every container of the run, starts `prod-blue` on the release, creates the pool, registers it with the gateway (`PUT /_admin/pool`), sets the upstream and resets the gateway |
+| `POST /deploy` | `{"release": "<id>"}` | blue/green deploy (below) |
+| `GET /state` | | `{"prod": {"active", "release"}, "ready", "pool_size", "gateway_ok", "run_id", "clones": [{"id", "name", "addr", "release", "state"}]}`; the generic runtime adds `runtime` and `image` |
+
+Errors: `400` for a release id that does not match `[A-Za-z0-9][A-Za-z0-9._-]*`, a release directory that is
+missing or incomplete, or a `pool_size` outside 0 to 32; `409` for `/deploy` before any `/reset`; `500` when
+`prod-blue` fails its health check in `/reset`.
+
+`POST /reset` returns `{"ok": true, "prod": {"active": "blue", "release"}, "clones": [ids], "gateway_errors": [...]}`.
+
+### Deploy sequence
+
+`Fleet._deploy`:
+
+1. Validate the release directory. The generic runtime builds the image first.
+2. Start the idle colour on the release and wait for its health path (`HEALTH_TIMEOUT_S`, 40 s).
+3. Smoke request: one `GET` on the smoke path, from inside the new container. The smoke path is `SMOKE_PATH`
+   if set; otherwise the first `GET` of the project's OpenAPI document that has no path parameter, no
+   required parameter and no `security`, and is not the health path (`fleet/config.py`, `derive_smoke_path`).
+   When there is none the step is skipped and the result says so.
+4. Read the 5xx rate of the release being replaced from `GET /_admin/stats`.
+5. Switch the gateway upstream.
+6. Watch `GET /_admin/stats` for `DEPLOY_WATCH_S` (20 s).
+7. Remove the old colour, replace the free clones that are not on the new release, prune old release
+   directories (kept: `t0`, the live one, any still mounted by a container, and the 5 newest).
+
+Rollback rule (`Fleet._watch`). During the watch the new release is rolled back when all three hold:
+
+- at least `DEPLOY_MIN_REQUESTS` (20) requests reached production since the switch;
+- at least one of them was answered 5xx;
+- the 5xx rate is above `max(2 x rate of the old release, rate of the old release + 0.02)`.
+
+With fewer requests than the minimum the deploy succeeds with `traffic_validated: false`. A failed start,
+health check or smoke request stops the deploy before the switch; nothing is rolled back because nothing was
+switched. The rule does not see responses that are wrong but not 5xx, nor anything after the window.
+
+### Deploy result
+
+| Field | Present | Value |
+|---|---|---|
+| `ok` | always | `true` when the release is live |
+| `rolled_back` | always | `true` only when the upstream was switched and switched back |
+| `release`, `active` | always, except on an image build failure | release and colour in production after the call |
+| `detail` | always | `deployed`; `deployed; not validated by traffic (<n> request(s) in the <s>s watch, minimum <m>)`; `prod_5xx grew after switch; rolled back`; `start failed: ...`; `new release failed health check`; `smoke request <path> failed`; `gateway upstream switch failed: ...`; `image build failed: ...` |
+| `smoke` | when the watch ran | `GET <path> ok`, or `skipped: no request distinct from the health check <path> (set SMOKE_PATH)` |
+| `watch` | when the watch ran | `{"seconds", "requests", "prod_5xx", "min_requests"}` |
+| `traffic_validated` | on success | `true` when `watch.requests >= min_requests` |
+| `clones_replaced` | on success | number of clones moved to the new release |
+| `build_s` | generic runtime | seconds spent building the image |
+
+The fleet publishes `deploy.started` and `deploy.done`. The reconcile loop and what it restores after a crash
+are described in `contracts/product.md` section 11.
+
+## 9. Pipeline
+
+`pipeline/orchestrator.py` (`Pipeline._flow`). The pipeline follows `GET /events/stream` and opens an incident
+for each `oracle.fired` event. Incidents are processed one at a time; the others wait in a persisted queue.
+
+Deduplication key (`pipeline/incident.py`, `dedupe_key`): oracle kind, method, route template and parameter.
+A second event with the same key increments the incident's hit count. An incident closed `patched` or
+`rule_only` is never reopened by a new event; one closed `not_reproducible` may reopen after
+`PIPELINE_REOPEN_COOLDOWN_S`; one closed `error` may reopen after the same delay once its retries are spent.
+
+Flow of one incident:
+
+1. Publish `incident.opened`. Class by oracle: `sql` is `sqli`, `file` is `traversal`, `owner` is `idor`,
+   anything else is `other`.
+2. **Reproduction.** Build the PoC (`contracts/schemas/poc.schema.json`) from the evidence and run it three
+   times in the runner on the release in production, together with its variants. It reproduces when all three
+   runs fire the incident's oracle kind with the incident's sink file in the stack; the sink check is skipped
+   when the incident has no sink file (generic runtime). Publish `poc.ready`. Otherwise close
+   `not_reproducible`.
+3. **Rule.** `patcher.derive_rule`, validated against `contracts/schemas/rule.schema.json`; if it is invalid or
+   targets another route, the built-in rule of `pipeline/rules.py` is used. `POST /_admin/rules`.
+4. **Autopatch policy.** `autopatch: off` closes `rule_only` with detail `autopatch_off`.
+5. **Fix loop.** Up to `PIPELINE_MAX_ATTEMPTS` (3) calls to `patcher.propose`, each followed by the five
+   gates in order: `policy`, `properties`, `poc`, `tests`, `legit` (`pipeline/gates.py`, `GATES`; reference in
+   `docs/validaciones.md`). The detail of a rejecting gate is fed back to the next attempt. Each attempt
+   publishes `patch.attempt`, `patch.diff` and one `gate.result` per gate that ran. The pull request is opened
+   once `policy` passes (`pr.opened`).
+6. **Merge.** With `autopatch: pr`, or when a gate capped autopatch (no `tests.command`, missing legit
+   coverage), the pull request stays open and the incident closes `rule_only` with detail `pr_open`. Otherwise
+   the pull request is merged (`pr.merged`) and the merged tree becomes `<runtime>/releases/<sha[:12]>/`.
+7. **Deploy.** `POST /deploy` on the fleet. A failed or rolled-back deploy reverts the merge and closes
+   `rule_only`.
+8. **Verification.** The rule is deleted. The PoC and its counted variants must fire no oracle on the
+   deployed release in the runner, and the same request, sent through the gateway from a fresh identity, must
+   be forwarded to production: the gateway's `GET /_admin/prodlog` must answer `forwarded: true`
+   (`pipeline/verify.py`). Publish `verify.result`. If either check fails the rule is posted again and the
+   incident closes `rule_only`.
+9. Publish `incident.closed`. After a `patched` or `rule_only` close the class audit may run
+   (`contracts/product.md` section 8).
+
+Incident outcomes (`incident.closed`, field `outcome`):
+
+| Outcome | Meaning |
+|---|---|
+| `patched` | the fix is deployed and verified; the rule was removed |
+| `rule_only` | a rule was posted and stays active; there is no deployed fix |
+| `not_reproducible` | the PoC did not fire 3 of 3; no rule was posted |
+| `error` | the flow failed before any rule was posted; nothing contains the incident. It is retried |
+
+Optional field `outcome_detail`: `transient` (closed for a reason that may not hold later; retried, see
+`contracts/product.md` section 11), `pr_open`, `autopatch_off`.
+
+`seconds_to_rule` is the time from the first `oracle.fired` to the first time the rule was posted, across
+retries. `seconds_to_patch` is the time from the first `oracle.fired` to the end of verification, set only for
+`patched`.
+
+Patch source. `patch.attempt` carries `source`: `llm` (the diff was written by the model), `fallback` (a
+pre-written diff from `patcher/fallbacks/`) or `unknown` (the generator returned no `source`, or another
+value). An unknown source is never reported as `llm` (`pipeline/orchestrator.py`, `patch_source`). The pull
+request body and each commit message state the source.
+
+Repository target (`repo.target` in `config.yaml`; `pipeline/repo.py`):
+
+| Target | Behaviour |
+|---|---|
+| `local` | a git repository at `<runtime>/repo`; pull requests are JSON records inside it. Used by the demo |
+| `github` | the `gh` CLI against `repo.github`; verified only against a simulated `gh` |
+
+Branches: `run/<run>/base` (created from the tag `repo.t0_tag`) and `run/<run>/fix-<incident>`. Each gate is
+reported as a commit status `immune/<gate>`.
+
+Configuration: the variables read by `pipeline/config.py` (`Config.from_env`) and their defaults are listed in
+`pipeline/README.md`, "Configuration".
+
+Command line (`pipeline/__main__.py`): `python -m pipeline` runs until stopped; `--once [--idle S]` processes
+what is queued and exits; `--replay FILE` enqueues a saved `oracle.fired` event; `--status` prints the
+persisted state.
+
+## 10. Event bus
+
+`dashboard/server.py`. One Starlette application serves the bus and the panel.
+
+### 10.1 Envelope
+
+```json
+{"type": "<type>", "ts": 1763750000.0, "run": "<run id>", "src": "<component>",
+ "rid": "<request id or null>", "incident": "<incident id or null>", "data": {}}
 ```
-POST /reset   {"release":"t0","pool_size":4}   stop everything fleet owns, start prod-blue on the release, create the pool, register it (PUT /_admin/pool), set upstream
-POST /deploy  {"release":"<id>"}               start the idle colour on the release, health check + smoke, switch upstream via the gateway, watch /_admin/stats for 20 s, roll back on 5xx; then replace free L1 clones with the new release
-GET  /state   {"prod":{"active":"blue","release":"t0"},"clones":[...]}
-```
 
-Fleet reconciles continuously: every `retired` clone is destroyed and replaced. Clone containers: network `clonenet` only, read-only root, `tmpfs /data`, `--cap-drop ALL`, `--pids-limit`, memory limit, env from §3. Names and labels are prefixed `immune-` and labelled `immune.run=<RUN_ID>`; fleet never touches containers without that label.
+The bus adds `seq`, a strictly increasing integer. `immune_contracts/events.py` (`make`) builds the envelope
+and rejects a type that is not in `TYPES`.
 
-Restart, adoption of a running stack, watchdogs and the rollback criterion as built: `contracts/product.md` §11.
+### 10.2 HTTP API
 
-## 9. Pipeline contract
+| Method and path | Auth | Behaviour |
+|---|---|---|
+| `POST /events` | `x-bus-token` | body: one event or a JSON list. Returns `{"ok": true, "seqs": [...], "next": <last seq>}`. `401` without a valid token, and always when the dashboard has no token configured; `400` for invalid JSON, an unknown `type`, a non-object `data` or a non-numeric `ts`; `413` for a body above `DASH_MAX_BODY_MB` |
+| `GET /events?since=<seq>&type=<prefix>&limit=<n>` | none | one page of events with `seq > since`, optionally filtered by type prefix: `{"events": [...], "next": <seq>}`. See pagination below |
+| `GET /events/stream?since=<seq>` | none | Server-Sent Events; also honours `Last-Event-ID`. Messages: `id: <seq>` with the event as data; `event: hello` with `{"gen", "seq"}`; `event: reset` after the store was cleared; `event: hb` after 15 seconds without events. `503` above `DASH_MAX_STREAMS` |
+| `POST /admin/clear` | `x-bus-token` | empties memory and the store; `seq` keeps counting |
+| `GET /health` | none | `{"ok": true, "events": <in memory>, "seq": <last>}` |
+| `GET /`, `GET /static/<file>` | none | the panel |
 
-Retries after transient failures, rule renewal and deploys across a fleet restart: `contracts/product.md` §11.
+Pagination of `GET /events`. The response is always a page: `limit` events at most, where `limit` defaults to
+`DASH_EVENTS_LIMIT` (1000) and is capped at `DASH_EVENTS_LIMIT_MAX` (5000). `next` is the `seq` of the last
+event returned, or the bus's last `seq` when the page is empty. A reader repeats the call with
+`since=<next>` until a page comes back empty.
 
-Trigger: `oracle.fired` events on the bus. Per incident (dedupe key: oracle kind + route + param + sink file:line):
+Redaction. A reader that sends the bus token gets events as stored. Any other reader, the panel included,
+gets a redacted copy unless `DASH_REDACT=0` (`dashboard/server.py`, `redact`):
 
-1. Build the PoC (`contracts/schemas/poc.schema.json`), confirm it reproduces 3/3 in the runner (harness, container `--network none`).
-2. Rule: derive it from the evidence, `POST /_admin/rules`.
-3. Patch: `patcher.propose(release_dir, evidence, feedback) -> unified diff`. Up to 3 attempts, feeding back gate output.
-4. Gates, in order, each published as `gate.result`: `policy`, `properties`, `poc`, `tests`, `legit` (`docs/plan-construccion.md` §4).
-5. `RepoTarget` (`local` | `scratch` | `official`): branch `run/<run>/fix-<incident>`, PR to `run/<run>/base`, one check per gate, merge. Materialise the merged tree as `runtime/releases/<sha>/`.
-6. `POST fleet /deploy`. Then verify the exploit directly against prod and through the gateway. Delete the rule.
+| Field | Published as |
+|---|---|
+| values of headers whose name matches `authorization`, `cookie`, `token`, `secret`, `api-key`, `passw`, `session`, `credential` or `signature` | `[redacted]`, keeping an authentication scheme word such as `Bearer` |
+| `body_b64`, `pre_state_b64`, oracle `statement` | `[redacted: <n> chars]` |
+| values of query parameters with such a name, in `query`, `path`, `url` and `target` fields | `[redacted]` |
+| strings starting with `file:///` (pull request URLs of the local repository) | `file:///[redacted]/<last path component>` |
+| session keys starting with `gwsid:` | `gwsid:~<12 hex>`, a keyed hash that is stable within one dashboard process |
 
-Legit scenarios for the `legit` gate: `sim.scenarios.SCENARIOS` — a list of deterministic callables `(client) -> list[tuple[str, int, object]]` (step name, status, normalised JSON) runnable against a `starlette.testclient.TestClient` on a fresh seed.
+Not redacted: method, path, other query parameters, `uid:<n>` session keys, stack frames, diffs, gate details,
+rule grammars, timings. The JSONL store is never redacted.
 
-## 10. Rules for work packages
+Bounds:
 
-- Write only inside your own directory. Never run `git` commands that change state (`commit`, `stash`, `checkout`, `reset`, `clean`). Never edit `contracts/`, `immune_contracts/`, `acceptance/`, `deploy/`, `e2e/`, another package, or root files.
-- Never `pip install`, `apt`, `sudo`, `docker build`, `docker system prune`, or remove containers you did not create. Name your test containers `wp<N>-...`.
-- Use `.venv/bin/python` and `.venv/bin/pytest`. Bind test servers to `127.0.0.1` on an ephemeral port.
-- Missing dependency or contract problem → report `CONTRACT_GAP`, do not work around it.
-- If you believe an acceptance test is wrong, report `ACCEPTANCE_BUG: <test> <why>` with evidence; do not change the test.
-- Docker names fleet uses: networks `immune_prodnet`, `immune_clonenet`; the gateway is reachable from both as `gateway`; image `immune-base:1`.
-- Your own tests go in `<package>/tests/`. The acceptance tests in `acceptance/` are the bar; do not copy or weaken them.
+| Bound | Default | Behaviour at the limit |
+|---|---|---|
+| `DASH_MAX_EVENTS` | 50000 in memory | evicts events of earlier runs first, then `request.*` events of the current run, then the oldest |
+| `DASH_STORE_MAX_MB` | 256 | the store becomes `events.jsonl.1`; one old generation is kept; `0` disables rotation |
+| `DASH_MAX_BODY_MB` | 32 | `413` |
+
+### 10.3 Event types
+
+`immune_contracts/events.py`. `data` fields as published by the code:
+
+| Type | Publisher | `data` |
+|---|---|---|
+| `request.classified` | gateway | `{class: clean\|suspect\|captive\|evidence, reasons, method, path, session, uid}`; `observe: true` in observe mode |
+| `request.routed` | gateway | `{route: prod\|shadow_l1\|shadow_l2\|l0\|deny, status, verdict, ms}`; in observe mode also `observe: true` and `would_route` |
+| `oracle.fired` | gateway | the evidence object (`contracts/schemas/evidence.schema.json`) with `clone`, `session` and `uid` set by the gateway |
+| `session.captured` | gateway | `{session, clone, reason}`. `clone` is `null` when the session is marked and the clone id when one is bound. `reason`: `oracle`, `aftercheck`, `bound`, or the first classification reason (`honeytoken`, `canary:<param>`) |
+| `session.released` | gateway | `{session, clone, reason: ttl\|evicted\|clone_gone\|reset}` |
+| `rule.active` | gateway | the rule object plus `expires_in` |
+| `rule.expired` | gateway | `{id, reason: ttl\|deleted\|reset}` |
+| `upstream.switched` | gateway | `{release, addr}` |
+| `pool.state` | fleet | `{l1_free, l2_busy, size}`, published when it changes |
+| `deploy.started` | fleet | `{release}` |
+| `deploy.done` | fleet | `{release, ok, rolled_back, detail}` |
+| `incident.opened` | pipeline | `{incident, vuln_class: sqli\|traversal\|idor\|other, method, route, param, sink: {file, line}, evidence_rid, request: {method, path, query, body_b64}}`; optional `origin: live\|audit` (set by the incident flow of `pipeline/orchestrator.py`) and, for an audit finding, `parent` |
+| `poc.ready` | pipeline | `{incident, reproducible, runs, poc}` |
+| `patch.attempt` | pipeline | `{incident, attempt, source: llm\|fallback\|unknown}` |
+| `patch.diff` | pipeline | `{incident, attempt, diff}` |
+| `gate.result` | pipeline | `{incident, attempt, gate: policy\|properties\|poc\|tests\|legit, ok, detail}`; `skipped: true` when the gate was skipped |
+| `pr.opened` | pipeline | `{incident, url, branch}` |
+| `pr.merged` | pipeline | `{incident, url, sha}` |
+| `verify.result` | pipeline | `{incident, exploit_blocked_on_prod}` |
+| `incident.closed` | pipeline | `{incident, outcome: patched\|rule_only\|not_reproducible\|error, seconds_to_rule, seconds_to_patch}`; optional `outcome_detail` |
+| `audit.started` | pipeline | `{incident, vuln_class, candidates}` |
+| `audit.finding` | pipeline | `{incident, parent, route, param}` |
+| `audit.done` | pipeline | `{incident, checked, findings, seconds}` |
+| `attack.attempt` | none in a live stack | `{vuln, ok, saw_real_data}`. The only emitter is `dashboard/demo_events.py`, a script that posts invented events to develop the panel |
+
+The pipeline rejects, before sending, an event whose `data` keys differ from this table (`pipeline/bus.py`,
+`FIELDS` and `OPTIONAL`). `immune_contracts/events.py` lists every type of this table in `TYPES`, the three
+`audit.*` types included.
+
+### 10.4 Delivery
+
+Publishing never blocks a request path. Delivery is at-most-once per attempt and differs per publisher:
+
+| Publisher | Timeout | When the bus does not accept an event |
+|---|---|---|
+| gateway (`gateway/bus.py`) | 1.0 s, connect 0.3 s; batches of up to 200 | `request.*` events are dropped. Every other event is kept and retried for 120 s (at most 2000 kept), then dropped. A 4xx answer counts as accepted. Drops are counted in `bus_dropped` of `GET /_admin/stats` |
+| pipeline (`pipeline/bus.py`, `Publisher`) | 2.0 s | the event stays pending (at most 2000) and is sent again before the next one and on every idle pass; an event the bus answers with a 3xx or 4xx status is dropped (a 5xx answer or a transport error keeps it). Every event is also appended to `<runtime>/pipeline/events.jsonl` |
+| fleet (`fleet/manager.py`, `publish`) | 1.0 s | the event is lost; no retry |
+
+A subscriber that reconnects resumes from its last `seq`. The pipeline persists the last `seq` it handled in
+`<runtime>/pipeline/state.json`.

@@ -1,4 +1,4 @@
-"""The five validation gates (docs/plan-construccion.md §4), in order:
+"""The five validation gates (docs/validaciones.md), in order:
 
   policy      mechanical AST policy on the diff (host, no app code runs)
   properties  positive properties per class (runner)
@@ -6,7 +6,8 @@
   tests       the app's test suite, `tests.command` (runner); reported as skipped when absent
   legit       legit scenarios give identical output before/after, and cover the patched endpoint (runner);
               without `scenarios`, the gateway recording (clean GETs to prod, most recent 200 per path)
-              is replayed before/after instead
+              is replayed before/after instead. A configured scenarios module that cannot be imported
+              fails the gate (there is no stand-in)
 
 A gate that is skipped (tests) or fails only for lack of coverage (legit on recordings) does not
 reject the patch: it caps autopatch at `pr` (contracts/product.md §3). `Validator.caps` lists why.
@@ -28,7 +29,16 @@ from .runner import Runner, RunnerError
 
 log = logging.getLogger("pipeline.gates")
 GATES = ("policy", "properties", "poc", "tests", "legit")
-STANDIN = "pipeline.standin_scenarios"
+
+
+def _req_key(r: dict) -> str:
+    return json.dumps(r, sort_keys=True)
+
+
+def _fires(item: dict, kind: str, sink_file: str = "") -> bool:
+    """The step fired the `kind` oracle (with `sink_file` in the event's stack, when one is given)."""
+    return any(e["oracle"] == kind and (not sink_file or any(fr.get("file") == sink_file for fr in e.get("stack") or []))
+               for e in item["events"])
 
 
 class Validator:
@@ -50,7 +60,7 @@ class Validator:
         return self.cache[key]
 
     def scenarios(self, release_dir) -> dict:
-        return self.run(release_dir, {"kind": "scenarios", "module": self.cfg.scenarios_module, "fallback": STANDIN},
+        return self.run(release_dir, {"kind": "scenarios", "module": self.cfg.scenarios_module},
                         timeout=max(self.cfg.runner_timeout_s, 300))
 
     def base_scenarios(self, base_dir) -> dict:
@@ -67,39 +77,44 @@ class Validator:
     def reproduce(self, inc: dict, poc: dict, base_dir: str, extra_variants: list | None = None,
                   corpus: list | None = None) -> dict:
         """PoC 3x + variants on the unpatched release. -> {runs, reproducible, counted, ignored, sink_match}
-        `corpus`: [(value, request)] from the class corpus (pipeline/corpus.py), counted like variants."""
+        `corpus`: [(value, request)] from the class corpus (pipeline/corpus.py), counted like variants.
+        A PoC run counts when it fires the incident's oracle kind and, when the incident has a sink file
+        (in-process runtimes), that file is in the event's stack: the same oracle somewhere else in the app
+        is another bug, not a reproduction. Variants equal to the PoC request or to each other are dropped."""
         manifest = None
         try:
             manifest = self.manifest(base_dir)
         except RunnerError:
             pass
-        variants = pocmod.mutate(inc, poc, manifest)
         base = poc["requests"][-1]
+        have, variants = {_req_key(base)}, []
+
+        def add(name, r):
+            k = _req_key(r)
+            if k not in have:
+                have.add(k)
+                variants.append((name, r))
+        for n, r in pocmod.mutate(inc, poc, manifest):
+            add(n, r)
         for i, v in enumerate(extra_variants or []):
             nv = pocmod.normalise_variant(v, base)
             if nv:
-                variants.append(("p%d:%s" % (i, (nv.get("query") or nv["path"])[:40]), nv))
-        have = {json.dumps(r, sort_keys=True) for _n, r in variants} | {json.dumps(base, sort_keys=True)}
+                add("p%d:%s" % (i, (nv.get("query") or nv["path"])[:40]), nv)
         for val, r in corpus or []:
-            k = json.dumps(r, sort_keys=True)
-            if k not in have:
-                have.add(k)
-                variants.append(("c:%s" % str(val)[:40], r))
+            add("c:%s" % str(val)[:40], r)
         seqs = [{"name": "poc", "requests": poc["requests"], "repeat": 3}]
         seqs += [{"name": "v:" + n, "requests": poc["requests"][:-1] + [r]} for n, r in variants]
         res = self.run(base_dir, {"kind": "harness", "state_b64": poc.get("state_b64"), "sequences": seqs})
         kind = poc["expect"]["oracle"]
-        sink = poc["expect"].get("sink") or {}
+        sink_file = (poc["expect"].get("sink") or {}).get("file") or ""
         runs = res["sequences"][0]["runs"]
-        hits = [any(e["oracle"] == kind for e in run[-1]["events"]) for run in runs]
-        sink_match = any(any(fr.get("file") == sink.get("file") and fr.get("line") == sink.get("line")
-                             for e in run[-1]["events"] for fr in e.get("stack") or []) for run in runs)
+        fired = [_fires(run[-1], kind) for run in runs]
+        hits = [_fires(run[-1], kind, sink_file) for run in runs]
         counted, ignored = [], []
         for (n, r), s in zip(variants, res["sequences"][1:]):
-            last = s["runs"][0][-1]
-            (counted if any(e["oracle"] == kind for e in last["events"]) else ignored).append({"name": n, "request": r})
+            (counted if _fires(s["runs"][0][-1], kind) else ignored).append({"name": n, "request": r})
         return {"runs": sum(hits), "of": len(hits), "reproducible": all(hits) and len(hits) == 3,
-                "counted": counted, "ignored": [x["name"] for x in ignored], "sink_match": sink_match,
+                "counted": counted, "ignored": [x["name"] for x in ignored], "sink_match": hits == fired,
                 "statuses": [run[-1]["status"] for run in runs]}
 
     # ------------------------------------------------------------ gates
@@ -156,7 +171,7 @@ class Validator:
         return targets
 
     def recorded_requests(self, limit: int = 200) -> list:
-        """Clean GET requests the gateway forwarded to prod with status 200: the most recent per path+query."""
+        """Clean GET requests the gateway forwarded to prod with status 200: the most recent per uid+path+query."""
         path = self.cfg.record_path
         want, lines = 8 * 1024 * 1024, []
         for p_ in (path, path + ".1"):       # the gateway rotates the recording; the previous file is older
@@ -237,7 +252,6 @@ class Validator:
     def gate_legit(self, ctx):
         if not self.cfg.scenarios_module:
             return self.gate_legit_replay(ctx)
-        inc = ctx["inc"]
         before = self.base_scenarios(ctx["base_dir"])
         after = self.scenarios(ctx["patched_dir"])
         note = (" [%s]" % before["note"]) if before.get("note") else ""

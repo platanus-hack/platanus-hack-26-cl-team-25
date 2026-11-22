@@ -21,6 +21,31 @@ def _env_file(path: str) -> dict:
     return out
 
 
+def derive_smoke_path(openapi_path: str, health_path: str) -> str:
+    """First GET of the project's OpenAPI spec that can be requested as is and is not the health check: no path
+    or required parameter, no `security`. '' when the spec has none (the deploy then skips the smoke step and
+    says so)."""
+    try:
+        import yaml
+        with open(openapi_path) as f:
+            spec = yaml.safe_load(f) or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(spec, dict):
+        return ""
+    for path, item in (spec.get("paths") or {}).items():
+        op = item.get("get") if isinstance(item, dict) else None
+        if not isinstance(op, dict) or "{" in path or path == health_path:
+            continue
+        params = list(item.get("parameters") or []) + list(op.get("parameters") or [])
+        if any(isinstance(p, dict) and p.get("required") for p in params):
+            continue
+        if op.get("security", spec.get("security")):
+            continue
+        return path
+    return ""
+
+
 @dataclass
 class Config:
     repo_dir: str                  # IMMUNE_HOME: mounted read-only at /opt/immune in every container
@@ -53,8 +78,9 @@ class Config:
     shadow_secret: str = ""
     collector_url: str = "http://gateway:9000"
     extra_pythonpath: str = ""  # extra container path appended to PYTHONPATH
-    smoke_path: str = "/openapi.json"
+    smoke_path: str = "/openapi.json"  # '' or the health path: the deploy skips the smoke step and reports it
     deploy_watch_s: float = 20.0
+    deploy_min_requests: int = 20      # requests through the new release before its 5xx rate is judged
     watch_poll_s: float = 0.25
     health_timeout_s: float = 40.0
     reconcile_s: float = 1.0
@@ -67,6 +93,10 @@ class Config:
         e = os.environ
         app = icfg.current()
         repo = os.path.abspath(e.get("REPO_DIR") or REPO_ROOT)
+        # the process that manages the prod and clone containers takes its admin token from its own environment, never from a
+        # file in the repository (`immune up` always passes it: immune/__main__.py host_env)
+        if not e.get("ADMIN_TOKEN"):
+            raise RuntimeError("ADMIN_TOKEN is not set: the fleet does not start without an explicit admin token")
         denv = _env_file(os.path.join(REPO_ROOT, "deploy", "demo.env"))
 
         def g(k, d=""):
@@ -85,7 +115,7 @@ class Config:
             repo_dir=repo,
             runtime_dir=runtime,
             run_id=run_id,
-            admin_token=g("ADMIN_TOKEN"),
+            admin_token=e["ADMIN_TOKEN"],
             port=int(e.get("FLEET_PORT", app.ports["fleet"])),
             gateway_url=e.get("GATEWAY_ADMIN_URL", "http://127.0.0.1:%d" % app.ports["admin"]).rstrip("/"),
             bus_url=e.get("BUS_URL_HOST", e.get("FLEET_BUS_URL", "http://127.0.0.1:%d" % app.ports["dashboard"])).rstrip("/"),
@@ -111,8 +141,9 @@ class Config:
             shadow_secret=g("SHADOW_APP_SECRET"),
             collector_url=e.get("COLLECTOR_URL", "http://gateway:9000"),
             extra_pythonpath=e.get("EXTRA_PYTHONPATH", ""),
-            smoke_path=e.get("SMOKE_PATH", app.app.health),
+            smoke_path=e["SMOKE_PATH"] if "SMOKE_PATH" in e else derive_smoke_path(app.openapi, app.app.health),
             deploy_watch_s=float(e.get("DEPLOY_WATCH_S", 20)),
+            deploy_min_requests=int(e.get("DEPLOY_MIN_REQUESTS", 20)),
             watch_poll_s=float(e.get("WATCH_POLL_S", 0.25)),
             health_timeout_s=float(e.get("HEALTH_TIMEOUT_S", 40)),
             reconcile_s=float(e.get("RECONCILE_S", 1)),

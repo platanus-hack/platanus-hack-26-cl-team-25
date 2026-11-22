@@ -147,13 +147,6 @@ class GenericFleet(Fleet):
         if not image_exists(tag):
             secs = build_image(self.project, self.f, self._release_dir(release), release)
             log.info("built %s in %.1fs", tag, secs)
-            self.timings["build_s"] = round(secs, 1)
-
-    @property
-    def timings(self):
-        if not hasattr(self, "_timings"):
-            self._timings = {}
-        return self._timings
 
     def app_env(self, url: str, bind: str, secret: str) -> dict:
         from immune.config import substitute
@@ -213,9 +206,13 @@ class GenericFleet(Fleet):
         binds, tmpfs = self._observer_mounts(cpath)
         markers = os.path.join(self.cfg.runtime_dir, "data", "markers.json")
         env = {"PYTHONPATH": "/opt/immune", "PYTHONDONTWRITEBYTECODE": "1", "CLONE_ID": clone.id, "CLONE_KEY": clone.key,
-               "COLLECTOR_URL": self.cfg.collector_url, "RELEASE": clone.release, "MARKERS_PATH": "/markers/markers.json"}
+               "COLLECTOR_URL": self.cfg.collector_url, "RELEASE": clone.release}
         if os.path.isfile(markers):
+            # only when the file exists: the observer refuses to start on a configured path it cannot read
             binds.append(f"{markers}:/markers/markers.json:ro")
+            env["MARKERS_PATH"] = "/markers/markers.json"
+        else:
+            log.warning("clone %s: no %s; its observer runs without the owner oracle", clone.name, markers)
         self._run(clone.name + "-obs", ig.SIDECAR_IMAGE, ["python", "-m", "sidecar", "--config", "/cfg/sidecar.json"],
                   role="clone-obs", release=clone.release, env=env, ns_of=app.id, cap_add=["SYS_PTRACE"],
                   binds=binds, tmpfs=tmpfs, mem="256m")

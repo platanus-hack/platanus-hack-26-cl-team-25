@@ -1,4 +1,4 @@
-"""RepoTarget (docs/plan-construccion.md §9c): where fixes become pull requests.
+"""RepoTarget (pipeline/README.md): where fixes become pull requests.
 
   local     a git repo under the runtime dir (<runtime>/repo), no GitHub. PRs are JSON records
             in <repo>/.git/immune/prs/. Development and tests.
@@ -40,6 +40,10 @@ def _paths(paths):
 
 def _tag(tag):
     return tag or _project().repo.t0_tag
+
+
+def commit_message(title: str, attempt: int, incident: str, note: str = "") -> str:
+    return "%s (attempt %d)\n\n%s%s" % (title, attempt, incident, ("\n" + note) if note else "")
 
 
 class RepoError(Exception):
@@ -174,7 +178,8 @@ class LocalRepo:
                     return rec
         return None
 
-    def open_change(self, incident: str, attempt: int, diff: str, patched_dir: str, title: str, body: str) -> Change:
+    def open_change(self, incident: str, attempt: int, diff: str, patched_dir: str, title: str, body: str,
+                    note: str = "") -> Change:
         base = base_branch(self.run)
         br = fix_branch(self.run, incident)
         wt = tempfile.mkdtemp(prefix="pipeline-wt-")
@@ -186,7 +191,7 @@ class LocalRepo:
                 raise RepoError("diff does not apply on %s: %s" % (base, e))
             g = LocalRepo(wt, self.run, self.t0, self.timeout, self.paths, self.t0_tag)
             g.git("add", "-A", "--", *self.paths)
-            g.git("commit", "-q", "-m", "%s (attempt %d)\n\n%s" % (title, attempt, incident))
+            g.git("commit", "-q", "-m", commit_message(title, attempt, incident, note))
             head = g.git("rev-parse", "HEAD")
         finally:
             self.git("worktree", "remove", "--force", wt, check=False)
@@ -329,7 +334,8 @@ class GitHubRepo:
             log.warning("label: %s", e)
         return t0
 
-    def open_change(self, incident: str, attempt: int, diff: str, patched_dir: str, title: str, body: str) -> Change:
+    def open_change(self, incident: str, attempt: int, diff: str, patched_dir: str, title: str, body: str,
+                    note: str = "") -> Change:
         base = base_branch(self.run)
         br = fix_branch(self.run, incident)
         base_sha = self._ref_sha("heads/" + base)
@@ -344,7 +350,7 @@ class GitHubRepo:
             blob = self.api("git/blobs", "POST", {"content": base64.b64encode(content).decode(), "encoding": "base64"})
             entries.append({"path": p, "mode": "100644", "type": "blob", "sha": blob["sha"]})
         tree = self.api("git/trees", "POST", {"base_tree": base_tree, "tree": entries})
-        commit = self.api("git/commits", "POST", {"message": "%s (attempt %d)\n\n%s" % (title, attempt, incident),
+        commit = self.api("git/commits", "POST", {"message": commit_message(title, attempt, incident, note),
                                                   "tree": tree["sha"], "parents": [base_sha]})
         head = commit["sha"]
         if self._ref_sha("heads/" + br):

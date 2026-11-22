@@ -1,6 +1,6 @@
 """Config access for the installer (init / doctor / deploy).
 
-P1's `immune.config` is the loader (contracts/product.md §2). This module only adds the
+`immune.config` is the loader (contracts/product.md §2). This module only adds the
 installer's own path conventions on top of it, so that swapping the loader never
 touches init/doctor code.
 """
@@ -8,16 +8,14 @@ from __future__ import annotations
 
 import os
 
-from immune.config import (IMMUNE_HOME, CONTAINER_APP, CONTAINER_HOME, Config, ConfigError,  # noqa: F401
-                           from_dict, load)
+from immune.config import IMMUNE_HOME, CONTAINER_APP, CONTAINER_HOME, Config, load
+
+__all__ = ["IMMUNE_HOME", "CONTAINER_APP", "CONTAINER_HOME", "Config", "load", "DOT", "DEFAULT_COLUMNS",
+           "DEFAULT_PROFILE_MODULE", "columns_path", "shadow_markers_path"]
 
 DOT = ".immune"
 DEFAULT_COLUMNS = os.path.join(DOT, "shadow", "columns.yaml")
 DEFAULT_PROFILE_MODULE = "profile"          # <project>/.immune/profile.py
-
-
-def dot(project: str, *parts) -> str:
-    return os.path.join(os.path.realpath(project), DOT, *parts)
 
 
 def columns_path(cfg: Config) -> str:

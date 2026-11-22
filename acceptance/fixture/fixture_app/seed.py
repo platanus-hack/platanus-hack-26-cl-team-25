@@ -2,7 +2,6 @@
 import sqlite3
 
 MARKERS = {"MKAAAAAAAAA1": 1, "MKBBBBBBBBB2": 2}
-SEED_MAX_UID = 2
 
 
 def make(path: str, shadow: bool) -> None:

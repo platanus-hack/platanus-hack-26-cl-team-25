@@ -4,7 +4,7 @@ import time
 
 import httpx
 
-from .test_auth_observe import ADMIN, records, wait_events, world  # noqa: F401  (world is a fixture)
+from .world import ADMIN, records, wait_events
 
 AUTH = {"kind": "immune-token"}
 

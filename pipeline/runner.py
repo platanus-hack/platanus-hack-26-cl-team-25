@@ -6,9 +6,15 @@ Every execution of application code happens in
 
 with IMMUNE_HOME mounted read-only at /opt/immune and the release under test mounted
 read-only at /app (working directory; PYTHONPATH=/app:/app/.immune:/opt/immune). The
-project's app facts (.immune/config.yaml) travel in the job as "app".
-`RUNNER_MODE=local` runs the same entry module as a host subprocess
-(rlimits + timeout, no network isolation): only for the pipeline's own unit tests.
+project's app facts (.immune/config.yaml) travel in the job as "app". There is no
+host-subprocess mode: application code never runs outside the container.
+
+The result comes back on stdout, which the code under test shares (same process). Each run
+therefore carries a random nonce in the job; the entry module takes it out of the job before
+any application code is imported and only a `@@RESULT@@ <nonce> <json>` line is accepted, so
+application code that merely prints a result line cannot forge the verdict. Limit: code that
+inspects the interpreter of its own process (frames, gc) could still find the nonce; the
+policy gate rejects the constructs that would need (new imports, dynamic attribute access).
 """
 from __future__ import annotations
 
@@ -16,8 +22,8 @@ import itertools
 import json
 import logging
 import os
+import secrets
 import subprocess
-import sys
 import threading
 import time
 
@@ -95,55 +101,39 @@ class Runner:
         job.setdefault("seed", self.cfg.seed)
         job.setdefault("app_now", self.cfg.app_now)
         timeout = float(timeout or self.cfg.runner_timeout_s)
-        if self.cfg.runner_mode != "local" and self._seed_mounts():
+        if self._seed_mounts():
             job["seed_paths"] = {"dir": "/seed", "manifest": "/seed-manifest/manifest.json"}
+        nonce = secrets.token_hex(16)
+        job["result_nonce"] = nonce
         t0 = time.time()
         name = self._name()
-        if self.cfg.runner_mode == "local":
-            app = self.cfg.project
-            env = dict(os.environ)
-            path = [os.path.realpath(release_dir)]
-            if os.path.isdir(app.dot_immune):
-                path.append(app.dot_immune)
-            env["PYTHONPATH"] = os.pathsep.join(path + [os.path.realpath(self.cfg.repo_dir)])
-            env["PYTHONDONTWRITEBYTECODE"] = "1"
-            env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
-            for k in set(app.app.env) | {"APP_DB", "APP_NOW", "APP_SECRET", "APP_STATIC", "MARKERS_PATH",
-                                         app.database.path_env, app.app.frozen_time_env}:
-                env.pop(k, None)
-            seeds = self._seed_mounts()
-            if seeds:
-                job["seed_paths"] = {"dir": seeds[0][0] if seeds[0][1] == "/seed" else "",
-                                     "manifest": next((s for s, d in seeds if d.endswith("manifest.json")), "")}
-            cmd, cwd, pre = [sys.executable, "-m", "pipeline.runner_entry"], os.path.realpath(release_dir), _limits
-        else:
-            cmd, cwd, pre, env = self.docker_cmd(release_dir, name), None, None, None
-        data = json.dumps(job).encode()
+        cmd = self.docker_cmd(release_dir, name)
         try:
-            p = subprocess.run(cmd, input=data, capture_output=True, timeout=timeout, cwd=cwd, env=env, preexec_fn=pre)
+            p = subprocess.run(cmd, input=json.dumps(job).encode(), capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            if self.cfg.runner_mode != "local":
-                subprocess.run(["docker", "kill", name], capture_output=True, timeout=30)
+            subprocess.run(["docker", "kill", name], capture_output=True, timeout=30)
             raise RunnerError("runner job %s exceeded %.0fs (killed)" % (job.get("kind"), timeout))
         finally:
             self.calls.append((job.get("kind"), os.path.basename(os.path.normpath(release_dir)), round(time.time() - t0, 2)))
-        out = p.stdout.decode("utf-8", "replace")
-        for line in reversed(out.splitlines()):
-            if line.startswith(MARK):
-                res = json.loads(line[len(MARK):])
-                if not res.get("ok_run"):
-                    raise RunnerError("runner job %s failed: %s" % (job.get("kind"), res.get("error")))
-                res["wall_s"] = round(time.time() - t0, 2)
+        res = parse_result(p.stdout.decode("utf-8", "replace"), nonce)
+        if res is None:
+            err = p.stderr.decode("utf-8", "replace")[-1500:]
+            raise RunnerError("runner job %s produced no result (exit %s): %s" % (job.get("kind"), p.returncode, err))
+        if not res.get("ok_run"):
+            raise RunnerError("runner job %s failed: %s" % (job.get("kind"), res.get("error")))
+        res["wall_s"] = round(time.time() - t0, 2)
+        return res
+
+
+def parse_result(out: str, nonce: str) -> dict | None:
+    """The runner's result line: `@@RESULT@@ <nonce> <json>`. Lines without this run's nonce are ignored."""
+    head = "%s %s " % (MARK, nonce)
+    for line in reversed(out.splitlines()):
+        if line.startswith(head):
+            try:
+                res = json.loads(line[len(head):])
+            except ValueError:
+                continue
+            if isinstance(res, dict):
                 return res
-        err = p.stderr.decode("utf-8", "replace")[-1500:]
-        raise RunnerError("runner job %s produced no result (exit %s): %s" % (job.get("kind"), p.returncode, err))
-
-
-def _limits():  # pragma: no cover - runs in the child
-    import resource
-    gib = 1024 ** 3
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (4 * gib, 4 * gib))
-        resource.setrlimit(resource.RLIMIT_CPU, (600, 600))
-    except (ValueError, OSError):
-        pass
+    return None

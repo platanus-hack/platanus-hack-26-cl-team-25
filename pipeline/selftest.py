@@ -1,20 +1,24 @@
-"""Gate self-test (docs/plan-construccion.md §4): `python -m pipeline.selftest`
+"""Gate self-test (docs/validaciones.md): `python -m pipeline.selftest`
 
 Against the t0 app, using the real shadow harness in real runner containers:
 
-  1. incidents: every entry of victim/VULNS.md is detonated in the harness with its documented
-     exploit; the resulting evidence goes through the normal incident derivation (class, route,
+  1. incidents: every entry of the demo answer key (docs/demo/respuestas/tienda.md, kept outside
+     every release path so the patch generator never reads it) is detonated in the harness with its
+     documented exploit; the resulting evidence goes through the normal incident derivation (class, route,
      param, sink). The three oracle.fired events captured from the live stack
      (tests/fixtures/oracle_*.json) must derive to the same incident keys.
   2. known-good fixes: the seven hand-written root-cause fixes in patcher/fallbacks/*.diff, one per
      endpoint, must each pass all five gates for their own incident.
-  3. inadequate fixes (pipeline/fixes.py): each must be rejected by the stated gate.
+  3. inadequate fixes (pipeline/fixes.py): each must be rejected by the stated gate. The catalogue's
+     three adequate fixes are not run here (the known-good set is patcher/fallbacks); they are checked
+     against the policy gate by pipeline/tests/test_policy_bypass.py.
 
 Prints a table; exit 0 only if every expectation holds.
 
 Env: SELFTEST_RELEASE (dir with victim/, default <runtime>/releases/t0, else a copy of the repo's victim/),
 SELFTEST_JOBS (parallelism, default 3), SELFTEST_ONLY (comma-separated row names), FALLBACK_DIR
-(default <repo>/patcher/fallbacks), plus the runner settings of pipeline.config.
+(default <repo>/patcher/fallbacks), SELFTEST_ANSWER_KEY (default <repo>/docs/demo/respuestas/tienda.md),
+plus the runner settings of pipeline.config.
 """
 from __future__ import annotations
 
@@ -24,7 +28,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qsl
@@ -36,6 +39,16 @@ from .gates import GATES, Validator
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "tests", "fixtures")
 CLASS_NAMES = {"sql injection": "sqli", "path traversal": "traversal", "idor": "idor"}
+ANSWER_KEY = os.path.join("docs", "demo", "respuestas", "tienda.md")     # relative to the repo, not to a release
+
+
+def answer_key(cfg: Config) -> str:
+    """Path of the demo answer key. It is not part of any release (app.release_paths), on purpose."""
+    path = os.environ.get("SELFTEST_ANSWER_KEY") or os.path.join(cfg.repo_dir, ANSWER_KEY)
+    if not os.path.isfile(path):
+        raise SystemExit("selftest: answer key %s not found (the list of documented exploits; set "
+                         "SELFTEST_ANSWER_KEY to its path)" % path)
+    return path
 
 
 def t0_release(cfg: Config) -> tuple:
@@ -47,9 +60,9 @@ def t0_release(cfg: Config) -> tuple:
     return tmp, tmp
 
 
-# ------------------------------------------------------------------ VULNS.md -> exploit requests
+# ------------------------------------------------------------------ answer key -> exploit requests
 def parse_vulns(path: str, manifest: dict) -> list:
-    """[{n, cls, method, route, exploit request}] from victim/VULNS.md lines
+    """[{n, cls, method, route, exploit request}] from the answer key lines
     `N. <class> | <METHOD route> | <param> | <file:line> | `<exploit>` [with any valid token]`."""
     out = []
     with open(path) as f:
@@ -87,6 +100,7 @@ def _clip(s: str, n: int) -> str:
 
 def main(argv=None) -> int:
     cfg = Config.from_env()
+    key_path = answer_key(cfg)      # before any runner job: fail early and clearly
     only = [x for x in os.environ.get("SELFTEST_ONLY", "").split(",") if x]
     jobs = int(os.environ.get("SELFTEST_JOBS", "3"))
     fb_dir = os.environ.get("FALLBACK_DIR") or os.path.join(cfg.repo_dir, "patcher", "fallbacks")
@@ -95,15 +109,15 @@ def main(argv=None) -> int:
     v = Validator(cfg)
     t_start = time.time()
     ok_all = True
-    print("gate self-test: release %s, runner=%s (%s)" % (base_dir, cfg.runner_mode, cfg.runner_image), flush=True)
+    print("gate self-test: release %s, runner image %s" % (base_dir, cfg.runner_image), flush=True)
 
     # 1. incidents from the documented exploits, detonated in the harness
     manifest = v.manifest(base_dir)
-    vulns = parse_vulns(os.path.join(base_dir, cfg.project.app.release_paths[0], "VULNS.md"), manifest)
+    vulns = parse_vulns(key_path, manifest)
     seqs = [{"name": "vuln%d" % x["n"], "requests": [x["request"]], "with_evidence": True} for x in vulns]
     res = v.run(base_dir, {"kind": "harness", "sequences": seqs})
     incidents = {}
-    print("\nincidents derived from victim/VULNS.md exploits:")
+    print("\nincidents derived from the exploits of %s:" % os.path.relpath(key_path, cfg.repo_dir))
     for x, s in zip(vulns, res["sequences"]):
         last = s["runs"][0][-1]
         if last.get("verdict") != "oracle" or not last.get("evidence"):
@@ -121,7 +135,7 @@ def main(argv=None) -> int:
         print("  #%d %-9s %-5s %-32s param=%-22s sink=%s:%s%s" % (
             x["n"], inc["vuln_class"], inc["method"], inc["route"],
             "%s:%s" % ((inc["param"] or {}).get("in"), (inc["param"] or {}).get("name")), inc["sink"]["file"], inc["sink"]["line"],
-            "" if good else "  <-- class/route mismatch with VULNS.md"), flush=True)
+            "" if good else "  <-- class/route mismatch with the answer key"), flush=True)
     for fx in sorted(glob.glob(os.path.join(FIXTURES, "oracle_*.json"))):
         with open(fx) as f:
             live = incmod.build(json.load(f), spec, manifest)

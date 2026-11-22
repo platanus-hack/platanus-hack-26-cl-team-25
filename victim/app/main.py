@@ -3,7 +3,7 @@ import sqlite3
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, db, files, orders, products, users
+from . import auth, files, orders, products, users
 
 app = FastAPI(title="Tienda", version="t0")
 app.include_router(auth.router)

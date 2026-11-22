@@ -18,7 +18,7 @@ if (process.argv[2] === '--timings') {
                 evidence: i.oracles.length ? i.oracles[0].data.request.path : null, prod_addr: i.prod && i.prod.addr,
                 steps: S.stages(i).map((s) => s.key + ':' + s.state) };
   });
-  console.log(JSON.stringify({ incidents: out, score: S.scoreboard(d), upstream: d.upstream, audits: d.auditOrder.map((a) => S.auditText(d.audits[a])), ignored: d.ignored }));
+  console.log(JSON.stringify({ incidents: out, score: S.scoreboard(d), upstream: d.upstream, audits: d.auditOrder.slice(), ignored: d.ignored }));
   process.exit(0);
 }
 
@@ -270,10 +270,10 @@ assert.strictEqual(S.prLabel('https://github.com/o/r/pull/3'), 'https://github.c
 // --- class self-audit: audit.started / audit.finding / audit.done, origin audit linked to its parent
 let s4 = S.newState();
 S.reduce(s4, mk('incident.opened', { incident: 'p1', vuln_class: 'sqli', method: 'GET', route: '/api/products', param: { in: 'query', name: 'q' }, sink, origin: 'live' }, { incident: 'p1' }));
-assert.strictEqual(S.auditLine(s4), null);
+assert.strictEqual(s4.auditOrder.length, 0);
 S.reduce(s4, mk('incident.closed', { incident: 'p1', outcome: 'patched' }, { incident: 'p1' }));
 S.reduce(s4, mk('audit.started', { incident: 'p1', vuln_class: 'sqli', candidates: 8 }, { incident: 'p1' }));
-assert.ok(/sqli/.test(S.auditLine(s4)) && /8 candidatos, en curso/.test(S.auditLine(s4)));
+assert.deepStrictEqual([s4.audits.p1.vuln_class, s4.audits.p1.candidates, s4.audits.p1.done], ['sqli', 8, null]);
 S.reduce(s4, mk('audit.finding', { incident: 'a1', parent: 'p1', route: '/api/login', param: { in: 'json', name: '<b>email</b>' } }, { incident: 'a1' }));
 let a1 = s4.incidents.a1;
 assert.strictEqual(a1.origin, 'audit'); assert.strictEqual(a1.parent, 'p1');
@@ -281,9 +281,9 @@ assert.strictEqual(S.visible(a1), true);                      // shown (queued) 
 assert.strictEqual(S.status(a1), 'open');
 assert.strictEqual(S.phase(a1), 'en cola');
 assert.strictEqual(S.timeToRule(a1), null);
-assert.ok(/1 hallazgo/.test(S.auditLine(s4)));
+assert.deepStrictEqual(s4.audits.p1.found, ['a1']);
 S.reduce(s4, mk('audit.done', { incident: 'p1', checked: 8, findings: 1, seconds: 5.25 }, { incident: 'p1' }));
-assert.strictEqual(S.auditLine(s4), 'Auditoría de clase sqli tras p1: 8 de 8 candidatos revisados, 1 hallazgo en 5.3 s');
+assert.deepStrictEqual([s4.audits.p1.done.checked, s4.audits.p1.done.findings, s4.audits.p1.done.seconds], [8, 1, 5.25]);
 S.reduce(s4, mk('incident.opened', { incident: 'a1', vuln_class: 'sqli', method: 'POST', route: '/api/login', param: { in: 'json', name: 'email' }, sink: { file: 'victim/app/db.py', line: 25 }, evidence_rid: 'audit-p1-1', origin: 'audit', parent: 'p1', request: { method: 'POST', path: '/api/login', query: '', body_b64: b64('{"email":"x\' --"}') } }, { incident: 'a1' }));
 assert.strictEqual(a1.origin, 'audit'); assert.strictEqual(a1.parent, 'p1'); assert.strictEqual(a1.method, 'POST');
 assert.strictEqual(S.stages(a1)[0].label, 'Hallado por auditoría');
@@ -300,7 +300,7 @@ S.reduce(s4, mk('incident.opened', { incident: 'p2', vuln_class: 'idor', route: 
 assert.strictEqual(s4.incidents.p2.origin, 'live');
 S.reduce(s4, { type: 'audit.finding', data: {} }); S.reduce(s4, { type: 'audit.done' });
 S.reduce(s4, mk('audit.started', { incident: 'p2', vuln_class: 'idor', candidates: 'many' }, { incident: 'p2' }));
-assert.ok(/idor tras p2: \? candidatos/.test(S.auditLine(s4)));
+assert.deepStrictEqual([s4.auditOrder[s4.auditOrder.length - 1], s4.audits.p2.vuln_class, s4.audits.p2.candidates], ['p2', 'idor', null]);
 
 // --- memory stays bounded over a long session and the totals survive
 {
@@ -318,7 +318,7 @@ assert.ok(/idor tras p2: \? candidatos/.test(S.auditLine(s4)));
     S.reduce(big, { type: 'rule.expired', ts: (ts += 1), data: { id: 'rule-' + id, reason: 'deleted' } });
   }
   assert.ok(big.order.length <= 300 && Object.keys(big.incidents).length <= 300);
-  assert.ok(Object.keys(big.rules).length === 0 && big.ticker.length <= 60 && big.switches.length <= 12);
+  assert.ok(big.ticker.length <= 60 && big.switches.length <= 12);
   const b = S.scoreboard(big);
   assert.deepStrictEqual([b.seen, b.cured, b.dismissed, b.open, b.audit, b.prodN, b.prodMedian], [1000, 900, 100, 0, 250, 900, 4]);
   assert.strictEqual(big.incidents.m999.id, 'm999'); assert.strictEqual(big.incidents.m0, undefined);
@@ -351,11 +351,99 @@ assert.ok(/idor tras p2: \? candidatos/.test(S.auditLine(s4)));
   assert.strictEqual(S.scoreboard(d).ruleMedian, 1);
 }
 
+// --- which run is on the page; the scripted one (dashboard/demo_events.py) is never presented as live
+{
+  const d = S.newState();
+  assert.deepStrictEqual([d.run, d.scripted, S.connLabel(d)], [null, false, 'En vivo']);
+  S.reduce(d, mk('pool.state', { size: 4 }, { run: '1121-175543' }));
+  S.reduce(d, mk('pool.state', { size: 4 }, { run: '' }));                // an event without a run does not change it
+  assert.deepStrictEqual([d.run, d.scripted, S.connLabel(d)], ['1121-175543', false, 'En vivo']);
+  S.reduce(d, mk('pool.state', { size: 4 }, { run: S.SCRIPTED_RUN }));
+  assert.deepStrictEqual([d.run, d.scripted], ['demo', true]);
+  assert.notStrictEqual(S.connLabel(d), 'En vivo');
+  S.reduce(d, mk('pool.state', { size: 4 }, { run: '1122-090000' }));     // real events after scripted ones: the mark stays
+  assert.deepStrictEqual([d.run, d.scripted], ['1122-090000', true]);
+  assert.notStrictEqual(S.connLabel(d), 'En vivo');
+  [null, 7, {}, [], true].forEach((j) => S.reduce(d, { type: 'pool.state', ts: 1, run: j, data: {} }));
+  assert.strictEqual(typeof d.run, 'string');
+}
+
+// --- the attack panel exists only while the run on the page has attack.attempt events (nothing live emits them)
+{
+  const d = S.newState();
+  assert.strictEqual(S.showAttacks(d), false);
+  S.reduce(d, mk('request.routed', { route: 'prod', status: 200 }, { rid: 'x1', run: 'live-1' }));
+  S.reduce(d, oracle('x2', {}));
+  assert.strictEqual(S.showAttacks(d), false);                            // a live run never shows it
+  S.reduce(d, mk('attack.attempt', { vuln: 'v', ok: true, saw_real_data: false }, { run: 'demo' }));
+  assert.strictEqual(S.showAttacks(d), true);
+  S.reduce(d, mk('request.routed', { route: 'prod', status: 200 }, { rid: 'x3', run: 'live-2' }));
+  assert.strictEqual(S.showAttacks(d), false);                            // another run started: its panel is gone
+  assert.strictEqual(d.attacks.v.length, 1);                              // the reducer still keeps the events
+}
+
+// --- who wrote a patch: only llm and fallback are named, anything else is unknown and never the LLM
+assert.strictEqual(S.sourceLabel('llm'), 'Escrito por el LLM');
+assert.strictEqual(S.sourceLabel('fallback'), 'Fuente: fallback');
+['unknown', '', null, undefined, 'LLM', 'llm ', 'gpt', 7, {}].forEach((x) => assert.strictEqual(S.sourceLabel(x), 'Fuente: desconocida'));
+
+// --- an incident closed with an outcome this page does not know keeps that outcome: neither contained nor open
+{
+  const d = S.newState();
+  const I = { incident: 'u1' };
+  S.reduce(d, mk('incident.opened', { incident: 'u1', vuln_class: 'sqli', route: '/u' }, I));
+  S.reduce(d, mk('rule.active', { id: 'ru', incident: 'u1', route: '/u' }, I));
+  assert.deepStrictEqual([S.status(d.incidents.u1), S.unknownOutcome(d.incidents.u1)], ['contained', null]);
+  S.reduce(d, mk('incident.closed', { incident: 'u1', outcome: 'failed_before_rule' }, I));
+  assert.deepStrictEqual([S.status(d.incidents.u1), S.unknownOutcome(d.incidents.u1)], ['unknown', 'failed_before_rule']);
+  S.reduce(d, mk('incident.opened', { incident: 'u2', vuln_class: 'sqli', route: '/u2' }, { incident: 'u2' }));
+  S.reduce(d, mk('incident.closed', { incident: 'u2' }, { incident: 'u2' }));                 // no outcome at all
+  assert.deepStrictEqual([S.status(d.incidents.u2), S.unknownOutcome(d.incidents.u2)], ['unknown', '?']);
+  S.reduce(d, mk('incident.opened', { incident: 'u3', vuln_class: 'sqli', route: '/u3' }, { incident: 'u3' }));
+  S.reduce(d, mk('rule.active', { id: 'r3', incident: 'u3', route: '/u3' }, { incident: 'u3' }));
+  S.reduce(d, mk('incident.closed', { incident: 'u3', outcome: 'rule_only' }, { incident: 'u3' }));
+  assert.deepStrictEqual([S.status(d.incidents.u3), S.unknownOutcome(d.incidents.u3)], ['contained', null]);   // a known one is unchanged
+  ['constructor', '__proto__', 'toString'].forEach((o, k) => {
+    S.reduce(d, mk('incident.closed', { incident: 'h' + k, outcome: o }, { incident: 'h' + k }));
+    assert.strictEqual(S.unknownOutcome(d.incidents['h' + k]), o);
+  });
+  const b = S.scoreboard(d);
+  assert.deepStrictEqual([b.unknown, b.contained, b.open, b.cured], [2, 1, 0, 0]);
+  assert.strictEqual(S.stages(d.incidents.u1).find((s) => s.key === 'closed').note, 'failed_before_rule');
+}
+
+// --- what a reader without the bus token gets (dashboard/server.py redact): markers instead of body and statement
+{
+  const d = S.newState();
+  S.reduce(d, oracle('p1', { request: { method: 'POST', path: '/api/login', query: 'next=/&token=[redacted]', body_b64: '[redacted: 60 chars]' },
+    pre_state_b64: '[redacted: 50000 chars]', session: 'gwsid:~0123456789ab',
+    events: [{ oracle: 'sql', detail: { statement: '[redacted: 88 chars]' }, stack: [] }] }));
+  const rq = d.pendingOracles[0].data.request;
+  assert.deepStrictEqual([rq.body_b64, rq.body_hidden, rq.query], ['', '[redacted: 60 chars]', 'next=/&token=[redacted]']);
+  assert.strictEqual(S.decodeB64(rq.body_b64), '');                       // the marker is never decoded as if it were a body
+  assert.strictEqual(d.pendingOracles[0].data.events[0].detail.statement, '[redacted: 88 chars]');
+  assert.ok(S.isRedacted('[redacted]') && S.isRedacted('[redacted: 3 chars]') && !S.isRedacted('e30=') && !S.isRedacted(null));
+  assert.strictEqual(oracle('p2').data.request.body_b64.charAt(0) !== '[', true);
+  S.reduce(d, oracle('p3'));
+  assert.strictEqual(d.pendingOracles[1].data.request.body_hidden, null);
+  // the hashed session name still pairs captured with released
+  S.reduce(d, mk('session.captured', { session: 'gwsid:~0123456789ab' })); S.reduce(d, mk('session.captured', { session: 'gwsid:~ffffffffffff' }));
+  S.reduce(d, mk('session.released', { session: 'gwsid:~0123456789ab' }));
+  assert.strictEqual(S.scoreboard(d).captive, 1);
+}
+assert.strictEqual(S.prLabel('https://example.invalid/scripted/pull/1'), 'PR de ejemplo (sin enlace)');
+assert.strictEqual(S.isGithubUrl('https://example.invalid/scripted/pull/1'), false);
+
 // --- external file: replay the scripted demo and check the end state
 if (process.argv[2]) {
   const evs = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const d = S.newState();
   evs.forEach((e) => S.reduce(d, e, e.seq));
+  // it is marked as scripted, never "En vivo", and none of its PR references becomes a link
+  assert.deepStrictEqual([d.run, d.scripted, S.connLabel(d), S.showAttacks(d)], [S.SCRIPTED_RUN, true, 'Conectado', true]);
+  d.order.forEach((id) => [d.incidents[id].pr, d.incidents[id].merged].forEach((r) => {
+    assert.ok(r && !S.isGithubUrl(r.url) && S.prLabel(r.url) === 'PR de ejemplo (sin enlace)');
+  }));
   const sb = S.scoreboard(d);
   assert.strictEqual(sb.seen, 2); assert.strictEqual(sb.cured, 2); assert.strictEqual(sb.open, 0);
   assert.strictEqual(d.ignored, 0);                        // every event type of the script is understood

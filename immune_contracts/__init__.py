@@ -1,6 +1,5 @@
-"""Shared contract code. Owned by the orchestrator. Do NOT edit from a work package.
+"""Shared contract code: token format, parameter grammars, clone wire protocol, event types.
 
 Every component imports these helpers instead of re-implementing them, so that
-two packages can never disagree on a wire format.
+two packages can never disagree on a wire format. Reference: contracts/README.md.
 """
-CONTRACT_VERSION = "1"

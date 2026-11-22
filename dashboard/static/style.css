@@ -40,6 +40,7 @@ h1 { font-size: 14px; font-weight: 600; letter-spacing: -.01em; white-space: now
 .chip { display: inline-flex; align-items: center; gap: 8px; height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); min-width: 0; }
 .chip b { font: 500 12px var(--mono); }
 .chip #up-rel { font: 400 12px var(--mono); }
+.chip.flag { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--text); white-space: nowrap; }
 .conn { display: flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--text-2); }
 .conn .k { font-variant-numeric: tabular-nums; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; }
@@ -97,7 +98,7 @@ summary.row::-webkit-details-marker { display: none; }
 .ico { width: 16px; height: 16px; flex: none; }
 .ico .fill { fill: var(--c); } .ico .ring { fill: none; stroke: var(--c); stroke-width: 1.5; } .ico .ring.dash { stroke-dasharray: 2 2.2; }
 .ico .cut { fill: none; stroke: var(--panel); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.s-cured { --c: var(--green); } .s-contained { --c: var(--amber); } .s-open { --c: var(--red); } .s-dismissed, .s-queued { --c: var(--text-3); }
+.s-cured { --c: var(--green); } .s-contained { --c: var(--amber); } .s-open { --c: var(--red); } .s-dismissed, .s-queued, .s-unknown { --c: var(--text-3); }
 .row .id { font: 400 12px var(--mono); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .title .cls { font-weight: 500; white-space: nowrap; }

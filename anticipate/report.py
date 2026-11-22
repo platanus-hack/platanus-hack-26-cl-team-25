@@ -16,6 +16,31 @@ def _score(chk: dict) -> str:
     return f"{chk['passed']}/{chk['total']}"
 
 
+def knowledge(r: dict) -> list[tuple[str, list[str]]]:
+    """The two notes every report carries: what the model was given, and what the vector score means."""
+    t, eq = r["target"], r.get("equivalence", {})
+    n = f"{eq['same']} de {eq['total']}" if eq.get("comparable") else "N de N"
+    return [
+        ("Qué sabía el modelo", [
+            f"Se le dijo: el producto y la versión ({t['name']}), el área («{' '.join(t['area'].split())}»), la "
+            f"clase de defecto con su mecanismo ({t['vuln_class']}), un alcance de {len(t['scope'])} archivo(s) ({', '.join(t['scope'])}) y qué "
+            "comportamiento legítimo conservar.",
+            f"No se le dijo: el identificador del aviso ({t['advisory']}), la versión corregida ni el parche oficial.",
+            "Los vectores de prueba los escribió el equipo; el modelo nunca los ve.",
+            "El aviso es público y casi con certeza está en los datos de entrenamiento del modelo: esto no "
+            "es una prueba ciega.",
+        ]),
+        (f"Qué significa {n}", [
+            f"Para cada una de las entradas de la tabla de vectores, la función extraída ({t['check']['file']}) compilada "
+            "contra un shim devuelve el mismo par (valor de retorno, búfer de salida) con el parche sugerido que con "
+            "el oficial.",
+            f"No demuestra equivalencia de comportamiento de {t['name']}: no se compila ni se ejecuta el servidor, y "
+            "fuera de "
+            "esas entradas no se afirma nada.",
+        ]),
+    ]
+
+
 def markdown(r: dict) -> str:
     t, c, rv = r["target"], r["checks"], r["review"]
     eq, loc = r.get("equivalence", {}), r.get("localisation", {})
@@ -49,10 +74,11 @@ def markdown(r: dict) -> str:
         base = next(v[i] for v in rows.values() if len(v) > i)
         cells = [(("✅ " if v[i][4] else "❌ ") + f"`{v[i][3]}`") if len(v) > i else "—" for v in rows.values()]
         out.append(f"| {base[0]} | `{base[1]}` | {base[2]} | " + " | ".join(cells) + " |")
+    for title, items in knowledge(r):
+        out += ["", f"## {title}", ""] + [f"- {x}" for x in items]
     out += ["", "## Cómo leer esto", "",
-            f"- Al modelo se le dio el área ({len(t['scope'])} archivo(s) en alcance) y la clase de defecto, **no** el aviso ({t['advisory']}).",
             "- La evidencia no es lo que dice el modelo: son las propiedades mecánicas, compiladas y ejecutadas en un contenedor sin red.",
-            "- Límite: el defecto es público y antiguo, así que el modelo pudo haberlo visto en su entrenamiento. Para una prueba ciega, usar un aviso posterior a la fecha de corte del modelo.",
+            "- Para una prueba ciega, usar un aviso posterior a la fecha de corte del modelo.",
             "- Para software de terceros la acción correcta en producción es contener con la regla del gateway y actualizar a la versión corregida."]
     return "\n".join(out) + "\n"
 
@@ -104,6 +130,8 @@ def html_page(r: dict) -> str:
     eqs = (f"{eq['same']}/{eq['total']} vectores con resultado idéntico al oficial" if eq.get("comparable") else "no comparable")
     locs = (f"misma función: {'sí' if loc.get('same_function') else 'no'} · sugerido {e(', '.join(loc.get('our_functions', [])))} · "
             f"oficial {e(', '.join(loc.get('official_functions', [])))}") if loc else ""
+    know = "".join(f"<h2>{e(title)}</h2><ul>" + "".join(f"<li>{e(x)}</li>" for x in items) + "</ul>"
+                   for title, items in knowledge(r))
     return f"""<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Anticipación {e(t['name'])}</title><style>{CSS}</style></head><body><main>
 <h1>Anticipación — {e(t['name'])}</h1>
@@ -111,12 +139,13 @@ def html_page(r: dict) -> str:
 <h2>Resultado</h2><div class="grid">{card(t['vulnerable_ref'] + ' publicada', c['vulnerable'])}{card('Parche sugerido', c['suggested'])}{card(t['fixed_ref'] + ' oficial', c['official'])}
 <div class="card"><div class="mut">Sugerido vs oficial</div><div>{e(eqs)}</div><div class="mut" style="margin-top:6px">{locs}</div></div></div>
 <h2>Hallazgos del modelo</h2><ul>{find}</ul>
-<h2>Parche sugerido vs parche oficial</h2><div class="diffs"><div><div class="mut">Sugerido (generado sin conocer el aviso)</div>{_pre(r['diffs']['suggested'])}</div>
+<h2>Parche sugerido vs parche oficial</h2><div class="diffs"><div><div class="mut">Sugerido (generado sin el identificador del aviso ni el parche oficial)</div>{_pre(r['diffs']['suggested'])}</div>
 <div><div class="mut">Oficial {e(t['vulnerable_ref'])} → {e(t['fixed_ref'])}</div>{_pre(r['diffs']['official'])}</div></div>
 <h2>Vectores de prueba del normalizador</h2><div class="tw"><table><tr><th>Tipo</th><th>Entrada</th><th>Esperado</th><th>{e(t['vulnerable_ref'])}</th><th>Sugerido</th><th>{e(t['fixed_ref'])}</th></tr>{''.join(trs)}</table></div>
-<h2>Cómo leer esto</h2><ul><li>Al modelo se le dio el área y la clase de defecto, no el aviso ({e(t['advisory'])}).</li>
+{know}
+<h2>Cómo leer esto</h2><ul>
 <li>La evidencia son las propiedades mecánicas, compiladas y ejecutadas en un contenedor sin red; no la explicación del modelo.</li>
-<li>Límite: el defecto es público y antiguo; el modelo pudo haberlo visto en su entrenamiento. Para una prueba ciega, usar un aviso posterior a su fecha de corte.</li>
+<li>Para una prueba ciega, usar un aviso posterior a la fecha de corte del modelo.</li>
 <li>En producción, para software de terceros: contener con la regla del gateway y actualizar a la versión corregida.</li></ul>
 </main></body></html>"""
 

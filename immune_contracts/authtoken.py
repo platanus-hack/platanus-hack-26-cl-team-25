@@ -1,4 +1,4 @@
-"""Stateless session token used by the victim app (prod and shadow).
+"""Stateless session token of `auth.kind: immune-token`, used by the built-in demo app (prod and shadow).
 
 Format:  base64url(json({"uid": int, "role": "user"|"admin", "exp": int})) + "." + hex(hmac_sha256(secret, payload_b64))
 Header:  Authorization: Bearer <token>

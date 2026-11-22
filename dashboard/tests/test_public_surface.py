@@ -285,3 +285,104 @@ def test_open_streams_end_on_shutdown(live, monkeypatch):
 def test_main_wires_the_shutdown_signal():
     src = (HERE.parent / "__main__.py").read_text()
     assert "bus.closing = True" in src and "handle_exit" in src
+
+
+def test_anonymous_readers_get_no_bodies_snapshots_statements_query_secrets_or_session_cookies(tmp_path):
+    import base64
+    body = base64.b64encode(b'{"email": "ana@example.com", "password": "hunter2-very-secret"}').decode()
+    snapshot = base64.b64encode(b"SQLite format 3\x00" + b"users|ana|pw-hash-0f3a" * 40).decode()
+    cookie = "gwsid:Zm9vYmFyLXNlc3Npb24tY29va2ll"
+    stmt = "SELECT id FROM users WHERE email = 'ana@example.com' AND password_hash = 'c0ffee11'"
+    oracle = {"type": "oracle.fired", "rid": "r9", "data": {
+        "rid": "r9", "session": cookie, "pre_state_b64": snapshot, "uid": None,
+        "request": {"method": "POST", "path": "/api/login", "body_b64": body, "headers": {"user-agent": "curl/8"},
+                    "query": "next=%2Fhome&token=tok-111&API_KEY=key-222&password=pw-333&q=shoes&flag&passw%6Frd=pw-444"},
+        "events": [{"oracle": "sql", "detail": {"statement": stmt, "tainted": True}, "stack": [{"file": "app/db.py", "line": 25}]}]}}
+    c = client(tmp_path)
+    c.post("/events", json=[
+        oracle,
+        {"type": "session.captured", "rid": "r9", "data": {"session": cookie, "clone": None, "reason": "oracle"}},
+        {"type": "session.released", "data": {"session": cookie, "reason": "ttl"}},
+        {"type": "session.captured", "data": {"session": "gwsid:another-cookie-value", "clone": None, "reason": "oracle"}},
+        {"type": "request.classified", "rid": "r10", "data": {"class": "clean", "method": "GET", "session": "uid:61",
+                                                              "path": "/api/reset?token=tok-555&step=2#top"}},
+        {"type": "incident.opened", "incident": "i", "data": {"incident": "i", "route": "/api/login", "request": {
+            "method": "POST", "path": "/api/login", "query": "", "body_b64": body}}},
+        {"type": "poc.ready", "incident": "i", "data": {"incident": "i", "reproducible": True, "runs": 3, "poc": {
+            "requests": [{"method": "GET", "url": "http://clone/api/x?secret=s-666&id=5", "body_b64": body}]}}},
+    ], headers=H)
+    public = c.get("/events").text
+    for leaked in (body, body[:24], "hunter2", snapshot[:24], "Zm9vYmFy", "another-cookie", "ana@example.com", "c0ffee11", "SELECT",
+                   "tok-111", "key-222", "pw-333", "pw-444", "tok-555", "s-666"):
+        assert leaked not in public, leaked
+    evs = json.loads(public)["events"]
+    d = evs[0]["data"]
+    # a marker says that there was a value and how long it was; an empty one stays empty
+    assert d["request"]["body_b64"] == "[redacted: %d chars]" % len(body)
+    assert d["pre_state_b64"] == "[redacted: %d chars]" % len(snapshot)
+    assert d["events"][0]["detail"] == {"statement": "[redacted: %d chars]" % len(stmt), "tainted": True}
+    assert evs[5]["data"]["request"]["body_b64"].startswith("[redacted: ") and evs[5]["data"]["request"]["query"] == ""
+    assert c.get("/events", params={"since": 0}).json()["events"][0]["data"]["uid"] is None
+    # query strings: only the values of parameters with a sensitive name
+    assert d["request"]["query"] == ("next=%2Fhome&token=[redacted]&API_KEY=[redacted]&password=[redacted]&q=shoes&flag"
+                                     "&passw%6Frd=[redacted]")
+    assert evs[4]["data"]["path"] == "/api/reset?token=[redacted]&step=2#top"
+    assert evs[6]["data"]["poc"]["requests"][0]["url"] == "http://clone/api/x?secret=[redacted]&id=5"
+    # the session cookie becomes a short name that is the same for the same session and different for another one
+    name = d["session"]
+    assert name.startswith("gwsid:~") and len(name) == len("gwsid:~") + 12
+    assert evs[1]["data"]["session"] == name == evs[2]["data"]["session"]
+    assert evs[3]["data"]["session"] not in (name, "gwsid:another-cookie-value") and evs[3]["data"]["session"].startswith("gwsid:~")
+    assert evs[4]["data"]["session"] == "uid:61"                 # an app user id is not a credential
+    assert c.get("/events").text == public                       # stable inside one process
+    # what stays: what the page draws and what correlates events
+    assert (d["request"]["method"], d["request"]["path"], evs[0]["rid"]) == ("POST", "/api/login", "r9")
+    assert d["events"][0]["stack"] == [{"file": "app/db.py", "line": 25}]
+    # the bus token gets the stored events, and so does the store
+    raw = c.get("/events", headers=H).json()["events"]
+    assert raw[0]["data"] == oracle["data"]
+    assert raw[4]["data"]["path"] == "/api/reset?token=tok-555&step=2#top"
+    assert cookie in (tmp_path / "e.jsonl").read_text() and snapshot in (tmp_path / "e.jsonl").read_text()
+
+
+def test_session_names_are_keyed_per_process(monkeypatch):
+    a = srv.public_session("gwsid:abc")
+    assert a == srv.public_session("gwsid:abc") != srv.public_session("gwsid:abd")
+    monkeypatch.setattr(srv, "_SESSION_KEY", b"k" * 32)          # another process: another key, another name
+    assert srv.public_session("gwsid:abc") != a
+
+
+def test_stream_hides_the_same_fields(live):
+    httpx.post(live.url + "/events", headers=H, json={"type": "oracle.fired", "rid": "r", "data": {
+        "session": "gwsid:cookie-value-1", "pre_state_b64": "U1FMaXRl", "request": {"path": "/x", "query": "api_key=k-1", "body_b64": "cHc9MQ=="},
+        "events": [{"oracle": "sql", "detail": {"statement": "SELECT secret-1"}}]}})
+    msg = _sse(live.url + "/events/stream", lambda o: len(o) >= 2)[1][2]
+    for leaked in ("cookie-value-1", "U1FMaXRl", "k-1", "cHc9MQ==", "secret-1"):
+        assert leaked not in msg, leaked
+    assert "cookie-value-1" in _sse(live.url + "/events/stream", lambda o: len(o) >= 2, headers=H)[1][2]
+
+
+@pytest.mark.skipif(not NODE, reason="node not installed")
+def test_page_draws_the_redacted_shapes(tmp_path):
+    """The reducer fed with what an anonymous reader really gets: nothing decoded as a body, the marker kept."""
+    c = client(tmp_path)
+    c.post("/events", headers=H, json=[
+        {"type": "oracle.fired", "rid": "r1", "ts": 10, "data": {"rid": "r1", "session": "gwsid:c1", "pre_state_b64": "QUFB" * 100, "request": {
+            "method": "POST", "path": "/api/login", "query": "token=t1", "body_b64": "eyJwIjogMX0="},
+            "events": [{"oracle": "sql", "detail": {"statement": "SELECT 1"}, "stack": []}]}},
+        {"type": "session.captured", "ts": 11, "data": {"session": "gwsid:c1"}},
+        {"type": "session.released", "ts": 12, "data": {"session": "gwsid:c1"}},
+        {"type": "incident.opened", "ts": 13, "incident": "i", "data": {"incident": "i", "route": "/api/login", "evidence_rid": "r1"}}])
+    (tmp_path / "evs.json").write_text(json.dumps(c.get("/events").json()["events"]))
+    script = (
+        "const S = require(process.argv[1]); const st = S.newState();"
+        "JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8')).forEach((e) => S.reduce(st, e, e.seq));"
+        "const o = st.incidents.i.oracles[0].data;"
+        "console.log(JSON.stringify({body: o.request.body_b64, hidden: o.request.body_hidden, query: o.request.query,"
+        " stmt: o.events[0].detail.statement, captive: S.scoreboard(st).captive, ignored: st.ignored, all: JSON.stringify(st)}));")
+    out = subprocess.run([NODE, "-e", script, str(HERE.parent / "static" / "state.js"), str(tmp_path / "evs.json")], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert (got["body"], got["hidden"], got["query"], got["stmt"]) == ("", "[redacted: 12 chars]", "token=[redacted]", "[redacted: 8 chars]")
+    assert got["captive"] == 0 and got["ignored"] == 0           # captured and released still pair up under the public name
+    assert "QUFB" not in got["all"] and "gwsid:c1" not in got["all"]

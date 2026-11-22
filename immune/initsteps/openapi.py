@@ -8,7 +8,7 @@ import re
 
 import yaml
 
-from . import docker, sandbox
+from . import docker, hostrun
 from .detect import walk
 
 METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
@@ -26,7 +26,8 @@ def _dummy_env(det: dict, db: str) -> dict:
 
 def dump(project: str, det: dict) -> tuple[dict | None, str]:
     """(openapi document, how it was obtained). FastAPI: imported in a --network none container
-    (falls back to a clean host subprocess when Docker is unavailable); otherwise a spec file."""
+    first; when Docker or immune-base:1 is unavailable, or that container run does not return a document, in a
+    clean host subprocess; when that fails too, or the app is not FastAPI, from a spec file in the project."""
     project = os.path.realpath(project)
     errors = []
     if det.get("framework") == "fastapi" and det.get("asgi"):
@@ -43,9 +44,9 @@ def dump(project: str, det: dict) -> tuple[dict | None, str]:
             errors.append("container: %s" % ((res or {}).get("error") or (err or out)[-400:]))
         else:
             errors.append("docker: %s" % why)
-        env = sandbox.base_env(_dummy_env(det, os.path.join(project, ".immune", "tmp-openapi.db")))
-        res = sandbox.run_module("immune.initsteps.probe", {"op": "openapi", "asgi": det["asgi"]},
-                                 sandbox.roots_for(project), env)
+        env = hostrun.base_env(_dummy_env(det, os.path.join(project, ".immune", "tmp-openapi.db")))
+        res = hostrun.run_module("immune.initsteps.probe", {"op": "openapi", "asgi": det["asgi"]},
+                                 hostrun.roots_for(project), env)
         try:
             os.remove(os.path.join(project, ".immune", "tmp-openapi.db"))
         except OSError:

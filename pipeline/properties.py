@@ -1,4 +1,4 @@
-"""Gate 2 — positive properties per vulnerability class (docs/plan-construccion.md §4.2).
+"""Gate 2 — positive properties per vulnerability class (docs/validaciones.md).
 
 Everything is derived from the incident (route, method, parameter, captured request),
 the release's shadow profile (allowed file roots) and the seed manifest. Nothing here

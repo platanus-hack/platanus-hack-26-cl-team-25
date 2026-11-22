@@ -34,7 +34,6 @@ class Syscall:
     args: list[str]
     ret: str            # raw text after '='
     retval: int | None  # None for '?'
-    errno: str | None
     retpath: str | None  # fd decoration of the return value (-y), e.g. the opened file's path
 
 
@@ -135,6 +134,7 @@ class Parser:
     def __init__(self, default_pid: int = 0):
         self.default_pid = default_pid
         self.pending: dict[int, str] = {}
+        self.dropped = 0  # syscall lines that could not be turned into a Syscall (their observation is lost)
 
     def feed(self, line: str) -> Syscall | None:
         line = line.rstrip("\n")
@@ -151,22 +151,25 @@ class Parser:
         if r:
             head = self.pending.pop(pid, None)
             if head is None:
-                return None  # resumed without the start (attached mid-call): unusable
+                self.dropped += 1  # resumed without the start (attached mid-call): unusable
+                return None
             line = head + line[r.end():]
         if line.endswith(_UNFINISHED):
             self.pending[pid] = line[: -len(_UNFINISHED)]
             return None
         parts = split_call(line)
         if parts is None:
+            self.dropped += 1
             return None
         name, args, rest = parts
         rm = _RET.match(rest)
         if not rm:
+            self.dropped += 1
             return None
         raw = rm.group(1)
         retval = None if raw == "?" else int(raw, 16) if raw.startswith("0x") else int(raw)
         return Syscall(pid=pid, name=name, args=args, ret=rest.strip().lstrip("=").strip(),
-                       retval=retval, errno=rm.group(3), retpath=rm.group(2))
+                       retval=retval, retpath=rm.group(2))
 
 
 _SA_FAMILY = re.compile(r"sa_family=(AF_[A-Z0-9]+)")

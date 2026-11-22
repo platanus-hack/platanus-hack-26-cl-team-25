@@ -1,6 +1,7 @@
 """`app.runtime: generic` (contracts/product.md §6): facts, and `immune up` / `immune down` for such a project.
 
-Config keys this runtime reads beyond contracts/product.md §2/§6 (each an extension, reported as CONTRACT_GAP):
+Config keys specific to this runtime. `facts` reads app.workdir, app.bind_env, app.warmup_paths, data.prod_url_env
+and data.demo_postgres from the raw YAML; immune/config.py does not validate them, so a misspelt key is ignored:
 
   app.build: {context: ., dockerfile: Dockerfile}  the image is built from the RELEASE directory (context
                                   is release-relative); tag immune-<name>-app:<release>
@@ -149,12 +150,18 @@ def cmd_up(cfg, reset: bool) -> int:
     sec_file = cli.write_stack_env(cfg, sec)
     if reset:
         cli.compose(cfg, cli.compose_env(cfg, sec_file, "dev"), "down", "--remove-orphans", check=False)
+    # ports this stack does not hold right now: all four after a `reset` (compose down above); only the
+    # fleet's (a host process, stopped above) on a plain `up`, where the stack's own containers may be running
+    cli.check_ports(cfg, ("gateway", "admin", "dashboard", "fleet") if reset else ("fleet",))
     fg.remove_images(cfg.name)
     import shutil
     for d in ("data", "recordings", "bus", "releases", "pipeline", "repo"):
         shutil.rmtree(cfg.rt(d), ignore_errors=True)
     for d in ("data/shadow", "recordings", "bus", "releases", "logs", "stack"):
         os.makedirs(cfg.rt(d), exist_ok=True)
+    for fn in os.listdir(cfg.rt("logs")):      # logs belong to the run, as in the python-asgi path
+        if fn.endswith(".log"):
+            os.remove(cfg.rt("logs", fn))
     cli.build_release(cfg, cfg.release_dir("t0"), os.environ.get("T0_REF") or None)
     run_id = time.strftime("%m%d-%H%M%S")
     with open(cfg.rt("run_id"), "w") as fh:

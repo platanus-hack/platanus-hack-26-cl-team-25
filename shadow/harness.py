@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from urllib.parse import unquote
 
 from immune_contracts import wire
 
@@ -55,7 +56,10 @@ class Harness:
         if isinstance(query, bytes):
             query = query.decode("latin-1")
         with _LOCK:
-            res = self._call(self.engine.handle(method, path, (query or "").lstrip("?").encode("latin-1"), hdrs, body or b""))
+            # `path` is the request target as sent (percent-encoded, e.g. a recorded request): the app gets it
+            # decoded once, as uvicorn hands it to the clone in server mode
+            res = self._call(self.engine.handle(method, unquote(path), (query or "").lstrip("?").encode("latin-1"), hdrs,
+                                                body or b"", {"raw_path": path.encode("latin-1", "replace")}))
             self.engine.finish(res)
         return res
 

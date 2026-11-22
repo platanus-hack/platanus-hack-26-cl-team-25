@@ -1,4 +1,4 @@
-"""Tiny stand-in for the victim app. Same rules as contracts/README.md §4. Owned by the orchestrator."""
+"""Tiny stand-in for the victim app. Same rules as contracts/README.md §4."""
 import os, sqlite3
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse

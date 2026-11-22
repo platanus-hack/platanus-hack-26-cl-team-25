@@ -1,5 +1,5 @@
 .immune
 .git
 README.md
-REVIEW_NOTES.md
 docker-compose.yml
+node_modules

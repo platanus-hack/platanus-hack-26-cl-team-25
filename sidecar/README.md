@@ -1,222 +1,303 @@
-# sidecar/ — language-agnostic shadow observer (P4)
+# sidecar
 
-Runs next to an **unmodified** app (any language, its own image) in a shadow clone and gives the same
-per-request verdicts as the Python wrapper (`shadow/`, contract `contracts/README.md` §5), observing
-from outside the process:
+## Purpose
 
-| Oracle | Source | Fires when |
+The sidecar provides the oracles for an application that cannot be instrumented in process: any language, run
+unmodified from its own image (`app.runtime: generic`). It sits next to the app inside each shadow clone,
+observes it from outside (system calls through `strace`, SQL through a PostgreSQL wire proxy, the response
+body) and gives the gateway the same per-request verdict as the in-process wrapper in
+[`shadow/`](../shadow/README.md).
+
+This directory also holds `sidecar/marker`, a separate and much simpler proxy whose only oracle is a marker in
+the response body. Only the Grafana lab uses it.
+
+## How it runs
+
+```
+python -m sidecar --config /cfg/sidecar.json
+```
+
+One asyncio process (uvicorn) in the image `immune-sidecar:1` (`deploy/Dockerfile.sidecar`: the base image plus
+`strace` and `procps`). In a running stack the fleet starts one sidecar container per clone, named
+`<prefix>-clone-<n>-obs`, sharing the app container's network and PID namespaces and holding `SYS_PTRACE` as
+its only capability (`fleet/generic.py`). The pipeline starts the same image for its ephemeral validation
+clones (`pipeline/generic.py`).
+
+```mermaid
+flowchart LR
+  GW[gateway] -->|HTTP :8000, x-imm-* headers| SC
+  subgraph ns[shared network and PID namespaces]
+    SC[sidecar] -->|HTTP on loopback| APP[app, unmodified image]
+    SC -. strace -f -p .-> APP
+    APP -->|Postgres protocol 127.0.0.1:5432| PX[pg proxy, inside the sidecar]
+  end
+  PX --> PG[(clone Postgres: database clone, template seed)]
+  SC -->|signed evidence| GW
+```
+
+Ports: the wire protocol on `listen_port` (8000), the app on `app_port` on loopback, the Postgres proxy on
+`postgres.listen` (127.0.0.1:5432). The wire protocol (headers, verdicts, evidence) is specified in
+[`contracts/README.md`](../contracts/README.md).
+
+Command-line flags (`main` in `server.py`): `--config` (default `$SIDECAR_CONFIG`), `--host`, `--port`,
+`--app-port`, `--mode attach|launch`, `--no-trace` (no tracer: overhead measurement only, the `file`, `proc`
+and `net` oracles are off), `--log-level` (default `$SIDECAR_LOG_LEVEL`, else `info`), and after `--` the app
+command for launch mode.
+
+## Layout
+
+| File | Role |
+|---|---|
+| `server.py` | `Sidecar`: start-up, warm-up, one request end to end, verdict, evidence push, L1 database reset; ASGI front end; CLI |
+| `tracer.py` | Starts `strace` (attach or launch), reads its output on a thread, finds the app's processes |
+| `strace.py` | Parser of `strace` output and classification of each call into an observation |
+| `observer.py` | Request window, warm-up allowlists, `file`/`proc`/`net`/`owner` oracle rules |
+| `pgproxy.py` | PostgreSQL wire proxy and `StatementTracker` (which statements executed) |
+| `pgclient.py` | Minimal asyncio Postgres client for the sidecar's own work (database reset, `ensure_user`) |
+| `constants.py` | String literals of the app's source and executables, for the SQL taint check |
+| `identity.py` | Identity translation, markers and public paths from a profile or a command |
+| `http1.py` | Minimal HTTP/1.1 client to the app (raw response bytes, `Connection: close`) |
+| `config.py` | Config file loading |
+| `marker/` | The response-marker proxy (`python -m sidecar.marker`) |
+| `examples/` | Fixture apps for the tests: `node/` (Node `http` + `pg`), `c/` (statically linked C), `pyhttp/` (stdlib Python, launch mode) |
+| `tests/` | Unit and Docker integration tests; `tests/bench.py` is a measurement script, not a test |
+
+## Configuration
+
+A JSON or YAML file (`sidecar/config.py`). A product config with `app:` and `sidecar:` sections is also
+accepted: `app.port`, `app.health`, `app.allowed_file_roots`, `app.command`, `app.source_dirs` and
+`shadow.profile` map to the keys below.
+
+| Key | Default | Meaning |
 |---|---|---|
-| `sql` | Postgres wire-protocol proxy (`pgproxy.py`) | a request input (from `shadow.inputs`) breaks out of a literal in a **successfully executed** statement (`shadow.sqltaint`, imported unchanged) |
-| `file` | strace `openat/openat2/open/creat` | a **successful** open whose kernel path is outside `allowed_file_roots` and the warm-up allowlist |
-| `proc` | strace `execve/execveat`, non-thread `clone/clone3/fork/vfork` | any process spawned during the request |
-| `net` | strace `connect/sendto/sendmsg` | an attempt to a non-loopback address, any DNS query (port 53), or a unix socket not seen in warm-up |
-| `owner` | response body | marker of another owner (same rule as `shadow.core.Engine.owner_events`) |
+| `listen_host`, `listen_port` | `0.0.0.0`, 8000 | Where the sidecar serves the wire protocol |
+| `app_host`, `app_port` | `127.0.0.1`, 3000 | The app |
+| `health` | `/health` | Health path, used for readiness and warm-up |
+| `mode` | `attach` | `attach` or `launch` |
+| `command` | `[]` | Launch mode: the app command |
+| `target_pid` | none | Attach mode: anchor process (default PID 1 of the shared namespace) |
+| `allowed_file_roots` | `[]` | Paths, as the app sees them, that the app may open |
+| `source_dirs` | `[]` | App source directories scanned for string literals |
+| `scan_executable_max_mb` | 32 | Size limit for scanning the app's executables for strings |
+| `warmup_paths` | `[]` | Extra benign GETs at start-up |
+| `warmup_rounds` | 2 | How many times the warm-up requests are sent |
+| `grace_ms` | 30 | How long observations still count after the app's response |
+| `request_timeout_s` | 30 | Timeout of the request to the app |
+| `profile` | none | Python module name or `.py` path with identity hooks |
+| `identity_command` | none | Shell command that prints the app credentials |
+| `public_paths` | `[]` | Path prefixes with the relaxed owner rule (a profile's `public_paths()` wins) |
+| `markers_path` | `$MARKERS_PATH` | JSON `{marker: owner uid}` |
+| `postgres.listen` | `127.0.0.1:5432` | Proxy address; the app's database URL points here |
+| `postgres.upstream` | required | The clone's Postgres |
+| `postgres.admin_url` | empty | Superuser URL used to reset the database and run `ensure_user` |
+| `postgres.database`, `postgres.template` | `clone`, `seed` | Database the app uses and the template it is recreated from |
 
-Evidence `stack` is always `[]` (no frames from outside); `detail` is `{statement,input,param,location,reason}`,
-`{path,realpath}`, `{path,argv}` / `{syscall,child}`, `{family,address,port,syscall}`, `{marker_owner,requester}`.
+Environment: `CLONE_ID`, `CLONE_KEY`, `COLLECTOR_URL`, `RELEASE` (evidence fields and where to push it),
+`MARKERS_PATH`, `SIDECAR_GRACE_MS` (overrides `grace_ms`), `SIDECAR_CONFIG`, `SIDECAR_LOG_LEVEL`,
+`SIDECAR_JUDGE=1` (validation clones of the pipeline only: every response also carries `x-imm-trace`, a base64
+JSON with the events, executed statements and their bound parameters, failed statements, opened files and
+marker owners). The whole environment is passed to the profile hooks as `env`.
 
-## How it works
+## Behaviour
 
-```
-gateway ──HTTP :8000──► sidecar (immune-sidecar:1)          app container (its own image, unmodified)
-                        ├─ wire protocol (lock, buffer,      ┌──────────────────────────────────┐
-                        │  verdict, signed evidence)  ──────►│ app on 127.0.0.1:3000             │
-                        ├─ strace -f -y -p <app pids> ◄──────│ (shared PID + network namespace)  │
-                        └─ pg proxy 127.0.0.1:5432 ◄─────────│ DATABASE_URL=…@127.0.0.1:5432/clone│
-                               │                             └──────────────────────────────────┘
-                               └──► per-clone Postgres: database "clone" = CREATE DATABASE … TEMPLATE seed
-```
+### One request
 
-Per request (one at a time, under a lock): strip `x-imm-*` → identity hook (`x-imm-uid` → `ensure_user` on the
-clone DB + app credentials) → open the observation window → forward to the app on loopback (own minimal
-HTTP/1.1 client, raw bytes, `Connection: close`) and buffer the whole response → keep the window open
-`grace_ms` → oracles → verdict (`oracle` / `inconclusive` for 401, 404, ≥ 500 / `clean`) → signed evidence
-push (2 s timeout, failures only logged) **before** the response is released → response with
-`x-imm-verdict`/`x-imm-events` → L1: recreate the clone database.
+`Sidecar.handle` in `server.py`. Requests are processed one at a time under a lock, so everything observed
+while a request window is open belongs to that request.
 
-- **Attach** (default): the sidecar shares the app container's PID and network namespaces and attaches to every
-  process of the app's mount namespace (`/proc/*/ns/mnt` = that of PID 1), so its own processes (uvicorn, proxy,
-  evidence push) are never traced. Paths come from strace `-y`: for a successful open the return value is
-  decorated with the kernel's path of the new fd (resolved in the app's namespace, symlinks and `..` already
-  resolved); otherwise the `AT_FDCWD</cwd>`/dirfd decoration or `/proc/<pid>/cwd` is joined and normalised.
-- **Launch** (`mode: launch`): the sidecar starts `command` as a traced child (`strace -f --seccomp-bpf --`),
-  for when app and sidecar share one container (contracts/product.md §6). Needs no capability at all.
-- **Warm-up**: after attaching, `health`, `warmup_paths` and a 404 are requested `warmup_rounds` times with the
-  window in *learning* mode; every file (and non-DNS net destination) seen is allowlisted. Opens made before the
-  attach (startup) are not seen at all.
-- **SQL constants** (taint rule 3, e.g. input `notes` inside `"… FROM notes"`): string literals scraped from
-  `source_dirs` (read through `/proc/<pid>/root`) plus printable strings of the app's executables
-  (`/proc/<pid>/exe`, ≤ `scan_executable_max_mb`; printf specifiers split like template interpolation). The node
-  binary itself (≈ 120 MB) is skipped by the size cap; the static C demo's SQL text comes from its `.rodata`.
-- **pg proxy**: forwards bytes unchanged; answers `SSLRequest`/`GSSENCRequest` with `N` itself; authentication
-  passes through. Statement text = `Q` string or `P` (Parse) text; `B` (Bind) values are never recorded, so bound
-  parameters can never fire. A `Q` counts as executed iff ≥ 1 `CommandComplete`/`EmptyQueryResponse` precedes its
-  `ReadyForQuery` (Postgres parses the whole multi-statement string first, so a syntax error means nothing ran);
-  an `Execute` iff `CommandComplete`/`EmptyQueryResponse`/`PortalSuspended` answers it, and an `ErrorResponse` fails
-  it and every later `Execute` up to `Sync`. The startup phase has its own `ReadyForQuery` (handled: a client
-  that pipelines a query before auth completes is attributed correctly — a bug the unit test caught).
-- **Reset (L1)**: the proxy ends every proxied session itself (sends `Terminate` upstream, closes the app side),
-  the sidecar waits (≤ 500 ms, 2 ms polls) until `pg_stat_activity` shows none, then
-  `DROP DATABASE clone WITH (FORCE)` + `CREATE DATABASE clone TEMPLATE seed`. New app connections wait in the
-  proxy until the database exists again. The app's pool must tolerate its idle connections being closed
-  (node-pg: `pool.on("error", …)`); the first query after a reset pays for a new connection (≈ 20 ms with SCRAM).
-- **Fail closed**: if strace is gone, every request gets `503` + `inconclusive` (never a false `clean`).
+1. Remove the `x-imm-*` headers and read `x-imm-rid`, `x-imm-mode` (`L1` or `L2`), `x-imm-uid`, `x-imm-role`.
+2. Identity. With `x-imm-uid`: run the profile's `ensure_user` on the clone database, then replace the
+   client's credentials with the ones from the identity source. Without it: the requester is whatever
+   `identify` returns from the client's own headers.
+3. If the tracer process is not running, answer 503 with verdict `inconclusive` without calling the app.
+4. Open the observation window, forward the request to the app on loopback with the request target byte for
+   byte, buffer the whole response, keep the window open `grace_ms` longer, close it. An app error or timeout
+   becomes a 502.
+5. Evaluate the oracles.
+6. Verdict: `oracle` if any oracle fired; otherwise `inconclusive` if the status is 401, 404 or 5xx, or if the
+   tracer died while the request was in flight; otherwise `clean`.
+7. On `oracle`, push the evidence to `$COLLECTOR_URL/_clone/evidence`, signed with `CLONE_KEY`, before the
+   response is released (2 s timeout; a failed push is logged and does not change the response).
+8. Answer with the app's response plus `x-imm-verdict` and `x-imm-events`.
+9. In `L1` mode, recreate the clone database.
 
-## Running
+Evidence has the same shape as the in-process wrapper's, with two differences: `stack` is always empty (there
+are no frames from outside the process) and `pre_state_b64` is always null (the pre-request snapshot exists for
+SQLite only).
 
-Exact lines used by the tests (`sidecar/tests/dockerenv.py`), Node demo:
+### Tracer
 
-```
-docker network create --internal p4-net
-docker run -d --name p4-pg  --network p4-net -e POSTGRES_PASSWORD=pw postgres:16-alpine \
-       -c fsync=off -c synchronous_commit=off -c full_page_writes=off
-#   seed: CREATE ROLE app LOGIN PASSWORD 'apppw'; CREATE DATABASE seed OWNER app; then sidecar/examples/node/seed.sql in "seed"
-docker run -d --name p4-app --network p4-net --read-only -v $REPO/sidecar/examples/node:/app:ro -w /app \
-       -e DATABASE_URL=postgres://app:apppw@127.0.0.1:5432/clone -e APP_SECRET=shadowsecret \
-       -e APP_STATIC=/app/static -e PORT=3000 node:22-alpine node /app/server.js
-docker run -d --name p4-sc --network container:p4-app --pid container:p4-app --cap-add SYS_PTRACE \
-       -v $REPO:/opt/immune:ro -v $CFG_DIR:/cfg:ro -e PYTHONPATH=/opt/immune \
-       -e APP_SECRET=shadowsecret -e CLONE_ID=c1 -e CLONE_KEY=k1 -e COLLECTOR_URL=http://p4-col:9000 -e RELEASE=t0 \
-       -e MARKERS_PATH=/opt/immune/sidecar/examples/node/markers.json \
-       immune-sidecar:1 python -m sidecar --config /cfg/sidecar.json
-```
-
-`/cfg/sidecar.json`:
-
-```json
-{"listen_port": 8000, "app_port": 3000, "health": "/health",
- "allowed_file_roots": ["/app/static"], "source_dirs": ["/app"], "warmup_paths": ["/"],
- "profile": "/opt/immune/sidecar/examples/node/profile.py",
- "postgres": {"listen": "127.0.0.1:5432", "upstream": "p4-pg:5432",
-              "admin_url": "postgres://postgres:pw@p4-pg:5432/postgres", "database": "clone", "template": "seed"}}
-```
-
-Launch mode, no capabilities (test `test_launch_mode_without_capabilities`):
+`tracer.py` runs:
 
 ```
-docker run -d --name p4-launch --network p4-lnet --cap-drop ALL --read-only -v $REPO:/opt/immune:ro \
-       -v $CFG_DIR:/cfg:ro -e PYTHONPATH=/opt/immune immune-sidecar:1 python -m sidecar --config /cfg/sidecar.json
-#   config: {"mode": "launch", "command": ["python3", "/opt/immune/sidecar/examples/pyhttp/app.py"], ...}
+strace -f -y -qq -s 4096 -e signal=none -e trace=openat,openat2,open,creat,execve,execveat,connect,sendto,sendmsg,fork,vfork,clone,clone3
 ```
 
-All config keys: docstring of `config.py` (YAML or JSON; a product `config.yaml` with `app:` + `sidecar:` is
-accepted too). Identity: `profile` (module or `.py` path) with `mint_token` / `identity_headers` / `ensure_user(conn, uid, role)`
-(`conn.execute(sql, params)` with `$n` placeholders, on the clone DB, outside the observation window) / `identify` /
-`load_markers` / `public_paths`; or `identity_command` (env `IMM_UID`, `IMM_ROLE`; stdout `Header: value` lines or a
-bare token); default: client headers untouched. Without `identify`, the requester of a request without `x-imm-uid`
-is taken from an immune-token bearer verified with `APP_SECRET` if that env is set, else anonymous.
+- **Attach mode** (default). The sidecar shares the app container's PID namespace and attaches with `-p` to
+  every process whose mount namespace is that of the anchor process and differs from the sidecar's own. Its own
+  processes are therefore never traced. Needs `SYS_PTRACE`.
+- **Launch mode.** The sidecar starts the app command as a traced child (`strace -f --seccomp-bpf -- <command>`),
+  for when both run in one container. It needs no added capability (`test_launch_mode_without_capabilities`).
 
-## Demo apps (`examples/`)
+`-f` follows children. `strace.py` joins `<unfinished ...>` and `<... resumed>` lines per process. A line that
+cannot be turned into a call is counted; the count is logged with every request as `strace_dropped=N`.
 
-- `node/` — plain `http` + `pg@8.13.1`. `npm install` works from this host, so `node_modules/` (13 packages,
-  900 KB) is **vendored** (installed with `node:22-alpine`, `npm install --omit=dev`; `package-lock.json` included).
-  Routes: `/health`, `/search` (concatenated, simple query), `/safe-search` (`$1`, extended protocol), `/download`
-  (`path.join`, no containment), `/safe-download`, `/notes/:id` (no owner check), `/safe-notes/:id`, `POST /notes`,
-  plus `/lookup` (shell injection → `proc`), `/fetch` (SSRF → `net`), `/deferred` (opens a file *after*
-  responding, for the grace-period test). Auth: immune-token (HMAC, `APP_SECRET`).
-- `c/` — the compiled-language demo: no Go/Rust/.NET/Java toolchain image is present, but `immune-cbuild:1` has
-  gcc 14, so this is C, **statically linked** (`build.sh` compiles it at test time; no binary is committed), with its
-  own minimal Postgres client (simple + extended protocol, trust auth only — the test adds a `trust` line for
-  role `capp`). Same routes (no POST); identity from an `x-user` header filled by `identity_command`.
-  It runs from `node:22-alpine` only because that image is present; any image works for a static binary.
-- `pyhttp/` — stdlib Python app used only for the launch-mode test (it has to live in the sidecar's image).
+How each call becomes an observation (`observe` in `strace.py`) and when it fires (`Observer.system_events`):
 
-No image was built or pulled.
+| Calls | Observation | Fires |
+|---|---|---|
+| `open`, `openat`, `openat2`, `creat` | Only successful opens. The path is the kernel's path of the returned descriptor (`-y`), so symlinks and `..` are already resolved; otherwise the argument joined with the directory descriptor or the process's working directory and normalised. | `file`, when the path is outside `allowed_file_roots` and was not opened during warm-up |
+| `execve`, `execveat` | Only successful execs | `proc`, always |
+| `fork`, `vfork`, `clone`, `clone3` | Only when a child was created and the call did not carry `CLONE_THREAD` | `proc`, when the child did not exec during the window (an exec is reported once, by `execve`) |
+| `connect`, `sendto`, `sendmsg` with a destination address | Attempts count even when they fail | `net`: any destination on port 53; a non-loopback IP address not seen in warm-up; a unix socket not seen in warm-up; any other address family except netlink. Loopback destinations on other ports never fire. |
 
-## Measured (this host: arm64, Docker 29, no KVM)
+Not seen by the tracer:
 
-`python -m sidecar.tests.bench 200 30` (Node demo, L2 so no reset between requests, ms, median/p95).
-`app` = time until the app's full response as seen by the sidecar (where ptrace cost lands);
-`client` = end-to-end, includes the 30 ms grace period.
+- anything done through a descriptor that was already open (reads, writes, `mmap`);
+- `rename`, `unlink`, `stat`, `readlink` and every other call not in the list above, so deleting, renaming or
+  probing a file fires nothing;
+- failed opens and failed execs (the app did not get the file or the process);
+- io_uring operations, which bypass these system calls;
+- files opened before the tracer attached, and in-process databases (SQLite and the like): only their file
+  open is visible, and it happens at start-up or during warm-up;
+- effects the app defers for longer than `grace_ms` after its response. They are not attributed to the request
+  and not to the next one either (`test_grace_period_catches_deferred_effect_and_bounds_it`: a read 5 ms after
+  the response is caught, one 300 ms after is not).
 
-| route | app, no tracer | app, traced | client, no tracer | client, traced |
-|---|---|---|---|---|
-| `/health` | 0.90 / 1.30 | 1.10 / 1.60 | 32.77 / 34.17 | 33.00 / 34.48 |
-| `/download` (1 open) | 1.50 / 3.40 | 2.00 / 3.50 | 33.67 / 36.67 | 33.89 / 35.52 |
-| `/safe-search` (pg) | 1.80 / 2.50 | 2.40 / 4.60 | 33.77 / 34.83 | 34.42 / 37.18 |
-| `/lookup` (fork+exec sh) | 3.10 / 3.90 | 6.20 / 8.20 | 35.00 / 36.10 | 42.22 / 45.09 |
+### Warm-up
 
-- Tracer overhead: +0.2 to +0.6 ms on ordinary requests, ≈ 2× on process spawning (every syscall of the new
-  process stops: attach mode cannot use `--seccomp-bpf`, which only applies to processes strace starts).
-- Sidecar overhead without the tracer ≈ 1–2 ms plus the grace period.
-- **L1 reset** (terminate sessions + DROP + CREATE … TEMPLATE, tiny seed): median **29 ms** (p95 33–58 ms) with
-  `fsync=off synchronous_commit=off full_page_writes=off` on the disposable clone Postgres; **66–68 ms** median
-  (p95 ≈ 80 ms) with a durable Postgres. A full L1 request including the reset wait: ≈ 84 ms (≈ 120 ms durable).
-  Measured alternatives: `DROP … WITH (FORCE)` on live sessions alone: ≈ 108 ms (Postgres polls exiting backends
-  in 100 ms sleeps); `pg_terminate_backend(pid, timeout)` first: ≈ 200 ms for two sessions; `STRATEGY FILE_COPY`:
-  slower than the default `WAL_LOG` (30 vs 27 ms with fsync off, 175 vs 60 ms durable).
-- **Grace period (30 ms default, `grace_ms` / env `SIDECAR_GRACE_MS`)**: strace stops the tracee at syscall exit and
-  writes the line before resuming it, so anything the app did *before* writing its response is already in the
-  pipe when the response arrives; measured latest arrival relative to the end of the response over 205 requests
-  per route: **+0.13 ms** (`/download`), −1.96 ms (`/lookup`). The grace therefore exists for work the app defers
-  past its response (unawaited promises, `setImmediate`, short timers, log flushes): `test_grace_period_…` shows a
-  read 5 ms after the response is caught, one 300 ms after is not (and is not misattributed to the next request).
-  30 ms covers event-loop deferrals with a wide margin and costs a flat 30 ms only on detonated (suspect) requests;
-  raise it for apps with known delayed side effects.
+After the tracer is attached and the app answers its health path, the sidecar requests the health path,
+`warmup_paths` and a path that does not exist, `warmup_rounds` times, with the observer in learning mode. Every
+file opened and every network destination seen is added to an allowlist (port 53 fires regardless). The defaults `/dev/null`,
+`/dev/urandom`, `/dev/random`, `/dev/zero` and `/dev/tty` are always allowed.
+
+### Postgres proxy and the `sql` oracle
+
+`pgproxy.py` forwards every byte between the app and the clone's Postgres unchanged, with one exception: it
+answers `SSLRequest` and `GSSENCRequest` itself with `N`. The connection between app and database is therefore
+always plaintext, and an app that requires TLS to its database cannot connect. Authentication passes through.
+
+Statement text comes from two messages:
+
+- `Q` (simple query): the whole query string, which may hold several statements. It counts as executed when at
+  least one `CommandComplete` or `EmptyQueryResponse` arrives before its `ReadyForQuery`.
+- `Parse` (extended protocol): the statement text, recorded when an `Execute` of a portal bound to it is
+  answered by `CommandComplete`, `EmptyQueryResponse` or `PortalSuspended`. An `ErrorResponse` fails that
+  `Execute` and every later one up to the next `Sync`.
+
+`Bind` parameter values are data: they are never part of the statement text and are never taint-checked. There
+is no handling specific to `COPY`: the text of a `COPY` statement sent in a `Q` is checked like any other
+statement, and the rows streamed as `CopyData` are forwarded without inspection.
+
+Statements that failed are logged and produce no event.
+
+Each successfully executed statement goes through the same taint check as the in-process wrapper
+(`shadow/sqltaint.py`, with the inputs extracted by `shadow/inputs.py`): an occurrence of a request input in
+the statement text fires unless it sits inside exactly one literal token or is part of a verbatim copy of a
+string the app itself wrote. From outside the process, "strings the app wrote" are approximated by
+`constants.py`: quoted literals in text files under `source_dirs` (extensions in `EXTS`, dependency directories
+skipped, template interpolations split) plus printable runs of the app's executables up to
+`scan_executable_max_mb`.
+
+### Database reset (L1)
+
+`Sidecar.reset_db`: the proxy stops accepting new app connections, ends every proxied session (sends
+`Terminate` upstream and closes the app side), waits up to 0.5 s for the sessions to leave, then runs
+`DROP DATABASE IF EXISTS <database> WITH (FORCE)` and `CREATE DATABASE <database> TEMPLATE <template>` over the admin
+connection. New app connections wait in the proxy until the database exists again. The app's connection pool
+must tolerate its idle connections being closed. A failed reset is logged; the request has already been
+answered.
+
+### Identity, markers and the `owner` oracle
+
+`identity.py`, first source that applies:
+
+1. A `profile` module with any of `identity_headers(env, uid, role)` (headers to set), `mint_token(env, uid,
+   role)` (becomes `Authorization: Bearer <token>`), `ensure_user(conn, uid, role)` (`conn.execute(sql,
+   params)` with `$n` placeholders on the clone database, before the window opens), `identify(env, headers)`,
+   `load_markers(env)`, `public_paths()`.
+2. `identity_command`: a shell command run with `IMM_UID` and `IMM_ROLE`; its output is `Header: value` lines
+   or one bare line taken as a bearer token.
+3. Nothing: the client's headers are forwarded untouched.
+
+Without an `identify` hook, the requester of a request without `x-imm-uid` is read from a bearer token in the
+format of `immune_contracts/authtoken.py` verified with `APP_SECRET`, if that variable is set; otherwise the
+requester is anonymous.
+
+The `owner` oracle scans the (decompressed) response body for markers `MK` plus ten characters. It fires for
+every marker whose owner is not the requester, unless the requester's role is `admin`. On a public path it
+fires only when the body holds markers of two or more other owners or another oracle fired in the same request.
+The group-shared access exemption of the in-process wrapper (`sharing.json`) is not implemented here.
+
+### Behaviours that fail closed
+
+- Tracer not running before the request: 503 and `inconclusive`. Tracer dies during the request:
+  `inconclusive`. The app keeps running untraced and the clone answers 503 from then on. Nothing replaces
+  such a clone while its three containers keep running: the fleet's reconcile loop checks container status,
+  not the tracer.
+- Markers configured (a profile `load_markers`, or a markers path) but unreadable or invalid: the sidecar
+  refuses to start. With no markers configured at all, it starts with the `owner` oracle off and logs a
+  warning.
+- A response without `x-imm-verdict` is treated as `inconclusive` by the gateway.
+
+### The response-marker proxy (`sidecar/marker`)
+
+```
+python -m sidecar.marker --host 127.0.0.1 --port 3902
+```
+
+A single-file HTTP proxy (`marker/core.py`) that speaks the same clone protocol with one oracle: it forwards
+the request to `SHADOW_UPSTREAM`, buffers the response, and fires a `file` event for each marker of
+`MARKERS_PATH` (JSON `{marker: {"path": ...}}`) found in the body. Verdict rule as above. It does not trace
+system calls, proxy a database, translate identities or reset state. Environment: `SHADOW_UPSTREAM` (default
+`127.0.0.1:3000`), `MARKERS_PATH`, `CLONE_ID`, `CLONE_KEY`, `COLLECTOR_URL`, `RELEASE`, `SIDECAR_TIMEOUT_S`
+(15). It only confirms leaks of files that carry a marker. Used by
+[`labs/grafana-cve-2021-43798`](../labs/grafana-cve-2021-43798/README.md).
 
 ## Tests
 
 ```
-.venv/bin/pytest sidecar/tests -q          # unit + integration (Docker; ~25 s)
-.venv/bin/python -m sidecar.tests.bench 200 30 [durable]
+.venv/bin/pytest sidecar/tests -q
 ```
 
-Unit: strace parser (`[pid N]` and `-o` prefixes, unfinished/resumed per pid, orphan resumed, relative paths,
-`AT_FDCWD</dir>`, dirfd, escapes/commas, `(deleted)`, failed opens/execs ignored, threads vs forks, inet/inet6/unix,
-sendto with/without address), observer windows/allowlist/net rules, pg protocol (simple/extended, errors,
-multi-statement, batch failure until Sync, portal suspended, 200 KB messages fed byte by byte and in 4 KB pieces,
-startup/SSL, a real proxy against a fake upstream checking byte-identical forwarding), constants extraction.
-Integration (containers `p4-*` on a private `--internal` network, removed afterwards): every case of
-`acceptance/wp2_shadow/test_shadow.py` that applies, against the Node app, plus `proc`/`net`, grace period,
-fail-closed, the C app, and launch mode.
+| File (under `sidecar/tests/`) | Needs | Covers |
+|---|---|---|
+| `test_strace.py`, `test_pgproxy.py`, `test_constants.py`, `test_judge_trace.py`, `test_marker_sidecar.py`, `test_node_deps.py` | nothing | Parser, observer rules, protocol tracking (simple and extended, errors, split messages), literal extraction, trace of bound parameters, marker verdicts, installation of the Node fixture's dependencies |
+| `test_fail_closed.py` | nothing | Marker loading failures, verdict when the tracer is dead before or during a request, dropped-line counter |
+| `test_integration.py` (marked `docker`) | Docker; images `immune-sidecar:1`, `node:22-alpine`, `postgres:16-alpine`, and `immune-cbuild:1` for the C app | Every oracle against the Node app, identity, L1 reset and L2 state, grace period, signed evidence, collector down, tracer death, the statically linked C app, launch mode |
+
+The integration tests create containers and an `--internal` network with a test-only prefix and remove them.
+The Node fixture's `node_modules` is not in the repository; `ensure_node_deps` in `tests/dockerenv.py` installs
+it from `package-lock.json` (host `npm`, else a one-off container), which needs access to the npm registry
+once; the tests are skipped when that is impossible.
+
+`python -m sidecar.tests.bench [N] [grace_ms] [durable]` brings up the Node fixture with and without the tracer
+and prints latency and reset times. No result of it is recorded in the repository, so this document states no
+overhead figures; measured results of the project are in [`docs/resultados.md`](../docs/resultados.md).
 
 ## Limits
 
-Confirmed (observed in tests or experiments here):
-- Cross-container attach works with exactly `--pid container:<app> --cap-add SYS_PTRACE` on the sidecar
-  (ptrace_scope=1 is satisfied by CAP_SYS_PTRACE; Docker's default seccomp and AppArmor allow it).
-- Statically linked binaries are observed fine (C demo): only syscalls matter, not libc.
-- `detail.path` is the syscall argument as the app passed it, e.g. Node's `path.join` already normalised
-  `../../etc/hostname` to `/etc/hostname`; `realpath` is the kernel's.
-- Without app string constants, an input equal to an identifier in a statement fires (`/notes/1` → `notes` in
-  `FROM notes` fired for the C app until executable strings were added). Apps whose SQL text is assembled at
-  runtime or compressed in the binary, or huge executables above the cap, have no constants.
-- Effects deferred beyond `grace_ms` are not attributed (by design; see the 300 ms case).
-- If strace dies the sidecar answers 503/`inconclusive`; the app keeps running untraced.
-- Attach mode stops the tracee on every syscall (no seccomp-bpf for attached processes): ~2× on spawn-heavy work.
-- `pre_state_b64` is `null`: there is no SQLite snapshot for Postgres (see CONTRACT_GAP).
+- Everything listed under "Not seen by the tracer".
+- SQL: only PostgreSQL has a proxy. An app that opens its own connection directly to Postgres, bypassing the
+  proxy, has no `sql` oracle. Bind parameters and `COPY` data are not checked. The limits of the taint check
+  itself are in [`shadow/README.md`](../shadow/README.md).
+- App constants are approximate. Without them, an input equal to an identifier in a statement fires (a false
+  positive). Apps whose SQL text is assembled at run time or stored compressed, and executables above the size
+  limit, contribute no constants.
+- `owner` sees only markers in the response body; a leak that never reaches the body is invisible to it. No
+  group-shared access.
+- Memory-only effects (caches, globals) are invisible.
+- Background work of the app that happens while a request window is open is attributed to that request.
+- An app that resolves host names per request fires `net`.
+- In attach mode the app listens in the shared network namespace. If it binds `0.0.0.0`, the gateway could
+  reach it without passing through the sidecar; the fleet sets the variable named by `app.bind_env` to
+  `127.0.0.1` in clones, which only helps if the app honours it.
+- Attach mode stops the traced processes on every system call (`--seccomp-bpf` applies only to processes
+  `strace` starts), which costs most on work that spawns processes.
+- An app that refuses to run traced cannot be observed.
+- One request at a time per clone.
+- A clone whose tracer died keeps answering 503 with `inconclusive` until its containers are replaced.
+- Tested on one Node app and one statically linked C app.
 
-Reasoned, not tested:
-- In-process databases (SQLite, H2, embedded KV) produce no SQL oracle; their file is opened at startup
-  (before attach or during warm-up), so they are invisible. Only Postgres has a proxy (no MySQL etc.).
-- Memory-only effects (caches, globals, in-process privilege changes) are invisible; only `owner` (response body)
-  sees data leaks that touch no syscall/SQL.
-- io_uring opens/connects bypass the traced syscalls (Docker's default seccomp profile blocks `io_uring_setup`, so
-  this matters only for containers run with a custom profile). `open_by_handle_at` (needs CAP_DAC_READ_SEARCH) is not
-  traced; `mmap` of an already-open fd is not an open; `stat`/`readlink`/`unlink`/`rename` are not traced (no `file`
-  oracle for existence probes, deletes or writes through an fd opened during warm-up).
-- Background work of the app (timers, job queues) that happens during a request window is attributed to that
-  request: possible false `file`/`proc`/`net` events, and statements (harmless unless they contain request inputs).
-- Apps that resolve hostnames per request fire `net` (DNS); apps requiring TLS to Postgres (`sslmode=require`)
-  cannot connect, because the proxy refuses SSL; apps that open their own direct connection to Postgres bypass the
-  proxy (no SQL oracle) and are only cut by `WITH (FORCE)` at reset.
-- Apps that refuse to run traced (anti-debug checks on `TracerPid`) or ptrace themselves cannot be observed.
-- In attach mode the app listens in the shared network namespace: if it binds `0.0.0.0` the gateway could reach it
-  bypassing the sidecar; bind it to loopback (the demos do).
-- Launch mode with an interpreted app: modules imported lazily on a request path not covered by warm-up fire
-  `file` (same as the Python wrapper's warm-up limit).
-- Only one request at a time is judged; a second sidecar per app is not supported.
-
-## CONTRACT_GAP
-
-- product.md §6 says the clone container's entrypoint is the sidecar, starting the app as a traced child. That
-  needs Python and strace *inside the app's image*; with the app's own unmodified image this is only possible as a
-  second container sharing PID/network namespaces (attach mode, needs `CAP_SYS_PTRACE` on the sidecar, which
-  contradicts the clone rule `--cap-drop ALL` in README §8). Both modes are implemented; fleet must pick one.
-- Evidence `pre_state_b64` is defined as SQLite bytes; there is no Postgres equivalent (`null` today).
-- The profile's `ensure_user(conn, uid, role)` is specified with a sqlite3 connection; here `conn.execute(sql, params)`
-  uses Postgres `$n` placeholders.
-- Per-clone Postgres: who starts it, how the `seed` template is produced (product.md §4 only covers SQLite), and on
-  which network (clones may reach only the gateway; the clone's Postgres must be reachable from the sidecar).
-- Requester identity for requests without `x-imm-uid` under `auth.kind` jwt-hs256 / introspect: the sidecar needs
-  the same auth facts as the gateway (today: `profile.identify`, or an immune-token with `APP_SECRET`).
+The project-wide list is in [`docs/limites.md`](../docs/limites.md); where the sidecar sits in the system is in
+[`docs/arquitectura.md`](../docs/arquitectura.md).

@@ -249,12 +249,23 @@ def through_gateway(cfg, inc: dict, gateway_admin, manifest: dict | None = None)
     rid, route = _find_route(cfg, session, path, since, time.time() + cfg.verify_wait_s)
     if not rid:
         return False, "request sent (status %d) but not found on the bus or in the recordings" % r.status_code
-    forwarded = None
-    try:
-        forwarded = gateway_admin.prodlog(rid).get("forwarded")
-    except Exception as e:  # noqa: BLE001
-        log.warning("prodlog: %s", e)
-    if route == "prod" and forwarded is not False:
-        return True, "fresh session %s: %s forwarded to prod (status %d, rid %s)%s" % (
-            session.split(":")[0], path, r.status_code, rid[:8], " (canary id replaced by a non-canary one)" if swapped else "")
-    return False, "fresh session: route %s, forwarded=%s (status %d) — still diverted" % (route, forwarded, r.status_code)
+    if route != "prod":
+        return False, "fresh session: route %s (status %d) — still diverted" % (route, r.status_code)
+    # the bus says "prod"; the gateway's own log must confirm the request really left for prod. An answer
+    # that is missing or unreadable is "unknown", which is not a verification.
+    for attempt in range(3):
+        try:
+            forwarded = gateway_admin.prodlog(rid).get("forwarded")
+            break
+        except Exception as e:  # noqa: BLE001
+            log.warning("prodlog (try %d): %s", attempt + 1, e)
+            err = e
+            time.sleep(0.3)
+    else:
+        return False, "not verified: routed to prod on the bus, but the gateway's prod log could not be read (%s)" % err
+    if forwarded is not True:
+        return False, ("fresh session: route prod, forwarded=%s (status %d) — %s" % (
+            forwarded, r.status_code, "still diverted" if forwarded is False else "not verified: the gateway's prod "
+            "log does not say whether the request was forwarded"))
+    return True, "fresh session %s: %s forwarded to prod (status %d, rid %s)%s" % (
+        session.split(":")[0], path, r.status_code, rid[:8], " (canary id replaced by a non-canary one)" if swapped else "")

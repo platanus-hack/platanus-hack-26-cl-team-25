@@ -45,4 +45,14 @@ def test_served_with_csp(tmp_path):
         assert "default-src 'self'" in r.headers["content-security-policy"]
         assert "unsafe-inline" not in r.headers["content-security-policy"]
     assert "text/html" in c.get("/").headers["content-type"]
-    assert "Sistema inmune" in c.get("/").text
+    page = c.get("/").text
+    assert "<title>Inmune</title>" in page and "<h1>Inmune</h1>" in page and "Sistema inmune" not in page
+
+
+def test_attack_panel_is_hidden_until_the_page_has_attack_events():
+    html = (STATIC / "index.html").read_text()
+    panel = re.search(r'<section class="block" id="panel-attacks"([^>]*)>(.*?)</section>', html, re.S)
+    assert "hidden" in panel.group(1)                       # nothing in a live run emits attack.attempt
+    assert 'class="empty"' not in panel.group(2)            # and there is no empty placeholder
+    app = (STATIC / "app.js").read_text()
+    assert "show($('panel-attacks'), S.showAttacks(st));" in app

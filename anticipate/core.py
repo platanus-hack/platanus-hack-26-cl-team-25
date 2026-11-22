@@ -80,6 +80,7 @@ class Review:
     seconds: float = 0.0
     model: str = ""
     denials: list = field(default_factory=list)
+    patched: dict = field(default_factory=dict)   # scope path -> file text after the model's edits
 
 
 def _workspace(repo: str, target: dict) -> tuple[str, str]:
@@ -134,10 +135,8 @@ def review(repo: str, target: dict, model: str | None = None, timeout: float | N
                              timeout=timeout or float(os.environ.get("ANTICIPATE_TIMEOUT_S", "900")), model_name=model)
         diff = _wgit(work, os.path.join(tmp, "git"), "diff", "--no-color")
         patched = {rel: open(os.path.join(work, rel)).read() for rel in target["scope"]}
-        r = Review(ok=res.ok, diff=diff, findings=parse_findings(res.text), notes=res.text if res.ok else res.reason,
-                   seconds=res.seconds, model=model, denials=res.denials)
-        r.patched = patched  # type: ignore[attr-defined]
-        return r
+        return Review(ok=res.ok, diff=diff, findings=parse_findings(res.text), notes=res.text if res.ok else res.reason,
+                      seconds=res.seconds, model=model, denials=res.denials, patched=patched)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -367,7 +366,8 @@ def run(target_ref: str, model: str | None = None, out_dir: str | None = None, l
     log("[2/5] baseline check of the released code")
     base = run_check(t, show(repo, t["vulnerable_ref"], f), "vulnerable")
     log(f"      {t['vulnerable_ref']}: {base.get('passed')}/{base.get('total')} properties hold")
-    log(f"[3/5] confined review by the model (not told which advisory) — this can take a few minutes")
+    log("[3/5] confined review by the model (told the product, version, area and defect class; not the advisory "
+        "id or the fix) — this can take a few minutes")
     rv = review(repo, t, model=model)
     log(f"      model {rv.model}: {len(rv.findings)} finding(s), diff {len(rv.diff.splitlines())} lines, {rv.seconds:.0f}s")
     log("[4/5] checking the suggested patch and the official one")

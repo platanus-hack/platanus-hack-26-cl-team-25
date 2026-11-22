@@ -3,15 +3,15 @@
 Each scenario is ``(client, manifest) -> list[step]`` with
 ``step = {"step", "method", "path", "status", "body"}``.
 
-Scenarios are meant to run in list order on ONE client over a freshly seeded
-database with ``APP_NOW`` frozen.  They use only the HTTP interface (no import
+The legit gate runs each scenario with its own client on its own copy of a
+freshly seeded database with ``APP_NOW`` frozen (pipeline/runner_entry.py,
+job_scenarios); sim/tests runs them in list order on one client.  They use only the HTTP interface (no import
 of the app), so they work against any release.  Tokens are replaced by
 ``<token>``; binary bodies by a ``{"binary_sha256", "bytes"}`` summary.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from urllib.parse import quote
 

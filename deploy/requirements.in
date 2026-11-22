@@ -1,11 +1,11 @@
 fastapi
 uvicorn
 httpx
+pyflakes
 pytest
 pytest-asyncio
 pytest-timeout
 pyyaml
-sqlglot
 sqlparse
 jsonschema
 docker

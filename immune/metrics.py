@@ -15,7 +15,7 @@ processed one at a time, so it is waiting time, not work.
 For an incident found by the class self-audit (incident.opened origin "audit", pipeline/audit.py) t0 is its
 audit.finding event: no request for it ever reached the gateway.
 
-Detection (docs/plan-construccion.md §9d), from the bus and the gateway recording (deduplicated by rid):
+Detection (docs/resultados.md), from the bus and the gateway recording (deduplicated by rid):
   detonated        requests the gateway sent to a shadow clone (verdict clean | oracle | inconclusive)
   clean share      detonations whose verdict was clean: the cost of suspicion (the request went to prod anyway)
   incidents by origin   live (a request through the gateway) vs audit (found by the self-audit)
@@ -54,12 +54,15 @@ def incidents(events: list[dict]) -> list[dict]:
             t0 = found.get(inc, e["ts"]) if origin == "audit" else fired.get(d.get("evidence_rid"), e["ts"])
             # opened again = a restart or a retry after a transient failure: the last run is the one timed,
             # the time lost before it shows in the queue column (t0 never moves)
-            runs = rows[inc]["runs"] + 1 if inc in rows else 1
+            prev = rows.get(inc)
+            runs = prev["runs"] + 1 if prev else 1
             rows[inc] = {"incident": inc, "class": d.get("vuln_class"), "route": d.get("route"), "opened": e["ts"],
                          "t0": t0, "attempts": 0, "origin": origin, "parent": d.get("parent"), "runs": runs,
                          "method": d.get("method"), "param": (d.get("param") or {}).get("name")}
+            if prev and "rule" in prev:
+                rows[inc]["rule"] = prev["rule"]      # still contained by the rule of the earlier run
             cur = inc
-        r = rows.get(inc) or (rows.get(cur) if t in ("upstream.switched", "deploy.done", "deploy.started") else None)
+        r = rows.get(inc) or (rows.get(cur) if t == "upstream.switched" else None)
         if not r:
             continue
         if t == "rule.active":
@@ -72,8 +75,6 @@ def incidents(events: list[dict]) -> list[dict]:
             r["merged"] = e["ts"]
         elif t == "upstream.switched" and "merged" in r:
             r.setdefault("in_prod", e["ts"])
-        elif t == "deploy.done":
-            r["deploy_done"] = e["ts"]
         elif t == "verify.result":
             r["verified"] = e["ts"]; r["blocked"] = d.get("exploit_blocked_on_prod")
         elif t == "incident.closed":
@@ -84,12 +85,15 @@ def incidents(events: list[dict]) -> list[dict]:
             out.append({k: r.get(k) for k in ("incident", "class", "route", "outcome", "origin", "parent", "method", "param")})
             continue
         s = r["opened"]                       # start of work (excludes queue)
+
+        def since(k):                         # None: the event never came; 0: it came before this run started
+            return max(0.0, r[k] - s) if k in r else None
         out.append({"incident": r["incident"], "class": r["class"], "route": r["route"], "outcome": "patched",
                     "origin": r["origin"], "parent": r["parent"], "method": r["method"], "param": r["param"],
                     "attempts": r["attempts"], "source": r.get("source"), "blocked": r.get("blocked"),
                     "runs": r["runs"],
                     "queue": r["opened"] - r["t0"],
-                    "to_rule": r["rule"] - s, "to_diff": r["diff"] - s, "to_merged": r["merged"] - s,
+                    "to_rule": since("rule"), "to_diff": since("diff"), "to_merged": r["merged"] - s,
                     "to_prod": r["in_prod"] - s, "to_verified": r.get("verified", r["in_prod"]) - s,
                     "identified_to_prod_wall": r["in_prod"] - r["t0"]})
     return out
@@ -162,7 +166,7 @@ def detection_lines(d: dict) -> list[str]:
 def summary(rows: list[dict]) -> dict:
     ok = [r for r in rows if r.get("outcome") == "patched"]
     def agg(k):
-        v = sorted(r[k] for r in ok)
+        v = sorted(r[k] for r in ok if r.get(k) is not None)
         return {"n": len(v), "median": st.median(v), "min": v[0], "max": v[-1], "mean": st.mean(v)} if v else {}
     return {"patched": len(ok), "not_patched": len(rows) - len(ok),
             **{k: agg(k) for k in ("queue", "to_rule", "to_diff", "to_merged", "to_prod", "to_verified")}}
@@ -195,7 +199,8 @@ def main(argv=None) -> int:
         if r.get("outcome") != "patched":
             print(f"{r['incident']:10} {str(r['class']):10} {org:14} -- {r.get('outcome')}  {where}")
             continue
-        print(f"{r['incident']:10} {r['class']:10} {org:14} {r['attempts']:>3} {r['queue']:6.1f} {r['to_rule']:6.1f} {r['to_diff']:6.1f} "
+        rule, diff = ("%6s" % "-" if r[k] is None else "%6.1f" % r[k] for k in ("to_rule", "to_diff"))
+        print(f"{r['incident']:10} {r['class']:10} {org:14} {r['attempts']:>3} {r['queue']:6.1f} {rule} {diff} "
               f"{r['to_merged']:6.1f} {r['to_prod']:6.1f} {r['to_verified']:6.1f}  {where}")
     s = summary(rows)
     if s["patched"]:

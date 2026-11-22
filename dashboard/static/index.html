@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark">
-<title>Sistema inmune - en vivo</title>
+<title>Inmune</title>
 <link rel="preload" href="/static/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -13,10 +13,12 @@
 <header class="bar">
   <div class="brand">
     <svg class="mark" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 1.8 16.6 4.3v5.1c0 4.1-2.7 7.2-6.6 8.8-3.9-1.6-6.6-4.7-6.6-8.8V4.3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m7 10.1 2.2 2.2L13.2 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    <h1>Sistema inmune</h1>
-      </div>
+    <h1>Inmune</h1>
+  </div>
   <div class="bar-right">
     <div class="chip" id="upstream" hidden><span class="k">Producción</span><b id="up-addr"></b><span class="k" id="up-rel"></span></div>
+    <div class="chip" id="run" hidden><span class="k">Corrida</span><b id="run-id"></b></div>
+    <div class="chip flag" id="scripted" hidden>DEMO · datos guionados</div>
     <div class="conn" id="conn" data-state="off"><span class="dot"></span><span id="conn-text">Conectando</span><span class="k" id="conn-info"></span></div>
   </div>
 </header>
