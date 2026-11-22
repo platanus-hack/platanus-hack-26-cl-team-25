@@ -338,10 +338,23 @@ class Gateway:
 
     def expire_rules(self):
         now = time.time()
-        for rid, r in list(self.rules.items()):
-            if r.expires <= now:
-                del self.rules[rid]
-                self.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "ttl"})
+        gone = [rid for rid, r in self.rules.items() if r.expires <= now]
+        for rid in gone:
+            del self.rules[rid]
+            self.bus.publish(events.RULE_EXPIRED, {"id": rid, "reason": "ttl"})
+        if gone:
+            self.save_state()
+
+    def _rule_count(self, ctx: "Ctx", key: str):
+        for rid in ctx.res.rule_hit:
+            rule = self.rules.get(rid)
+            if rule is not None:
+                rule.stats[key] += 1
+
+    def _rule_deny(self, ctx: "Ctx") -> "Upstream":
+        """A deny with no oracle fired: counted per rule so a rule that hurts legitimate traffic shows up."""
+        self._rule_count(ctx, "denied")
+        return self.deny(ctx)
 
     # ---------------------------------------------------------- identity
     def identify(self, hmap: dict) -> Who:
@@ -543,7 +556,7 @@ class Gateway:
                     elif up.verdict == wire.VERDICT_CLEAN:
                         ctx.would = "prod"
                     else:
-                        ctx.would = "deny" if ctx.res.rule_hit else "prod"
+                        ctx.would = "deny" if ctx.res.rule_strict else "prod"
                     if ctx.res.cls == EVIDENCE:
                         ctx.would = "shadow_l2"
                 except Exception as e:
@@ -620,11 +633,12 @@ class Gateway:
     async def detonate(self, ctx: Ctx) -> Upstream:
         builtin = is_builtin_rule(ctx.res.reasons)
         fail_closed = bool(ctx.res.rule_hit) or builtin or _high_signal(ctx.res.reasons)
+        self._rule_count(ctx, "hits")
         clone = await self.pool.acquire(CLONE_WAIT_S)
         if clone is None:
             await self._evict_oldest(ctx)
             ctx.verdict = "no_clone"
-            return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
+            return self._rule_deny(ctx) if fail_closed else await self.to_prod(ctx)
         try:
             async with clone.lock:
                 up = await self.to_clone(ctx, clone, "L1")
@@ -632,11 +646,12 @@ class Gateway:
             log.warning("clone %s failed: %s", clone.id, e)
             await self.pool.retire(clone)
             ctx.verdict = "no_clone"
-            return self.deny(ctx) if fail_closed else await self.to_prod(ctx)
+            return self._rule_deny(ctx) if fail_closed else await self.to_prod(ctx)
         ctx.verdict = up.verdict
         # L1: the wrapper already reset the clone, whatever the verdict
         await self.pool.release(clone)
         if up.verdict == wire.VERDICT_ORACLE:
+            self._rule_count(ctx, "oracle")
             if ctx.who.trusted:
                 return self.deny(ctx)
             self._mark_captive(ctx, "oracle")      # lazy: no clone held until the next request
@@ -646,7 +661,10 @@ class Gateway:
             return self.deny(ctx)
         if up.verdict == wire.VERDICT_CLEAN:
             return await self.to_prod(ctx)
-        return self.deny(ctx) if ctx.res.rule_hit else await self.to_prod(ctx)   # inconclusive / unknown
+        # inconclusive / unknown (401, 404, >= 500 with no oracle). A rule denies it unless it is a
+        # `param_present` rule and the value is inside its grammar: a clone holds synthetic credentials, so a
+        # real user's login is always a 401 there, and denying that would take the endpoint down.
+        return self._rule_deny(ctx) if ctx.res.rule_strict else await self.to_prod(ctx)
 
     # -- step 8, evidence without detonation: mark captive, bind now, replay in L2
     async def evidence(self, ctx: Ctx) -> Upstream:

@@ -107,6 +107,52 @@ def test_rules():
     assert c("POST", "/api/orders", body=body, ctype="application/json", rules=[jr]).rule_hit == ["j"]
     with pytest.raises(ValueError):
         Rule({"id": "x", "method": "GET", "route": "/a", "scope": "param", "param": None, "ttl_s": 5})
+    with pytest.raises(ValueError):
+        Rule({"id": "x", "method": "GET", "route": "/a", "scope": "param_present", "param": None})
+    # a grammar violation, or a rule on the whole route, denies when the clone is inconclusive
+    assert r.rule_strict == ["r"]
+    assert c("GET", "/api/orders/3", who=TRUSTED, rules=[allr]).rule_strict == ["a"]
+
+
+def test_param_present_rule():
+    """Every request that carries the parameter is suspect; the grammar only marks the strict ones."""
+    rule = Rule({"id": "p", "method": "GET", "route": "/api/products", "param": {"in": "query", "name": "q"},
+                 "scope": "param_present"})
+    assert rule.ttl_s is None and rule.to_dict()["expires_in"] is None
+    r = c("GET", "/api/products", "q=usb", who=TRUSTED, rules=[rule])
+    assert r.cls == SUSPECT and r.rule_hit == ["p"] and r.rule_strict == []
+    # letters, digits and spaces only: clean for the base classifier, still detonated by the rule
+    r = c("GET", "/api/products", "q=1%20UNION%20SELECT%20email%20FROM%20users", who=TRUSTED, rules=[rule])
+    assert r.rule_hit == ["p"] and r.rule_strict == []
+    r = c("GET", "/api/products", "q=a%27--", who=TRUSTED, rules=[rule])
+    assert r.rule_hit == ["p"] and r.rule_strict == ["p"]
+    assert c("GET", "/api/products", "", who=TRUSTED, rules=[rule]).rule_hit == []      # parameter absent
+    assert c("GET", "/api/products", "q=", who=TRUSTED, rules=[rule]).rule_hit == ["p"]  # present, empty
+    jr = Rule({"id": "j", "method": "POST", "route": "/api/login", "param": {"in": "json", "name": "email"},
+               "scope": "param_present"})
+    body = json.dumps({"email": "ana@tienda.example", "password": "x"}).encode()
+    assert c("POST", "/api/login", body=body, ctype="application/json", rules=[jr]).rule_hit == ["j"]
+    assert c("POST", "/api/login", body=b'{"password":"x"}', ctype="application/json", rules=[jr]).rule_hit == []
+
+
+def test_identity_untrusted_rule_spares_authenticated_callers():
+    """Missing-auth containment (CWE-306): a scope=all rule detonates anonymous/untrusted callers only."""
+    rule = Rule({"id": "a", "method": "GET", "route": "/api/products", "scope": "all", "identity": "untrusted"})
+    assert c("GET", "/api/products", who=ANON, rules=[rule]).rule_hit == ["a"]
+    assert c("GET", "/api/products", who=UNTRUSTED, rules=[rule]).rule_hit == ["a"]
+    assert c("GET", "/api/products", who=TRUSTED, rules=[rule]).rule_hit == []   # authenticated traffic untouched
+    # without the qualifier the same rule hits every identity
+    plain = Rule({"id": "b", "method": "GET", "route": "/api/products", "scope": "all"})
+    assert c("GET", "/api/products", who=TRUSTED, rules=[plain]).rule_hit == ["b"]
+
+
+def test_rule_without_ttl_never_expires_and_restores_its_clock():
+    forever = Rule({"id": "f", "method": "GET", "route": "/a", "scope": "all"}, now=100.0)
+    assert forever.expires == float("inf") and forever.to_store() == {"rule": forever.raw, "expires": None}
+    timed = Rule({"id": "t", "method": "GET", "route": "/a", "scope": "all", "ttl_s": 60}, now=100.0)
+    assert timed.expires == 160.0
+    back = Rule(timed.to_store()["rule"], now=150.0, expires=timed.to_store()["expires"])
+    assert back.expires == 160.0     # a restart does not extend a ttl
 
 
 def test_unknown_path_is_clean_and_head_maps_to_get():

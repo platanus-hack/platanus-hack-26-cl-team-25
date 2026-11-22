@@ -23,6 +23,7 @@ Behaviour notes
 
 - Session key: `uid:<n>` for a prod token, else `gwsid:<cookie>`; a missing/invalid `gwsid` is minted and set on the response.
 - Captivity is lazy (contract v1.1): an L1 oracle marks the session captive and frees the clone; the session's next request binds a clone (evicting the oldest clone-bound captive if none is free) and uses L2. Evidence (canary/honeytoken) marks captive and binds immediately. An evicted session stays captive and rebinds on its next request.
+- Rules (`classifier.Rule`): scopes `param`, `param_present`, `all`; no expiry without `ttl_s`; persisted to `RULES_PATH` (default `rules.json` next to `RECORD_PATH`) and reloaded at start; per-rule `stats` in `GET /_admin/rules`. An inconclusive clone denies only on a strict match (`Result.rule_strict`).
 - Suspect with no free clone: evict the oldest clone-bound captive, then deny if a rule matched or the request is high-signal (`schema:`/`grammar:`/`dup_query:` reasons), else prod.
 - An untrusted identity whose cookie session is captive stays captive even if it starts sending a prod token. Trusted identities are never routed to a clone's output.
 - Clone requests carry `x-imm-uid/role` whenever the identity came from a prod token (L1 and L2), since prod tokens do not verify inside a clone.

@@ -169,8 +169,9 @@ class Pipeline:
             log.warning("retry pass failed: %s", e)
 
     def keep_rules(self) -> int:
-        """A rule has a TTL so a forgotten one cannot outlive its reason. While its incident is closed without
-        a deployed fix the reason stands: renew it before it expires, and put it back if the gateway lost it."""
+        """A rule lives until its incident's fix is deployed (no TTL by default). While the incident is closed
+        without a deployed fix the reason stands: put the rule back if the gateway lost it (e.g. a restart that
+        did not restore state), and, if a TTL was configured, renew it before it expires."""
         with self.state.lock:
             open_rules = [(i["incident"], dict(i["rule"])) for i in self.state.data["incidents"].values()
                           if i.get("status") == "closed" and i.get("outcome") == "rule_only"
@@ -181,9 +182,12 @@ class Pipeline:
         renewed = 0
         for iid, rule in open_rules:
             cur = active.get(rule.get("id"))
-            ttl = float(rule.get("ttl_s") or self.cfg.rule_ttl_s)
-            if cur is not None and float(cur.get("expires_in") or 0) > ttl / 4:
-                continue
+            if cur is not None:
+                ttl_s = rule.get("ttl_s") or self.cfg.rule_ttl_s
+                left = cur.get("expires_in")
+                # a no-ttl rule never expires; a timed one is renewed only in its last quarter
+                if ttl_s is None or left is None or float(left) > float(ttl_s) / 4:
+                    continue
             for k in ("created", "expires_in"):
                 rule.pop(k, None)
             self.gw.post_rule(rule)

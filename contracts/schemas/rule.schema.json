@@ -1,10 +1,12 @@
 {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Gateway rule",
- "type":"object","required":["id","method","route","scope","ttl_s"],
+ "type":"object","required":["id","method","route","scope"],
  "properties":{
   "id":{"type":"string"},"incident":{"type":["string","null"]},
   "method":{"type":"string"},"route":{"type":"string","description":"OpenAPI path template, e.g. /api/orders/{order_id}"},
   "param":{"type":["object","null"],"required":["in","name"],
     "properties":{"in":{"enum":["query","path","json","form","header"]},"name":{"type":"string","description":"for json: dotted path"}}},
-  "grammar":{"type":["string","null"],"description":"immune_contracts.grammar regex; values NOT matching are suspect. null with scope=all."},
-  "scope":{"enum":["param","all"],"description":"param: only values outside grammar. all: every request on the route."},
-  "ttl_s":{"type":"integer","minimum":1},"created":{"type":"number"}}}
+  "grammar":{"type":["string","null"],"description":"immune_contracts.grammar regex. scope=param: values NOT matching are suspect. scope=param_present: values NOT matching are denied when the clone is inconclusive. null with scope=all."},
+  "scope":{"enum":["param","param_present","all"],"description":"param: only values outside grammar. param_present: every request that carries the parameter, whatever its value. all: every request on the route."},
+  "identity":{"enum":["untrusted"],"description":"optional. untrusted: the rule applies only to anonymous/untrusted callers, not authenticated ones (missing-authentication containment, CWE-306). Absent: every identity."},
+  "ttl_s":{"type":["integer","null"],"minimum":1,"description":"null or absent: the rule lives until it is deleted (patch verified, or by hand)."},
+  "created":{"type":"number"}}}

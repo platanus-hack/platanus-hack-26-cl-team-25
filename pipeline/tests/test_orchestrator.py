@@ -201,7 +201,7 @@ def test_failure_closes_rule_only_and_loop_continues(env, events):
     env["fleet"].srv.stop()                          # fleet down too
     p.step()
     assert p.state.incident(a)["outcome"] == "rule_only"
-    assert p.state.incident(a)["rule"]["scope"] == "param"   # built-in rule after derive_rule failed
+    assert p.state.incident(a)["rule"]["scope"] == "param_present"   # built-in rule after derive_rule failed
     p.step()
     assert p.state.incident(b)["status"] == "closed"
 
@@ -389,12 +389,10 @@ def test_rule_of_an_unpatched_incident_is_renewed_and_restored(env, events):
     p.step()
     inc = p.state.incident(iid)
     rid = inc["rule"]["id"]
-    env["gw"].rules[rid]["expires_in"] = 3000.0                       # plenty left: untouched
-    assert p.keep_rules() == 0
-    env["gw"].rules[rid]["expires_in"] = 30.0                         # about to expire
-    assert p.keep_rules() == 1 and "expires_in" not in env["gw"].rules[rid]
-    del env["gw"].rules[rid]                                          # the gateway lost it
-    assert p.keep_rules() == 1 and rid in env["gw"].rules
+    assert env["gw"].rules[rid].get("expires_in") is None             # no ttl: it lives until the patch
+    assert p.keep_rules() == 0                                        # present and never expiring: untouched
+    del env["gw"].rules[rid]                                          # the gateway lost it (e.g. a restart)
+    assert p.keep_rules() == 1 and rid in env["gw"].rules             # restored
     # a patched incident's rule is never put back
     q = make(env)
     other = q.enqueue(events["traversal"])
