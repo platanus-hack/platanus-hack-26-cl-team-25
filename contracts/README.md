@@ -254,6 +254,8 @@ Every private value in the shadow database embeds its owner's marker: `MK` follo
 | `legit_users`, `admin` | credentials of seeded users | scenarios, `sim/legit.py`, class audit |
 | `seed_max_<table>_id` | integer | scenarios (for the demo: `seed_max_order_id`) |
 
+Each event: `{"oracle": kind, "detail": {...}, "stack": [{"file": "<path relative to the release>", "line": n, "func": "..."}]}` with only frames inside the victim package. Out-of-process oracles (`sidecar/`) fill `stack` when a frame source is configured (native `strace -k` frames resolved with `addr2line`, the servlet entry point of a Java app, PHP Xdebug traces: `sidecar/README.md` *Where in the app's code*); without one it is `[]`. `detail` for `sql`: `{statement, input, param}`; `file`: `{path, realpath}`; `owner`: `{marker_owner, requester}`.
+
 `<runtime>/data/markers.json` maps each marker to its owner uid: `{"MK4F7Q2ZP0XA": 3, ...}`.
 The gateway reloads the manifest when the file's modification time changes.
 
@@ -326,12 +328,12 @@ separators) and signed over those bytes.
 
 ### 5.3 Oracles
 
-Kinds are the constants `wire.ORACLE_SQL`, `wire.ORACLE_FILE`, `wire.ORACLE_PROC`, `wire.ORACLE_NET` and
-`wire.ORACLE_OWNER`. `contracts/schemas/evidence.schema.json` and `contracts/schemas/poc.schema.json` also
-accept the kinds `acl`, `mfa` and `xss`. They have no constant in `immune_contracts/wire.py` and no
-implementation in `shadow/` or `sidecar/`: only a profile's `extra_oracles` hook in the sidecar can emit them,
-and the only profile that does is `examples/openemr/overlay/.immune/openemr_identity.py`. The pipeline maps
-them to the class `other` (section 9).
+Kinds are the constants `wire.ORACLE_SQL`, `wire.ORACLE_FILE`, `wire.ORACLE_PROC`, `wire.ORACLE_NET`,
+`wire.ORACLE_OWNER`, the six input → effect kinds (`wire.ORACLE_SSRF`, `…_CMDI`, `…_SSTI`, `…_DESER`, `…_XXE`,
+`…_REDIRECT`) and `wire.ORACLE_XSS`. `contracts/schemas/evidence.schema.json` and `contracts/schemas/poc.schema.json`
+also accept the kinds `acl` and `mfa`, which have no constant in `immune_contracts/wire.py` and no implementation in
+`shadow/` or `sidecar/`: only a profile's `extra_oracles` hook in the sidecar can emit them, and the only profile that
+does is `examples/openemr/overlay/.immune/openemr_identity.py`. The pipeline maps those to the class `other` (section 9).
 
 In-process implementation (`shadow/`):
 
@@ -342,6 +344,26 @@ In-process implementation (`shadow/`):
 | `proc` | a process is spawned during the request | | `shadow/instrument.py` |
 | `net` | an outbound connection or name resolution happens during the request | the wrapper's own evidence push | `shadow/instrument.py` |
 | `owner` | the response body carries the marker of an owner other than the requester, and the requester is not admin | the path is under `public_paths()`, unless markers of two or more foreign owners appear or another oracle fired in the same request; the marker owner shares a group with the requester on a members-scoped route | `shadow/core.py`, `owner_events` |
+| `ssrf` | a `net` event whose destination (address and port, or the looked-up name) is a host the request's input named; a loopback destination only if the request named it and the app did not use it in warm-up | an egress the request did not name stays a plain `net` | `shadow/effects.py` |
+| `cmdi` | a `proc` event whose command line carries an input of the request (≥ 3 chars; a shorter one only as a whole argument word) | a spawn the request's input is not part of stays `proc` | `shadow/effects.py` |
+| `ssti` | the response holds the product (≥ 1000) of a `{{ a*b }}`-style expression of the request and not the expression itself; or a `proc`/`file` event carries a string literal written inside such an expression | the app echoes the expression unevaluated, or the product was already in the input | `shadow/effects.py` |
+| `deser` | a `proc` event while an input is a serialized object (pickle/Java/PHP/.NET/Ruby/YAML/node-serialize, text formats also inside base64); a `net`/`file` event only if the decoded object names that host/path | ordinary base64 | `shadow/effects.py` |
+| `xxe` | a `file`/`net` event for the URI of an external entity (`<!ENTITY … SYSTEM>`, external DTD, `php://filter`) declared in the request's XML body | an XML body without an external entity | `shadow/effects.py` |
+| `redirect` | a 3xx whose `Location` host differs from the request's host and appears in an input | relative targets, the same host, an external host the request did not name | `shadow/effects.py` |
+| `xss` | an input that carries real markup (a tag, an event handler, a `javascript:` URL) appears verbatim and unescaped in an HTML response — the request's own input (reflected) or one an earlier request of the same captive session stored (stored) | the value is only there HTML-escaped; the response is not HTML; the value carries no markup | `shadow/taint.py` |
+
+`ssrf … redirect` are *input → effect* oracles (`shadow/effects.py`, one function run by both the in-process engine and
+the sidecar): they upgrade a generic `net`/`proc`/`file` observation, or read the response, only when the request's
+own input provably reached the effect; the event keeps the channel's `detail` plus `input`, `param` and `location`. A
+request whose input does not reach the effect keeps the generic oracle. When several fire, the incident's class is the
+first of `classes.PREFERENCE` (the cause first: a command injection also opens the files its spawned process reads).
+
+`xss` and second-order `sql` are *multi-step (stored)* oracles (`shadow/taint.py`): a captive `L2` session remembers
+every input value each request introduced, and a later request fires when a stored value breaks out of a literal in a
+statement it runs (second-order SQL injection, a `sql` event with `detail.second_order` and the planting request in
+`origin`) or is reflected unescaped in its HTML (stored `xss`). The incident is attributed to the request that planted
+the value: its request is what the positive property replays and where the parameter is, while the `sink` stays the
+firing request's query/render point, and the two steps are kept in the incident's `steps` so the PoC replays both.
 
 Each event is `{"oracle": kind, "detail": {...}, "stack": [{"file", "line", "func"}]}`. `stack` holds only
 frames inside `app.release_paths`, with paths relative to the release root, outermost first and the sink last.

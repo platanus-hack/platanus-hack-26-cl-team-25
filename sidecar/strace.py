@@ -25,6 +25,9 @@ _RESUMED = re.compile(r"^<\.\.\. ([A-Za-z0-9_]+) resumed>\s?")
 _CALL = re.compile(r"^([A-Za-z0-9_]+)\(")
 _UNFINISHED = " <unfinished ...>"
 _RET = re.compile(r"^\s*=\s*(-?\d+|\?|0x[0-9a-f]+)(?:<(.*)>)?(?:\s+([A-Z][A-Z0-9_]+))?")
+# `strace -k` frame, printed under the syscall: " > /app/bin(handler+0x22) [0x1168]"
+_FRAME = re.compile(r"^(?P<path>.*?)(?:\((?P<sym>[^()]*)\))? ?\[0x(?P<addr>[0-9a-fA-F]+)\]\s*$")
+_SYM = re.compile(r"^(?P<func>.*?)\+0x(?P<off>[0-9a-fA-F]+)$")
 
 
 @dataclass
@@ -36,6 +39,10 @@ class Syscall:
     retval: int | None  # None for '?'
     errno: str | None
     retpath: str | None  # fd decoration of the return value (-y), e.g. the opened file's path
+    # Native call stack (``strace -k``), innermost first: (binary path, function, offset in function, address).
+    # The frame lines arrive AFTER the syscall line, so this list is filled in place by Parser.feed and the
+    # Observation built from the syscall shares it: read it when the event is built, not when it is observed.
+    frames: list = field(default_factory=list)
 
 
 @dataclass
@@ -43,6 +50,7 @@ class Observation:
     kind: str           # file | exec | fork | net
     pid: int
     detail: dict = field(default_factory=dict)
+    frames: list = field(default_factory=list)   # shared with the Syscall (see above)
 
 
 def unquote(s: str) -> str:
@@ -121,6 +129,22 @@ def split_call(text: str):
     return None
 
 
+def parse_frame(line: str):
+    """' > /app/bin(handler+0x22) [0x1168]' -> ('/app/bin', 'handler', 0x22, 0x1168), or None for the lines
+    strace -k prints that are not frames (' > No DWARF information found', unwinder errors)."""
+    text = line.rstrip("\n")
+    if not text.startswith(" > "):
+        return None
+    m = _FRAME.match(text[3:])
+    if not m:
+        return None
+    func, off = m.group("sym") or "", 0
+    sm = _SYM.match(func)
+    if sm:
+        func, off = sm.group("func"), int(sm.group("off"), 16)
+    return (m.group("path"), func, off, int(m.group("addr"), 16))
+
+
 def _fdpath(arg: str) -> str | None:
     """'AT_FDCWD</usr>' or '17</etc/x>' -> '/usr' / '/etc/x'."""
     k = arg.find("<")
@@ -135,11 +159,18 @@ class Parser:
     def __init__(self, default_pid: int = 0):
         self.default_pid = default_pid
         self.pending: dict[int, str] = {}
+        self.last: Syscall | None = None    # the call whose stack (strace -k) is being printed
         self.dropped = 0  # syscall lines that could not be turned into a Syscall (their observation is lost)
 
     def feed(self, line: str) -> Syscall | None:
         line = line.rstrip("\n")
         if not line:
+            return None
+        if line.startswith(" > "):
+            # a frame of the stack of the syscall printed just before: attach it, it is not a syscall itself
+            fr = parse_frame(line)
+            if fr is not None and self.last is not None:
+                self.last.frames.append(fr)
             return None
         pid = self.default_pid
         m = _PREFIX.match(line)
@@ -169,8 +200,10 @@ class Parser:
             return None
         raw = rm.group(1)
         retval = None if raw == "?" else int(raw, 16) if raw.startswith("0x") else int(raw)
-        return Syscall(pid=pid, name=name, args=args, ret=rest.strip().lstrip("=").strip(),
-                       retval=retval, errno=rm.group(3), retpath=rm.group(2))
+        sc = Syscall(pid=pid, name=name, args=args, ret=rest.strip().lstrip("=").strip(),
+                     retval=retval, errno=rm.group(3), retpath=rm.group(2))
+        self.last = sc
+        return sc
 
 
 _SA_FAMILY = re.compile(r"sa_family=(AF_[A-Z0-9]+)")
@@ -195,6 +228,38 @@ def parse_sockaddr(text: str) -> dict | None:
         abstract = p.startswith("@")
         return {"family": fam, "address": ("@" if abstract else "") + unquote(p.lstrip("@")), "port": 0}
     return {"family": fam, "address": "", "port": 0}
+
+
+_SOCK_PEER = re.compile(r"->\[?([0-9a-fA-F:.]+)\]?:(\d+)\]>?$")
+
+
+def dns_qname(data: bytes) -> str | None:
+    """The question name of a DNS query datagram (header 12 bytes, then length-prefixed labels), else None."""
+    if len(data) < 13:
+        return None
+    labels, i = [], 12
+    while i < len(data):
+        n = data[i]
+        if n == 0:
+            break
+        if n & 0xC0 or i + 1 + n > len(data):       # compression pointer / truncated: not a plain question
+            return None
+        labels.append(data[i + 1:i + 1 + n].decode("ascii", "replace"))
+        i += 1 + n
+    return ".".join(labels).lower() if labels else None
+
+
+def _dns_send(sc: "Syscall") -> dict | None:
+    """A sendto on a socket connected to a resolver (fd decoration ``<UDP:[a:p->10.0.0.2:53]>``): the destination
+    comes from the decoration (the call carries no address) and the question name from the datagram."""
+    if sc.name != "sendto" or len(sc.args) < 2:
+        return None
+    m = _SOCK_PEER.search(sc.args[0])
+    if not m or m.group(2) != "53":
+        return None
+    q = dns_qname(unquote(sc.args[1]).encode("utf-8", "surrogateescape"))
+    fam = "AF_INET6" if ":" in m.group(1) else "AF_INET"
+    return {"family": fam, "address": m.group(1), "port": 53, **({"qname": q} if q else {})}
 
 
 def is_loopback(addr: str) -> bool:
@@ -234,8 +299,8 @@ def observe(sc: Syscall, cwd_of=None, attempts: bool = False) -> Observation | N
         if real.endswith(" (deleted)"):
             real = real[: -len(" (deleted)")]
         if failed:
-            return Observation("file", sc.pid, {"path": raw, "realpath": real, "result": sc.errno})
-        return Observation("file", sc.pid, {"path": raw, "realpath": real})
+            return Observation("file", sc.pid, {"path": raw, "realpath": real, "result": sc.errno}, sc.frames)
+        return Observation("file", sc.pid, {"path": raw, "realpath": real}, sc.frames)
     if name in EXEC_CALLS:
         if sc.retval != 0:
             return None
@@ -245,22 +310,28 @@ def observe(sc: Syscall, cwd_of=None, attempts: bool = False) -> Observation | N
         else:
             path = unquote(sc.args[1]) if len(sc.args) > 1 else ""
             argv_txt = sc.args[2] if len(sc.args) > 2 else ""
-        return Observation("exec", sc.pid, {"path": path, "argv": parse_argv(argv_txt)})
+        return Observation("exec", sc.pid, {"path": path, "argv": parse_argv(argv_txt)}, sc.frames)
     if name in FORK_CALLS:
         if sc.retval is None or sc.retval <= 0:
             return None
         if "CLONE_THREAD" in " ".join(sc.args):
             return None
-        return Observation("fork", sc.pid, {"child": sc.retval, "syscall": name})
+        return Observation("fork", sc.pid, {"child": sc.retval, "syscall": name}, sc.frames)
     if name in NET_CALLS:
         if name == "connect":
             sa = parse_sockaddr(sc.args[1]) if len(sc.args) > 1 else None
         else:
             sa = parse_sockaddr(", ".join(sc.args[1:]))  # sendto dest / sendmsg msg_name; NULL -> None
+        if sa is not None and sa.get("port") == 53 and name == "sendto" and len(sc.args) > 1:
+            q = dns_qname(unquote(sc.args[1]).encode("utf-8", "surrogateescape"))
+            if q:
+                sa["qname"] = q
+        if sa is None:
+            sa = _dns_send(sc)          # connected UDP socket to a resolver: the datagram has the name
         if sa is None:
             return None
         # attempts count, even if they fail (the app tried to reach out)
-        return Observation("net", sc.pid, {"syscall": name, **sa, "result": sc.ret})
+        return Observation("net", sc.pid, {"syscall": name, **sa, "result": sc.ret}, sc.frames)
     return None
 
 

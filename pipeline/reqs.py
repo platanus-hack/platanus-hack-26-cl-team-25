@@ -74,8 +74,18 @@ def get_value(req: dict, param: dict | None, template: str | None = None):
             if k == name:
                 return v
         return None
-    if loc in ("header", "cookie"):
+    if loc == "cookie":
+        h = {k.lower(): v for k, v in (req.get("headers") or {}).items()}.get("cookie", "")
+        for part in h.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return None
+    if loc == "header":
         return {k.lower(): v for k, v in (req.get("headers") or {}).items()}.get(name.lower())
+    if loc == "body":
+        b = body_of(req)
+        return b.decode("utf-8", "replace") if b else None
     return None
 
 
@@ -121,8 +131,15 @@ def set_value(req: dict, param: dict, value, template: str | None = None) -> dic
         pairs = [(k, v) for k, v in pairs if k != name] + [(name, sval)]
         r = with_body(r, encode_query(pairs).encode())
         r.setdefault("headers", {})["content-type"] = "application/x-www-form-urlencoded"
-    elif loc in ("header", "cookie"):
+    elif loc == "cookie":
+        hdrs = r.setdefault("headers", {})
+        key = next((k for k in hdrs if k.lower() == "cookie"), "cookie")
+        kept = [p.strip() for p in hdrs.get(key, "").split(";") if p.strip() and p.strip().partition("=")[0] != name]
+        hdrs[key] = "; ".join(kept + ["%s=%s" % (name, sval)])
+    elif loc == "header":
         r.setdefault("headers", {})[name.lower()] = sval
+    elif loc == "body":                  # the raw request body (an XML document, a serialized blob)
+        r = with_body(r, sval.encode())
     else:
         raise ValueError("unsupported parameter location %r" % loc)
     return r

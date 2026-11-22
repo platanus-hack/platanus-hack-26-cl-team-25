@@ -5,10 +5,12 @@ import json
 import re
 from urllib.parse import parse_qsl, quote, unquote
 
+from immune_contracts import classes
+
 from . import openapi, reqs
 
-CLASS_OF = {"sql": "sqli", "file": "traversal", "owner": "idor", "proc": "rce"}
-PREFERENCE = ("sql", "file", "proc", "owner")   # when several oracles fired (proc = code execution)
+CLASS_OF = classes.CLASS_OF           # oracle kind -> vulnerability class (immune_contracts/classes.py)
+PREFERENCE = classes.PREFERENCE       # when several oracles fired
 ROUTE_MAX, NAME_MAX = 200, 100
 
 
@@ -68,6 +70,10 @@ def derive_param(kind: str, event: dict, req: dict, template: str | None, manife
     if kind == "sql" and detail.get("param"):
         loc = detail.get("location") or "query"
         return {"in": loc, "name": str(detail["param"])}
+    if kind in classes.EFFECT_CLASSES and detail.get("param"):
+        # input -> effect oracles (shadow/effects.py) name the input that reached the effect and where it came from
+        loc, name = str(detail.get("location") or "query"), str(detail["param"])
+        return None if (loc == "path" and name.startswith("path[")) else {"in": loc, "name": name}
     if kind == "file":
         target = str(detail.get("path") or "")
         best = None
@@ -113,18 +119,31 @@ def build(event: dict, spec: dict, manifest: dict | None = None) -> dict:
     if prim is None:
         raise ValueError("evidence without oracle events")
     kind = prim.get("oracle")
-    rq = ev.get("request") or {}
-    method = re.sub(r"[^A-Z-]", "", str(rq.get("method") or "GET").upper())[:16] or "GET"
-    path = str(rq.get("path") or "/")
+    fired_rq = ev.get("request") or {}
+    # multi-step (stored) taint (shadow/taint.py): the firing request (N+M) read a value an earlier request (N) stored.
+    # The controllable input lives in that earlier request, so the incident is attributed to it: its request is what the
+    # positive property replays and where the parameter is. The sink stays the firing request's render/query point.
+    origin = prim.get("origin") or {}
+    base_rq = origin.get("request") or fired_rq
+    method = re.sub(r"[^A-Z-]", "", str(base_rq.get("method") or "GET").upper())[:16] or "GET"
+    path = str(base_rq.get("path") or "/")
     template, _op, _pp = openapi.find(spec, method, path)
     route = template or safe_route(path)
-    req = {"method": method, "path": path, "query": rq.get("query") or "", "body_b64": rq.get("body_b64") or "",
-           "headers": rq.get("headers") or {}}
+    req = {"method": method, "path": path, "query": base_rq.get("query") or "", "body_b64": base_rq.get("body_b64") or "",
+           "headers": base_rq.get("headers") or {}}
     param = derive_param(kind, prim, req, template, manifest)
     if param:
         param["name"] = safe_name(param["name"])
     stack = prim.get("stack") or []
     sink = {"file": stack[-1]["file"], "line": int(stack[-1]["line"])} if stack else {"file": "", "line": 0}
+    steps = None
+    if origin.get("request"):
+        # the two-step PoC: plant the value (origin request), then trigger it (the firing request)
+        fm = re.sub(r"[^A-Z-]", "", str(fired_rq.get("method") or "GET").upper())[:16] or "GET"
+        steps = [{"method": method, "path": path, "query": req["query"], "body_b64": req["body_b64"],
+                  "headers": req["headers"]},
+                 {"method": fm, "path": str(fired_rq.get("path") or "/"), "query": fired_rq.get("query") or "",
+                  "body_b64": fired_rq.get("body_b64") or "", "headers": fired_rq.get("headers") or {}}]
     return {
         "vuln_class": CLASS_OF.get(kind, "other"),
         "oracle": kind,
@@ -137,6 +156,7 @@ def build(event: dict, spec: dict, manifest: dict | None = None) -> dict:
         "sink": sink,
         "evidence_rid": ev.get("rid") or event.get("rid"),
         "request": {"method": method, "path": path, "query": req["query"], "body_b64": req["body_b64"]},
+        "steps": steps,
         "evidence": ev,
         "key": dedupe_key(kind, method, route, param),
         "first_seen": float(event.get("ts") or 0) or None,
@@ -145,5 +165,5 @@ def build(event: dict, spec: dict, manifest: dict | None = None) -> dict:
 
 def public(inc: dict) -> dict:
     """The incident dict handed to the patcher (contracts/interfaces.md)."""
-    keys = ("incident", "vuln_class", "anon", "method", "route", "param", "sink", "evidence_rid", "request", "evidence", "poc")
+    keys = ("incident", "vuln_class", "anon", "method", "route", "param", "sink", "evidence_rid", "request", "steps", "evidence", "poc")
     return {k: inc.get(k) for k in keys}

@@ -51,6 +51,14 @@ Flat keys (all optional except ``app_port``)::
       kind: php-xdebug            # (fleet runs the shadow-only -trace image of the release)
       dir: /tmp/immune-trace      # where the app writes its traces (shared /tmp of the clone)
 
+    native_stack:                 # optional: native call stacks (strace -k) in file/proc/net evidence
+      frame_limit: 48             # frames strace unwinds per syscall (cost grows with it)
+      include: []                 # globs of binaries that count as the app's code (default: everything that is
+                                  # not libc, the loader, an interpreter or a VM)
+      exclude: []
+      path_map: [["/src", "sidecar/examples/c"]]   # compiled source path -> repo path (DWARF paths are build paths)
+      addr2line: addr2line        # resolves file:line when the binary has debug info (-g); else function only
+
 A product config (contracts/product.md §2/§6, with ``app:``/``database:`` sections) is also accepted:
 ``app.port``, ``app.health``, ``app.allowed_file_roots``, ``app.command``, ``app.source_dirs`` map to the
 keys above and a ``sidecar:`` section supplies the rest.
@@ -103,6 +111,7 @@ class Config:
     postgres: PgConfig | None = None
     mysql: MysqlConfig | None = None
     tracer: dict | None = None
+    native_stack: dict | bool | None = None
     openapi: str | None = None          # the app's OpenAPI: literal route segments are not request inputs
     container: str = ""
     tracer_image: str = "immune-strace:1"

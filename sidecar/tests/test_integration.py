@@ -4,6 +4,7 @@ namespace. Same cases as acceptance/shadow/test_shadow.py where they apply.
 
 Run: .venv/bin/pytest sidecar/tests/test_integration.py -q
 """
+import base64
 import json
 import os
 import shutil
@@ -158,6 +159,92 @@ def test_proc_and_net_oracles(stack):
     assert r.headers[wire.H_VERDICT] == "oracle"
 
 
+# ---- input -> effect classes (shadow/effects.py): the request's own input reached the effect ----
+def fired(s, path, params=None, **kw):
+    """(verdict, [oracle kinds], events) of one request, from the evidence the sidecar pushed."""
+    s.clear_evidence()
+    r = get(s, path, params, **kw)
+    ev = last_evidence(s)
+    return r.headers[wire.H_VERDICT], [e["oracle"] for e in (ev or {}).get("events", [])], (ev or {}).get("events", [])
+
+
+def primary(events):
+    """The oracle the pipeline would class the incident by (pipeline/incident.py)."""
+    from pipeline import incident
+    return incident.primary_event({"events": events})["oracle"]
+
+
+def test_cmdi_the_input_is_on_the_command_line(stack):
+    verdict, kinds_, events = fired(stack, "/lookup", {"host": "x; id"})
+    # the spawned `id` also opens /etc/passwd: side effects stay in the evidence, the class is the cause
+    assert verdict == "oracle" and kinds_[0] == "cmdi" and primary(events) == "cmdi"
+    d = events[0]["detail"]
+    assert d["param"] == "host" and d["input"] == "x; id" and d["metachar"] is True and d["argv"][-1].endswith("x; id")
+
+
+def test_ssrf_to_an_address_the_request_named(stack):
+    verdict, kinds_, events = fired(stack, "/fetch", {"url": "http://10.1.2.3/"})
+    assert verdict == "oracle" and kinds_ == ["ssrf"]
+    assert events[0]["detail"]["address"] == "10.1.2.3" and events[0]["detail"]["matched"] == "address"
+
+
+def test_ssrf_to_a_loopback_service_the_request_named(stack):
+    # loopback is the app's own business (its database proxy), but not a port the request pointed it at
+    verdict, kinds_, _ = fired(stack, "/fetch", {"url": "http://127.0.0.1:9/"})
+    assert verdict == "oracle" and kinds_ == ["ssrf"]
+    assert fired(stack, "/search", {"q": "usb"})[:2] == ("clean", [])         # the database proxy still never fires
+
+
+def test_ssrf_by_name_goes_through_the_dns_lookup(stack):
+    verdict, kinds_, events = fired(stack, "/fetch", {"url": "http://internal-svc.corp.invalid/admin"})
+    assert verdict == "oracle" and primary(events) == "ssrf"                  # the resolver also reads /etc/hosts
+    ssrf = [e for e in events if e["oracle"] == "ssrf"]
+    assert len(ssrf) == 1                                                      # the lookup is one event, not two
+    assert ssrf[0]["detail"]["port"] == 53 and ssrf[0]["detail"]["matched"] in ("address", "dns")
+
+
+def test_open_redirect_to_a_host_the_request_named(stack):
+    verdict, kinds_, events = fired(stack, "/redirect", {"next": "https://evil.example/login"})
+    assert verdict == "oracle" and kinds_ == ["redirect"]
+    assert events[0]["detail"]["host"] == "evil.example" and events[0]["detail"]["param"] == "next"
+    assert fired(stack, "/redirect", {"next": "/home"})[:2] == ("clean", [])                       # relative: same site
+    assert fired(stack, "/safe-redirect", {"next": "https://evil.example/login"})[:2] == ("clean", [])
+
+
+def test_ssti_the_response_holds_the_product_of_the_expression(stack):
+    verdict, kinds_, events = fired(stack, "/render", {"tpl": "Hello {{ 91*91 }}"})
+    assert verdict == "oracle" and kinds_ == ["ssti"] and events[0]["detail"]["evaluated"] == "8281"
+    assert fired(stack, "/render", {"tpl": "Hello world"})[:2] == ("clean", [])
+    assert fired(stack, "/safe-render", {"tpl": "Hello {{ 91*91 }}"})[:2] == ("clean", [])         # echoed, not evaluated
+
+
+def test_ssti_effect_a_literal_of_the_expression_reached_a_process(stack):
+    verdict, kinds_, events = fired(stack, "/render", {"tpl": "{{ require('child_process').execSync('id') }}"})
+    assert verdict == "oracle" and "ssti" in kinds_ and "cmdi" not in kinds_
+    assert next(e for e in events if e["oracle"] == "ssti")["detail"]["literal"] == "id"
+
+
+def test_xxe_the_declared_entity_was_read_from_disk(stack):
+    xml = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/hostname">]><r>&x;</r>'
+    stack.clear_evidence()
+    r = httpx.post(stack.url + "/import", content=xml, headers={wire.H_RID: "xxe", wire.H_MODE: "L1",
+                                                               "content-type": "application/xml"}, timeout=20)
+    assert r.headers[wire.H_VERDICT] == "oracle"
+    events = last_evidence(stack)["events"]
+    assert [e["oracle"] for e in events] == ["xxe"] and events[0]["detail"]["entity"] == "file:///etc/hostname"
+    r = httpx.post(stack.url + "/safe-import", content=xml, headers={wire.H_RID: "xxe", wire.H_MODE: "L1",
+                                                                    "content-type": "application/xml"}, timeout=20)
+    assert r.headers[wire.H_VERDICT] == "clean"
+
+
+def test_deser_a_serialized_object_made_the_app_run_a_command(stack):
+    obj = base64.b64encode(json.dumps({"rce": "_$$ND_FUNC$$_function(){return require('child_process').execSync('id').toString()}"}).encode()).decode()
+    verdict, kinds_, events = fired(stack, "/restore", {"obj": obj})
+    assert verdict == "oracle" and primary(events) == "deser"
+    assert next(e for e in events if e["oracle"] == "deser")["detail"]["format"] == "nodejs"
+    assert fired(stack, "/safe-restore", {"obj": obj})[:2] == ("clean", [])
+
+
 def test_grace_period_catches_deferred_effect_and_bounds_it(stack):
     # the app answers, then opens the file 5 ms later (not awaited): inside the 30 ms grace window
     r = get(stack, "/deferred", {"name": "../../etc/hostname", "delay": "5"})
@@ -236,6 +323,31 @@ def test_c_file_oracle(cstack):
     for _ in range(2):
         assert get(cstack, "/download", {"name": "manual.v1.txt"}).headers[wire.H_VERDICT] == "clean"
     assert get(cstack, "/safe-download", {"name": "../../etc/hostname"}).headers[wire.H_VERDICT] == "inconclusive"
+
+
+@pytest.fixture(scope="module")
+def cdynstack():
+    s = Stack(tag="d" + os.urandom(2).hex(), app="cdyn").up()
+    yield s
+    print(s.logs(s.sc)[-3000:])
+    s.down()
+
+
+def test_c_file_event_carries_the_native_stack_of_the_sink(cdynstack):
+    """The compiled app is observed from outside, yet the evidence says where in its code the file was opened:
+    strace -k frames + addr2line (the demo is built with -g and linked dynamically: strace's unwinder loses the
+    frames of a static glibc), mapped back to the repo path."""
+    cdynstack.clear_evidence()
+    r = get(cdynstack, "/download", {"name": "../../etc/hostname"}, rid="c-stack")
+    assert r.headers[wire.H_VERDICT] == "oracle"
+    ev = next(e for e in last_evidence(cdynstack)["events"] if e["oracle"] == "file")
+    stack = ev["stack"]
+    assert stack, "native_stack is on: the file event must carry frames"
+    sink = stack[-1]
+    # fopen() in serve_file(), called from handle() (the compiler may inline the former into the latter)
+    assert sink["file"] == "sidecar/examples/c/app.c" and sink["func"] in ("serve_file", "handle")
+    assert 162 <= sink["line"] <= 163
+    assert all(set(f) == {"file", "line", "func"} and isinstance(f["line"], int) for f in stack)
 
 
 def test_c_owner_oracle_via_identity_command(cstack):

@@ -19,10 +19,11 @@ import sys
 import time
 
 from immune_contracts import wire
+from shadow import effects as shadow_effects
 
 from . import config as cfgmod
 from . import constants as constmod
-from . import http1, identity, mysqlclient, observer, pgclient, phptrace, sqllog
+from . import http1, identity, mysqlclient, nativestack, observer, pgclient, phptrace, sqllog
 from .learn import H_LEARN, learn_message
 from .mysqlproxy import MysqlProxy, written_tables
 from .pgproxy import PgProxy
@@ -32,18 +33,27 @@ log = logging.getLogger("sidecar")
 WARMUP_MISSING = "/__sidecar_warmup__/missing"
 
 
+def _frame_limit(native_stack) -> int:
+    return int((native_stack or {}).get("frame_limit") or 48) if isinstance(native_stack, dict) else 48
+
+
 class Sidecar:
     def __init__(self, cfg: cfgmod.Config):
         self.cfg = cfg
         self.env = dict(os.environ)
         self.file_markers = observer.load_file_markers(cfg.markers_path)   # planted secrets: marker -> file
-        self.obs = observer.from_config(cfg, self.file_markers)
+        # native call stacks for file/proc/net evidence (strace -k + addr2line); the app's filesystem is seen
+        # through the tracer's root (attach: /proc/<pid>/root)
+        self.stacker = nativestack.Stacker.from_config(cfg.native_stack,
+                                                       root=lambda: self.tracer.root_dir() if self.tracer else "/")
+        self.obs = observer.from_config(cfg, self.file_markers, stacker=self.stacker)
         self.ident = identity.Identity(identity.load_profile(cfg.profile), cfg.identity_command)
         self.markers = self.ident.markers(self.env, cfg.markers_path)
         self.public = self.ident.public_paths(cfg.public_paths)
         self.tracer = Tracer(self.obs.on_obs, mode=cfg.mode, command=cfg.command, anchor=cfg.target_pid,
                              container=cfg.container, image=cfg.tracer_image, label=cfg.tracer_label,
-                             attempts=bool(self.obs.protected), on_attach=self._reattached) \
+                             attempts=bool(self.obs.protected), on_attach=self._reattached,
+                             stack=_frame_limit(cfg.native_stack) if self.stacker else 0) \
             if cfg.trace else None
         self.sqllog = sqllog.LogFollower(cfg.sql_log_cmd, cfg.sql_dialect, self.obs.on_statement) \
             if cfg.sql_log_cmd else None
@@ -377,7 +387,8 @@ class Sidecar:
             events = [e for e in events if e["detail"]["reason"] != "token"]
         events += sqllog.structure_events(self.baseline, rec.statements + failed, self.baseline_dialect,
                                           skip={e["detail"]["statement"] for e in events})
-        events += observer.marker_events(self.file_markers, rh, rbody, self.obs.system_events(rec))
+        events += observer.marker_events(self.file_markers, rh, rbody,
+                                         self.obs.system_events(rec, shadow_effects.input_hosts(inputs)))
         events += observer.owner_events(self.markers, self.public, path, rh, rbody, uid, role, bool(events))
         # profile oracles (optional, app-specific; e.g. openemr_identity replays the authorization the app
         # skipped and flags stored active markup): same event shape, same verdict machinery, never fatal
@@ -394,6 +405,9 @@ class Sidecar:
                 events += got or []
             except Exception as e:  # noqa: BLE001
                 log.warning("rid=%s profile oracle failed: %r", rid, e)
+        # input -> effect classes (ssrf, cmdi, ssti, deser, xxe, redirect): the request's own input reached the effect
+        events = shadow_effects.refine(events, inputs, {"headers": client_h, "body": body},
+                                       {"status": status, "headers": rh, "body": observer.decoded_body(rh, rbody)})
         if events and self.calltrace:
             try:   # where in the app's code: never changes the verdict
                 await asyncio.to_thread(self.calltrace.attach, events)
