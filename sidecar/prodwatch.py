@@ -1,9 +1,10 @@
-"""python -m sidecar.marker.prodwatch : the syscall oracles on PRODUCTION, alert only (never blocks, never slows).
+"""python -m sidecar.prodwatch : the syscall oracles on PRODUCTION, alert only (never blocks, never slows).
 
 The clone only sees what the gateway sends it. If a payload is classified clean, or traffic reaches the app
 without passing the gateway, it runs in prod: this watcher is what notices. For each prod container it runs
 an eBPF tracer (bpftrace, filtered by the container's cgroup: no ptrace, the app is not stopped) on
-openat / execve / connect and applies the same policy as the sidecar (sidecar/marker/syscalls.py).
+openat / execve / connect and applies the same rules as the sidecar: same config file, same observer
+(sidecar/observer.py), minus `prod_ignore`.
 
 On a policy hit:
   1. find the requests the gateway recorded as sent to prod around that instant (RECORD_PATH);
@@ -17,7 +18,7 @@ No candidate means the traffic bypassed the gateway, or the app did it on its ow
 Detection after the fact: the request already ran in prod. What this buys is knowing, and the rule before the
 next attempt. What a container does in its first PROD_GRACE_S seconds (start-up) is learnt as normal.
 
-env: PROD_CONTAINERS (comma separated; the ones not running are waited for), SYSCALL_POLICY, MARKERS_PATH,
+env: PROD_CONTAINERS (comma separated; the ones not running are waited for), SIDECAR_CONFIG, MARKERS_PATH,
      RECORD_PATH, REPRO_URL (sidecar), BUS_URL, BUS_TOKEN, RUN_ID, BPF_IMAGE, PROD_GRACE_S, PROD_COOLDOWN_S.
 The tracer container is --privileged (eBPF needs it); it has no network and runs a fixed program.
 """
@@ -38,19 +39,20 @@ import httpx
 
 from immune_contracts import events as E
 from immune_contracts import wire
-from .syscalls import Policy, parse_line
+from . import config as cfgmod
+from . import observer, strace
 
 log = logging.getLogger("prodwatch")
 
 PROGRAM = r'''
-tracepoint:syscalls:sys_enter_openat /cgroup == cgroupid("CG")/ { printf("openat(AT_FDCWD, \"%s\", X <unfinished ...>\n", str(args->filename)); }
-tracepoint:syscalls:sys_enter_execve /cgroup == cgroupid("CG")/ { printf("execve(\"%s\", [], 0 <unfinished ...>\n", str(args->filename)); }
+tracepoint:syscalls:sys_enter_openat /cgroup == cgroupid("CG")/ { printf("openat(AT_FDCWD, \"%s\", O_RDONLY) = 3\n", str(args->filename)); }
+tracepoint:syscalls:sys_enter_execve /cgroup == cgroupid("CG")/ { printf("execve(\"%s\", [], 0) = 0\n", str(args->filename)); }
 tracepoint:syscalls:sys_enter_connect /cgroup == cgroupid("CG")/ {
   $sa = (struct sockaddr *)args->uservaddr;
   if ($sa->sa_family == 2) { $s = (struct sockaddr_in *)$sa;
-    printf("connect(0, {sa_family=AF_INET, sin_port=htons(%d), sin_addr=inet_addr(\"%s\")}, 16 <unfinished ...>\n", bswap($s->sin_port), ntop($s->sin_addr.s_addr)); }
+    printf("connect(0, {sa_family=AF_INET, sin_port=htons(%d), sin_addr=inet_addr(\"%s\")}, 16) = 0\n", bswap($s->sin_port), ntop($s->sin_addr.s_addr)); }
   if ($sa->sa_family == 10) { $t = (struct sockaddr_in6 *)$sa;
-    printf("connect(0, {sa_family=AF_INET6, sin6_port=htons(%d), inet_pton(AF_INET6, \"%s\", &sin6_addr)}, 28 <unfinished ...>\n", bswap($t->sin6_port), ntop($t->sin6_addr.in6_u.u6_addr8)); }
+    printf("connect(0, {sa_family=AF_INET6, sin6_port=htons(%d), inet_pton(AF_INET6, \"%s\", &sin6_addr)}, 28) = 0\n", bswap($t->sin6_port), ntop($t->sin6_addr.in6_u.u6_addr8)); }
 }
 '''
 HOP = {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}
@@ -126,10 +128,11 @@ def replay(sidecar: str, rec: dict, client: httpx.Client) -> str:
 
 
 class Watch:
-    def __init__(self, policy: Policy, record_path: str = "", sidecar: str = "", bus_url: str = "",
+    def __init__(self, obs: observer.Observer, record_path: str = "", sidecar: str = "", bus_url: str = "",
                  bus_token: str = "", run: str = "", grace_s: float = 15.0, cooldown_s: float = 30.0,
                  client: httpx.Client | None = None):
-        self.policy, self.record_path, self.sidecar = policy, record_path, sidecar.rstrip("/")
+        self.obs, self.record_path, self.sidecar = obs, record_path, sidecar.rstrip("/")
+        self.parser = strace.Parser()
         self.bus_url, self.bus_token, self.run = bus_url.rstrip("/"), bus_token, run
         self.grace_s, self.cooldown_s = grace_s, cooldown_s
         self.client = client or httpx.Client(timeout=20)
@@ -151,10 +154,20 @@ class Watch:
     def observe(self, container: str, started: float, line: str, now: float | None = None):
         """One tracer line. Returns the alert dict if it produced one."""
         now = now or time.time()
-        ev = parse_line("%.6f %s" % (now, line))
-        if not ev or not self.policy.relevant(ev):
+        try:
+            sc = self.parser.feed(line)
+            o = strace.observe(sc) if sc else None
+        except Exception:       # noqa: BLE001  (a path with quotes: bpftrace does not escape)
+            o = None
+        if o is None:
             return None
-        k = (container, ev["kind"], ev["key"])
+        rec = observer.Record()
+        rec.obs.append(o)
+        events = self.obs.system_events(rec)     # the sidecar's rules, on this one observation
+        if not events:
+            return None
+        ev = dict(events[0], ts=now)
+        k = (container, ev["oracle"], json.dumps(ev["detail"], sort_keys=True))
         if now - started < self.grace_s:
             self.normal.add(k)
             return None
@@ -164,12 +177,7 @@ class Watch:
         return self.alert(container, ev)
 
     def alert(self, container: str, ev: dict) -> dict:
-        if ev["kind"] == "proc":
-            detail = {"event": "execve", "args": ev["args"]}
-        elif ev["kind"] == "net":
-            detail = {"event": "connect", "address": ev["address"]}
-        else:
-            detail = {"path": ev["path"], "realpath": ev["realpath"]}
+        detail = ev["detail"]
         cands, confirmed, note = [], [], ""
         if self.record_path:
             time.sleep(max(0.0, ev["ts"] + 1.0 - time.time()))      # the gateway records when the response ends
@@ -187,9 +195,9 @@ class Watch:
             note = "none of the %d candidate request(s) fired on the shadow clone" % len(cands)
         else:
             note = "a request in flight at that instant fires on the shadow clone; the pipeline has the evidence"
-        data = {"container": container, "oracle": ev["kind"], "detail": dict(detail, observed="prod-syscall"),
+        data = {"container": container, "oracle": ev["oracle"], "detail": dict(detail, observed="prod-syscall"),
                 "candidates": len(cands), "confirmed": confirmed, "note": note}
-        log.warning("PROD ALERT %s %s on %s: %s", ev["kind"], ev["key"], container, note)
+        log.warning("PROD ALERT %s %s on %s: %s", ev["oracle"], json.dumps(detail), container, note)
         self.alerts.append(data)
         self.publish(data)
         return data
@@ -237,13 +245,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     env = os.environ
-    paths = []
-    if env.get("MARKERS_PATH"):
-        with open(env["MARKERS_PATH"]) as f:
-            paths = [v.get("path", "") if isinstance(v, dict) else str(v) for v in json.load(f).values()]
-    policy = Policy.load(env.get("SYSCALL_POLICY", ""), paths)
-    policy.protected = [p for p in policy.protected if p not in policy.prod_ignore]
-    w = Watch(policy, env.get("RECORD_PATH", ""), env.get("REPRO_URL", ""), env.get("BUS_URL", ""),
+    cfg = cfgmod.load(env.get("SIDECAR_CONFIG"))
+    # the watcher sees only what the config protects: on prod "outside the allowed roots" would be all noise
+    obs = observer.from_config(cfg, observer.load_file_markers(cfg.markers_path), extra_allow=cfg.prod_ignore)
+    if not obs.protected:
+        obs.protected = ["\0"]      # nothing protected: the file rule never fires (proc and net still do)
+    w = Watch(obs, env.get("RECORD_PATH", ""), env.get("REPRO_URL", ""), env.get("BUS_URL", ""),
               env.get("BUS_TOKEN", ""), env.get("RUN_ID", ""), float(env.get("PROD_GRACE_S", "15")),
               float(env.get("PROD_COOLDOWN_S", "30")))
     names = [c for c in env.get("PROD_CONTAINERS", "").split(",") if c]

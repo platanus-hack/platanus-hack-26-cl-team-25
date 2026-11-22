@@ -33,8 +33,9 @@ import httpx
 import yaml
 
 from patcher import claude_cli
-from sidecar.marker.core import find_markers, oracle_events
-from sidecar.marker.syscalls import Policy, SyncTracer, tracer_cmd
+from sidecar import config as sidecar_config
+from sidecar import observer as sidecar_observer
+from sidecar.tracer import Tracer
 
 from . import poc as pocmod
 from .config import REPO_ROOT
@@ -111,15 +112,17 @@ def wait_health(base: str, path: str, timeout: float = 90.0) -> bool:
 def describe(event: dict) -> str:
     """One oracle event in words, for the prompt and the gate output."""
     d, how = event.get("detail") or {}, ""
-    if "syscall" in str(d.get("observed", "")):
+    if d.get("observed", "syscall") != "response":      # only a marker in the response carries observed=response
         how = " (seen as a system call of the app process%s)" % (
             "; the call failed with %s, the attempt is the bug" % d["result"]
-            if d.get("result") not in (None, "ok", "?", "EINPROGRESS") else "")
+            if event.get("oracle") == "file" and d.get("result") else "")
     if event.get("oracle") == "proc":
-        return "the app executed the program `%s`%s" % (" ".join(d.get("args") or [])[:200], how)
+        if "argv" not in d:
+            return "the app started a new process (%s)%s" % (d.get("syscall", "fork"), how)
+        return "the app executed the program `%s`%s" % (" ".join(d.get("argv") or [d.get("path", "?")])[:200], how)
     if event.get("oracle") == "net":
-        return "the app opened a connection to `%s`%s" % (d.get("address", "?"), how)
-    verb = "returned the contents of" if "response" in str(d.get("observed", "response")) else "opened"
+        return "the app opened a connection to `%s:%s`%s" % (d.get("address", "?"), d.get("port", "?"), how)
+    verb = "returned the contents of" if "response" in str(d.get("observed", "")) else "opened"
     return "the app %s `%s`, a file outside what this route serves%s" % (verb, d.get("path", "?"), how)
 
 
@@ -297,35 +300,42 @@ class ExtFix:
     def g_poc(self, inc, a: Attempt, base: str) -> str:
         """No oracle may fire on the candidate: no marker in a response and, with `oracles` configured, no
         protected file opened, program executed or address connected while serving the request."""
-        with open(os.path.join(self.rt, "shadow", "markers.json")) as f:
-            markers = json.load(f)
+        markers = sidecar_observer.load_file_markers(os.path.join(self.rt, "shadow", "markers.json"))
         p = inc["poc"]
         reqs = [("regression", p["requests"][-1])] + pocmod.mutate(inc, p)
         orc = self.t.get("oracles")
-        tracer = None
-        if orc:
-            name = "%s-candidate" % self.prefix
-            policy = Policy.load(orc.get("policy", ""), [m.get("path", "") for m in markers.values()])
-            tracer = SyncTracer(tracer_cmd(name, orc.get("image", "immune-strace:1"), name + "-strace",
-                                           "immune.lab=grafana"), policy, name=name + "-strace")
+        obs = tracer = None
+        grace = 0.0
+        if orc:     # the sidecar's own observer and tracer (same config as the shadow's sidecar), on the candidate
+            cfg = sidecar_config.load(orc["config"], env={})
+            obs = sidecar_observer.from_config(cfg, markers)
+            tracer = Tracer(obs.on_obs, mode="docker", container="%s-candidate" % self.prefix,
+                            image=cfg.tracer_image, label=cfg.tracer_label, attempts=bool(obs.protected))
+            grace = max(cfg.grace_ms, 50) / 1000
         try:
             if tracer:
-                tracer.__enter__()
-                if not tracer.wait_attached(lambda: raw_get(base, self.t["app"]["health"])):
-                    raise RuntimeError("syscall tracer did not attach to the candidate: %s"
-                                       % " | ".join(tracer.output[-3:]))
+                tracer.start(15)
+                obs.learning = True     # warm-up: what a legitimate request opens is not a finding
+                for _ in range(2):
+                    raw_get(base, self.t["app"]["health"])
+                time.sleep(grace)
+                obs.learning = False
             for name, rq in reqs:
                 target = rq["path"] + ("?" + rq["query"] if rq.get("query") else "")
-                t0 = time.time()
+                if obs:
+                    obs.begin()
                 r = raw_get(base, target)
-                seen = tracer.window(t0, time.time()) if tracer else []
-                events = oracle_events(find_markers(r.content, markers), seen)
+                system = []
+                if obs:
+                    time.sleep(grace)
+                    system = obs.system_events(obs.end())
+                events = sidecar_observer.marker_events(markers, dict(r.headers), r.content, system)
                 if events:
                     raise GateFail("poc", "%s still fires the %s oracle (status %d): %s; request: %s" % (
                         name, events[0]["oracle"], r.status_code, describe(events[0]), target))
         finally:
             if tracer:
-                tracer.__exit__(None, None, None)
+                tracer.stop()
         return "regression + %d variants: no oracle fires (%s)" % (
             len(reqs) - 1, "response markers + syscalls" if tracer else "response markers")
 

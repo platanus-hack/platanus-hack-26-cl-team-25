@@ -4,14 +4,17 @@ import httpx
 
 from immune_contracts import events as E
 from immune_contracts import wire
-from sidecar.marker.prodwatch import PROGRAM, Watch, candidates, tracer_cmd
-from sidecar.marker.syscalls import Policy
+from sidecar.observer import Observer
+from sidecar.prodwatch import PROGRAM, Watch, candidates, tracer_cmd
 
-POLICY = Policy(["/etc/grafana/grafana.ini", "/etc/shadow"], [], ["*:53"])
-OPEN = 'openat(AT_FDCWD, "/etc/grafana/grafana.ini", X <unfinished ...>'
-EXEC = 'execve("/bin/sh", [], 0 <unfinished ...>'
-CONN = 'connect(0, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("203.0.113.9")}, 16 <unfinished ...>'
 
+def policy():
+    return Observer([], protected=["/etc/grafana/grafana.ini", "/etc/shadow"], net_allow=["*:53"])
+
+
+OPEN = 'openat(AT_FDCWD, "/etc/grafana/grafana.ini", O_RDONLY) = 3'
+EXEC = 'execve("/bin/sh", [], 0) = 0'
+CONN = 'connect(0, {sa_family=AF_INET, sin_port=htons(4444), sin_addr=inet_addr("203.0.113.9")}, 16) = 0'
 
 def rec(path, ts, ms=20.0, route="prod", **kw):
     return dict({"method": "GET", "path": path, "query": "", "headers": {"host": "x", "accept": "*/*"},
@@ -34,13 +37,13 @@ def make(tmp_path, verdicts):
         sent.append((req.extensions.get("target"), req.headers.get(wire.H_MODE)))
         return httpx.Response(200, headers={wire.H_VERDICT: verdicts.get(req.url.path, "clean")})
     path = tmp_path / "requests.jsonl"
-    w = Watch(POLICY, str(path), "http://sidecar:1", "http://bus", "t", "run1", grace_s=15, cooldown_s=30,
+    w = Watch(policy(), str(path), "http://sidecar:1", "http://bus", "t", "run1", grace_s=15, cooldown_s=30,
               client=httpx.Client(transport=httpx.MockTransport(handler)))
     return w, path, sent, bus
 
 
 def test_alert_replays_candidates_and_publishes(tmp_path, monkeypatch):
-    monkeypatch.setattr("sidecar.marker.prodwatch.time.sleep", lambda s: None)
+    monkeypatch.setattr("sidecar.prodwatch.time.sleep", lambda s: None)
     w, path, sent, bus = make(tmp_path, {"/evil": "oracle"})
     path.write_text("\n".join(json.dumps(r) for r in [rec("/api/health", 5000.05), rec("/evil", 5000.1)]) + "\n")
     a = w.observe("prod-blue", started=1000.0, line=OPEN, now=5000.0)
@@ -53,19 +56,19 @@ def test_alert_replays_candidates_and_publishes(tmp_path, monkeypatch):
 
 
 def test_startup_is_learnt_cooldown_and_bypass(tmp_path, monkeypatch):
-    monkeypatch.setattr("sidecar.marker.prodwatch.time.sleep", lambda s: None)
+    monkeypatch.setattr("sidecar.prodwatch.time.sleep", lambda s: None)
     w, path, sent, bus = make(tmp_path, {})
     assert w.observe("prod-green", started=1000.0, line=OPEN, now=1005.0) is None      # start-up: reads its config
     assert w.observe("prod-green", started=1000.0, line=OPEN, now=2000.0) is None      # learnt as normal
-    assert w.observe("prod-green", 1000.0, 'openat(AT_FDCWD, "/usr/share/x.js", X <unfinished ...>', 2000.0) is None
+    assert w.observe("prod-green", 1000.0, 'openat(AT_FDCWD, "/usr/share/x.js", O_RDONLY) = 3', 2000.0) is None
     assert w.observe("prod-green", 1000.0, 'connect(0, {sa_family=AF_INET, sin_port=htons(53), '
-                     'sin_addr=inet_addr("127.0.0.11")}, 16 <unfinished ...>', 2000.0) is None      # allowlisted
+                     'sin_addr=inet_addr("10.0.0.2")}, 16) = 0', 2000.0) is None      # allowlisted
     a = w.observe("prod-green", started=1000.0, line=EXEC, now=2000.0)
     assert a["oracle"] == "proc" and a["candidates"] == 0 and "bypassed" in a["note"] and not sent
     assert w.observe("prod-green", started=1000.0, line=EXEC, now=2010.0) is None      # cooldown
     assert w.observe("prod-green", started=1000.0, line=EXEC, now=2040.0) is not None
     n = w.observe("prod-green", started=1000.0, line=CONN, now=2000.0)
-    assert n["oracle"] == "net" and n["detail"]["address"] == "203.0.113.9:4444"
+    assert n["oracle"] == "net" and (n["detail"]["address"], n["detail"]["port"]) == ("203.0.113.9", 4444)
     assert [b["data"]["oracle"] for b in bus] == ["proc", "proc", "net"]
 
 
